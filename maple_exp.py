@@ -16,6 +16,8 @@ inside %APPDATA%.
 import ctypes
 import json
 import os
+import urllib.request
+import webbrowser
 import queue
 import re
 import hashlib
@@ -48,8 +50,8 @@ except Exception:
     except Exception:
         pass
 
-VERSION = "0.9.0-beta"
-WINDOW_TITLE = f"Maple EXP/hr  v{VERSION}"
+VERSION = "0.9.1-beta"
+WINDOW_TITLE = "Maple EXP/hr"                 # the version is shown in Settings
 
 # Files that come with the program (inside the .exe when packaged), the folder it runs from,
 # and the folder for your settings, log and learned digits (MAPLE_EXP_DATA can override it).
@@ -72,7 +74,11 @@ MESOS_PATH = DATA_DIR / "mesos_digits.npz"             # learned as you play...
 MESOS_START_PATH = ASSETS / "mesos_digits.npz"          # ...starting from these
 MESOS_BOX_PATH = ASSETS / "mesos_box.npz"
 SCAN_SECONDS = 4            # how often the whole window is checked for the inventory and party
-DEFAULTS = {"gap_seconds": 15, "transparency": 0, "topmost": True}
+DEFAULTS = {"gap_seconds": 15, "transparency": 0, "topmost": True,
+            "check_updates": True, "skip_version": ""}
+GITHUB_REPO = "beanguri/Maplestory-Classic-EXP-Meso-Tracker"
+RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
+LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
 # EXP needed to finish each level in MapleStory Classic World (index 0 = level 1),
 # from meowdb.com/msclassic/guides/exp-table-level-1-to-100.
@@ -119,16 +125,41 @@ def log_error(what, exc=None):
 
 
 def load_config():
+    """The saved settings, with anything missing or damaged replaced by the defaults."""
     try:
-        return json.loads(CONFIG_PATH.read_text())
-    except Exception:
-        return {}
+        cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        cfg = {}
+    except Exception as e:
+        log_error("reading settings (using the defaults)", e)
+        cfg = {}
+    if not isinstance(cfg, dict):
+        cfg = {}
+    for key, default in DEFAULTS.items():
+        value = cfg.get(key)
+        if type(value) is not type(default) or (key == "gap_seconds" and not 1 <= value <= 3600):
+            cfg[key] = default
+    cfg["transparency"] = min(90, max(0, cfg["transparency"]))
+    ints = lambda v, n: isinstance(v, list) and len(v) == n and all(type(x) is int for x in v)
+    checks = {"pos": lambda v: ints(v, 2), "log_size": lambda v: ints(v, 2) and min(v) >= 100,
+              "mesos_box": lambda v: ints(v, 6), "mode": lambda v: v in ("window", "region"),
+              "region": lambda v: isinstance(v, dict) and all(type(v.get(k)) is int and (
+                  k in ("left", "top") or v[k] > 0) for k in ("left", "top", "width", "height")),
+              "log_columns": lambda v: isinstance(v, dict), "log_open": lambda v: type(v) is bool}
+    for key, ok in checks.items():
+        if key in cfg and cfg[key] is not None and not ok(cfg[key]):
+            del cfg[key]
+    if cfg.get("mode") == "region" and not cfg.get("region"):
+        cfg["mode"] = "window"
+    return cfg
 
 
 def save_config(cfg):
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        CONFIG_PATH.write_text(json.dumps(cfg, indent=2))
+        tmp = CONFIG_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+        os.replace(tmp, CONFIG_PATH)                    # never leaves a half-written file
     except Exception as e:
         log_error("saving settings", e)
 
@@ -159,6 +190,43 @@ def find_tesseract():
     return None
 
 
+# --------------------------------------------------------------------------- updates
+#
+# At start (unless turned off in Settings) it asks GitHub for the latest release, the only
+# time it goes online. Nothing about you or the game is sent.
+
+def version_key(version):
+    """'v0.9.1-beta' -> something to compare versions by. A full release beats its betas."""
+    main, _, pre = version.strip().lstrip("vV").partition("-")
+    nums = [int(x) for x in re.findall(r"\d+", main)[:3]]
+    return tuple(nums + [0] * (3 - len(nums))), 0 if pre else 1, pre
+
+
+def _plain_text(markdown):
+    """Release notes from GitHub, readable as plain text."""
+    t = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", markdown)          # [text](link) -> text
+    t = re.sub(r"[*_`]{1,3}", "", t)
+    t = re.sub(r"^#+\s*", "", t, flags=re.M)
+    t = re.sub(r"^\s*[-*]\s+", "• ", t, flags=re.M)
+    t = re.sub(r"\n{3,}", "\n\n", t.replace("\r", ""))
+    return t.strip()[:5000]
+
+
+def check_for_update(timeout=8):
+    """(newer version, its release notes) if GitHub has a newer release, else None.
+    Raises if GitHub can't be reached."""
+    request = urllib.request.Request(LATEST_RELEASE_API, headers={
+        "User-Agent": f"MapleEXP/{VERSION}", "Accept": "application/vnd.github+json"})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        data = json.loads(response.read(1_000_000).decode("utf-8"))
+    tag = str(data.get("tag_name", ""))
+    if not re.fullmatch(r"v?\d+(\.\d+){0,2}(-[\w.]+)?", tag):
+        raise ValueError(f"unexpected release name {tag[:40]!r}")
+    if version_key(tag) <= version_key(VERSION):
+        return None
+    return tag.lstrip("vV"), _plain_text(str(data.get("body") or ""))
+
+
 # --------------------------------------------------------------------------- game window
 
 _user32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -187,7 +255,6 @@ _QueryFullProcessImageName = _api(_kernel32.QueryFullProcessImageNameW, wintypes
 _CloseHandle = _api(_kernel32.CloseHandle, wintypes.BOOL, wintypes.HANDLE)
 _GetAncestor = _api(_user32.GetAncestor, wintypes.HWND, wintypes.HWND, wintypes.UINT)
 _GetWindowRect = _api(_user32.GetWindowRect, wintypes.BOOL, wintypes.HWND, ctypes.POINTER(wintypes.RECT))
-_FindWindow = _api(_user32.FindWindowW, wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR)
 _ShowWindow = _api(_user32.ShowWindow, wintypes.BOOL, wintypes.HWND, ctypes.c_int)
 _SetForegroundWindow = _api(_user32.SetForegroundWindow, wintypes.BOOL, wintypes.HWND)
 _CreateMutex = _api(_kernel32.CreateMutexW, wintypes.HANDLE, wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR)
@@ -323,12 +390,15 @@ def find_exp(bgr):
         if len(inside) < 2 or any(b.h > 1.25 * bh for b in inside):
             continue
         # The EXP number ends right before '['; walk left until a gap or the taller label.
-        run, edge, dh = [], o.x, None
+        # Digit height comes from the % digits (same font): a single digit can be shorter
+        # when the game scales its font by an odd amount (a '1' was 9 px next to 11 px digits).
+        dh = float(np.median([b.h for b in inside]))
+        run, edge = [], o.x
         for b in sorted((b for b in line if b.x + b.w <= o.x), key=lambda b: -b.x):
-            if edge - (b.x + b.w) > 2.0 * bh or b.h > 1.25 * bh or (dh and b.h > 1.15 * dh):
+            if edge - (b.x + b.w) > 2.0 * bh or b.h > 1.25 * bh or b.h > 1.15 * dh:
                 break
             run.append(b)
-            edge, dh = b.x, dh or b.h
+            edge = b.x
         if not run:
             continue                                          # HP/MP: label before '['
         run.reverse()
@@ -497,6 +567,19 @@ def level_for_req(req):
     return None
 
 
+def levels_for(exp, pct):
+    """The levels whose EXP requirement fits exp at pct% (% is shown with 2 decimals)."""
+    req, err = exp / (pct / 100), 0.002 + 0.01 / pct
+    return [level for level, need in enumerate(EXP_TABLE, start=1)
+            if abs(req - need) <= err * need and exp < need]
+
+
+def fits_exp_table(exp, pct):
+    """True if exp at pct% matches some level's EXP requirement. A misread almost never does
+    (e.g. '1 [71.68%]' for '68,601 [71.68%]'), so a reading that doesn't isn't trusted."""
+    return pct < 0.2 or bool(levels_for(exp, pct))      # under 0.2%: too little EXP to tell
+
+
 def _whiteness(bgr):
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
     return np.clip((hsv[..., 2] - 150) / 90, 0, 1) * np.clip((80 - hsv[..., 1]) / 50, 0, 1)
@@ -659,32 +742,58 @@ def mesos_layout(bgr, field):
 MESOS_FIRST, MESOS_PITCH, MESOS_COMMA = 0.36, 0.447, 0.30
 
 
+def _mesos_spot(field, i):
+    """x of the i-th digit from the right in the mesos box (i = -1: just right of them)."""
+    x, y, w, h = field
+    return x + w - (MESOS_FIRST + i * MESOS_PITCH + (max(i, 0) // 3) * MESOS_COMMA) * h
+
+
+def _mesos_strokes(bgr, field):
+    """A Layout for matching digits in the mesos box: how much darker each pixel is than
+    the box around it (works solid or see-through)."""
+    x, y, w, h = field
+    V = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)[..., 2].astype(np.float32)
+    k = max(3, int(round(0.35 * 0.615 * h)) | 1)
+    strokes = cv2.morphologyEx(V, cv2.MORPH_CLOSE, np.ones((k, k), np.uint8)) - V
+    return Layout(0.615 * h, y + 0.525 * h, [], [], (0, 0, 0, 0), strokes)
+
+
+def mesos_box_lines_up(bgr, field, templates):
+    """For a box found by its outline: does its right edge line up with the number? The
+    first digit must match very clearly (in the wrong place the box's border can pass for
+    a '1'), and just right of it there must be no digit (else the box is a digit too far
+    left and the number would be read short)."""
+    lay, h = _mesos_strokes(bgr, field), field[3]
+    _, first, _ = templates.match(lay, (_mesos_spot(field, 0), 0.4 * h, "digit"))
+    _, after, _ = templates.match(lay, (_mesos_spot(field, -1), 0.4 * h, "digit"))
+    return first >= 0.85 and after < 0.84
+
+
 def read_mesos_positions(bgr, field, templates, digit_count=None):
     """Reads the mesos box digit by digit at the spots the game draws them.
 
     Nothing has to be separated from the background first, so it also works when the
     inventory is see-through over a busy background. Every spot must clearly be a digit
-    or clearly not one, and once the number ends the next few spots to its left must not
-    look like digits, so a digit lost in a busy background can't silently shorten the
+    or clearly not one, and once the number ends none of the next few spots to its left
+    may be a clear digit, so a digit lost in a busy background can't silently shorten the
     number from the middle. If digit_count is given, the number must have exactly that many digits (which
     also catches a lost first digit). Returns (number, Layout, weakest score, weakest lead),
     or None.
     """
     x, y, w, h = field
-    V = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)[..., 2].astype(np.float32)
-    k = max(3, int(round(0.35 * 0.615 * h)) | 1)
-    strokes = cv2.morphologyEx(V, cv2.MORPH_CLOSE, np.ones((k, k), np.uint8)) - V
-    lay = Layout(0.615 * h, y + 0.525 * h, [], [], (0, 0, 0, 0), strokes)
+    lay = _mesos_strokes(bgr, field)
     digits, cells, scores, leads, ended = "", [], [], [], 0
     for i in range(16):
-        cx = x + w - (MESOS_FIRST + i * MESOS_PITCH + (i // 3) * MESOS_COMMA) * h
+        cx = _mesos_spot(field, i)
         if cx - 0.3 * h < x:
             break
         digit, score, lead = templates.match(lay, (cx, 0.4 * h, "digit"))
         empty = bool(digits) and score < 0.65
         if ended:
-            if not empty:
-                return None                           # something digit-like after the end
+            # A clear digit after the end means one was missed in between. (Only a clear
+            # one: a see-through box's background often looks a little digit-like.)
+            if score >= 0.75 and lead >= 0.05:
+                return None
             ended += 1
             if ended > 3:
                 break
@@ -698,6 +807,9 @@ def read_mesos_positions(bgr, field, templates, digit_count=None):
             return None                               # unclear: don't guess
     if not digits or (len(digits) > 1 and digits[0] == "0"):
         return None
+    if scores[-1] < 0.85:
+        return None          # the first digit must be very clear: a see-through box's background
+                             # can pass for an extra '1' in front (real first digits score ~0.95)
     if digit_count and len(digits) != digit_count:
         return None
     return int(digits), lay._replace(exp=cells), min(scores), min(leads)
@@ -774,8 +886,8 @@ class MesosDigits:
             try:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
                 np.savez(self.path, canon=CANON, **{f"d{k}": np.stack(v) for k, v in self.examples.items()})
-            except Exception:
-                pass
+            except Exception as e:
+                log_error("saving the learned mesos digits", e)
 
 
 def _edges(bgr):
@@ -816,22 +928,45 @@ class MesosBoxFinder:
         np.savez(path, edges=edges, mask=mask, box=np.float32([(x - x0) * s, (y - y0) * s, w * s, h * s]))
 
     def find(self, bgr, gh):
-        """(x, y, w, h) of the best-matching mesos box in a screenshot, or None."""
+        """(x, y, w, h) of the best-matching mesos box in a screenshot, or None.
+
+        Compared with the EXP digits the box is drawn bigger in small game windows (in real
+        screenshots: x1.12 at EXP digits 7 px tall, x1.07 at 11 px, x1.0 at 28 px), so sizes
+        around that are tried and the clearest wins. Its left and right edges are then
+        lined up with the box's border lines, because the digits are read at fixed
+        distances from the right edge."""
         if self.edges is None:
             return None
-        s = self.GH / gh
-        edges = cv2.resize(_edges(bgr), None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
-        if edges.shape[0] < self.edges.shape[0] or edges.shape[1] < self.edges.shape[1]:
-            return None
-        r = np.nan_to_num(cv2.matchTemplate(edges, self.edges, cv2.TM_CCORR_NORMED, mask=self.mask),
-                          nan=0.0, posinf=0.0, neginf=0.0)
-        r[np.abs(r) > 1.0] = 0.0                       # flat areas (e.g. all black) give junk values
-        _, best, _, (px, py) = cv2.minMaxLoc(r)
-        r[max(0, py - 3):py + 4, max(0, px - 12):px + 13] = 0
-        _, second, _, _ = cv2.minMaxLoc(r)
-        if best < 0.72 or best - second < 0.05:       # not clearly there
-            return None
-        return (int((px + self.ox) / s), int((py + self.oy) / s), int(self.bw / s), int(self.bh / s))
+        edges0 = _edges(bgr)
+        expect = 0.961 + 1.092 / gh
+        found = None
+        for size in (expect, expect * 1.025, expect / 1.025):
+            s = self.GH / (gh * size)
+            edges = cv2.resize(edges0, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
+            if edges.shape[0] < self.edges.shape[0] or edges.shape[1] < self.edges.shape[1]:
+                continue
+            r = np.nan_to_num(cv2.matchTemplate(edges, self.edges, cv2.TM_CCORR_NORMED, mask=self.mask),
+                              nan=0.0, posinf=0.0, neginf=0.0)
+            r[np.abs(r) > 1.0] = 0.0                   # flat areas (e.g. all black) give junk values
+            _, best, _, (px, py) = cv2.minMaxLoc(r)
+            r[max(0, py - 3):py + 4, max(0, px - 12):px + 13] = 0
+            _, second, _, _ = cv2.minMaxLoc(r)
+            enough = 0.72 if gh >= 10 else 0.64       # tiny windows match less sharply
+            if best >= enough and best - second >= 0.05 and (found is None or best > found[0]):
+                found = (best, (int((px + self.ox) / s), int((py + self.oy) / s),
+                                int(self.bw / s), int(self.bh / s)))
+        if not found:
+            return None                                # not clearly there
+        x, y, w, h = found[1]
+        # Line up the right edge (the digits are read from there) with the inside of the
+        # box's border: leaving the box it gets darker, solid or see-through.
+        gx = cv2.Sobel(cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)[..., 2].astype(np.float32),
+                       cv2.CV_32F, 1, 0, ksize=3)
+        rows = gx[max(0, y + h // 4):y + 3 * h // 4 + 1].sum(axis=0)
+        reach = max(2, int(0.25 * h))
+        lo, hi = max(0, x + w - reach), min(len(rows), x + w + reach + 1)
+        right = lo + int(np.argmin(rows[lo:hi])) if hi - lo >= 3 else x + w
+        return right - w, y, w, h
 
 
 def _agrees(value, last):
@@ -881,6 +1016,11 @@ def _view(img, lay):
     return img[y0:y1, x0:x1].copy(), boxes
 
 
+def _problem(where, text):
+    """A status message about reading the EXP bar ("where" only matters for a selected area)."""
+    return f"Selected area: {text}" if where == "Selected area" else text
+
+
 class ScreenReader:
     """Finds the EXP text on screen and reads it, following the game window around.
 
@@ -911,6 +1051,7 @@ class ScreenReader:
         self.mesos_pending = (None, 0)
         self.mesos_fails = 0
         self.next_mesos_check = 0.0
+        self.mesos_covered = False  # this app's window is in the way of the mesos
         self.party_area = None      # where the party list was last seen, on screen
         self.next_scan = 0.0
         self.own_rect = None        # this app's window, which screenshots can't see through
@@ -932,7 +1073,7 @@ class ScreenReader:
         elif not self.hwnd:
             return Reading("MapleStory window not found. Is the game running?")
         elif not rect:
-            return Reading("MapleStory is minimized")
+            return Reading("MapleStory is minimized. Bring the game back up.")
         else:
             reading = self._read_window(sct, rect)
         if rect and self.gh:
@@ -978,7 +1119,7 @@ class ScreenReader:
     def _read_region(self, sct, rect):
         r = self.region
         if not r:
-            return Reading("No area selected")
+            return Reading("No area selected. Click Select area.")
         shot = self._hide_own(grab(sct, r["left"], r["top"], r["width"], r["height"]))
         reading, lay = self._read(shot, "Selected area")
         if reading.confident:
@@ -991,7 +1132,7 @@ class ScreenReader:
         if self.box:
             bx, by, bw, bh = self.box
             if self._covered(wx + bx, wy + by, bw, bh):
-                return Reading(f"{where}: this window is covering the EXP bar. Move it.")
+                return Reading("This window is covering the EXP bar. Move it.")
             shot = grab(sct, wx + bx, wy + by, bw, bh)
             reading, lay = self._read(shot, where)
             if reading.confident:
@@ -1015,8 +1156,8 @@ class ScreenReader:
             lay = find_exp(shot[0]) if shot else None
         if not lay:
             if self._covered(wx, wy + top, ww, wh - top):
-                return Reading(f"{where}: can't find the EXP text. Is this window covering it?")
-            return Reading(f"{where}: can't find the EXP text")
+                return Reading("Can't find the EXP bar. Is this window covering it?")
+            return Reading("Can't find the EXP bar at the bottom of the game. Is something covering it?")
         img, sx, sy = shot
         g = lay.gh
         x0, x1 = max(0, int(lay.box[0] - g)), min(img.shape[1], int(lay.box[2] + 6 * g))
@@ -1031,20 +1172,24 @@ class ScreenReader:
     def _read(self, shot, where, lay=None):
         """Returns (Reading, Layout or None)."""
         if not shot:
-            return Reading(f"{where}: off screen"), None
+            return Reading(_problem(where, "The EXP bar is off screen.")), None
         img = shot[0]
         lay = lay or find_exp(img)
         if not lay:
-            return Reading(f"{where}: can't find the EXP text"), None
+            return Reading(_problem(where, "Can't find the EXP bar.")), None
         view, boxes = _view(img, lay)
         got = read_layout(self.templates, lay) if self.templates else None
-        if got:
+        if got and fits_exp_table(*got):
             return Reading(where, [got], True, f"{got[0]:,} [{got[1]:.2f}%]", view, boxes), lay
-        cands = tesseract_candidates(img, lay)
+        # Unclear digits, or a reading that fits no level: not trusted. Readings that do fit
+        # a level go first, so the tracker tries those.
+        cands = ([got] if got else []) + [c for c in tesseract_candidates(img, lay) if c != got]
+        cands.sort(key=lambda c: not fits_exp_table(*c))
         if cands:
             e, p = cands[0]
-            return Reading(where, cands, False, f"{e:,} [{p:.2f}%] (Tesseract)", view, boxes), lay
-        return Reading(f"{where}: found the EXP text but can't read the digits",
+            how = "" if (e, p) == got else " (Tesseract)"
+            return Reading(where, cands, False, f"{e:,} [{p:.2f}%]{how}", view, boxes), lay
+        return Reading(_problem(where, "Found the EXP bar, but can't read its numbers clearly."),
                        image=view, boxes=boxes), lay
 
     def _read_extras(self, sct, rect, reading):
@@ -1059,7 +1204,11 @@ class ScreenReader:
             if shot:
                 img, sx, sy = shot
                 field = find_mesos_field(img, g)      # the solid box is easy to spot
-                if field is None and (self.mesos_box is None or self.mesos_fails >= 10):
+                if field and not self._readable(img, field):
+                    field = None                      # a white patch in the scene, not the box
+                # Look for it by its outline too if it's lost, or this window is in the way of
+                # where it was (it may have been moved from there).
+                if field is None and (self.mesos_box is None or self.mesos_fails >= 10 or self.mesos_covered):
                     field = self._find_seethrough_box(img, g)
                 if field:
                     box = (sx - wx + field[0], sy - wy + field[1], field[2], field[3])
@@ -1079,23 +1228,37 @@ class ScreenReader:
                         self.party_area = (sx + x0 - int(12 * g), sy + y0 - int(g),
                                            x1 - x0 + int(13 * g), y1 - y0 + int(2 * g))
         mesos, image, boxes = None, None, ()
+        self.mesos_covered = False
         if self.mesos_box:
             bx, by, bw, bh = self.mesos_box
-            if self._covered(wx + bx, wy + by, bw, bh, margin=bh):
+            # (the digits only need the box and a sliver around it to be seen)
+            if self._covered(wx + bx, wy + by, bw, bh, margin=max(2, int(0.3 * bh))):
                 notes.append("This window is covering the inventory's mesos.")
+                self.mesos_covered = True
             else:
                 mesos, image, boxes = self._read_mesos(sct, wx + bx, wy + by, bw, bh)
         return reading._replace(mesos=mesos, mesos_image=image, mesos_boxes=boxes, party=party,
                                 mesos_at=moved, note=" ".join(notes) or None)
 
+    def _readable(self, img, field):
+        """Clear mesos digits at field? (Always yes while the mesos font is still being
+        learned: then Tesseract checks every new number instead.)"""
+        learned = self.mesos_digits
+        return not learned.complete or read_mesos_positions(img, field, learned.templates()) is not None
+
     def _find_seethrough_box(self, img, g):
-        """The mesos box by its outline, checked by reading clear digits there."""
+        """The mesos box by its outline, checked by reading clear digits there.
+
+        The digits are read at fixed spots from the box's right edge, so a box found a bit
+        off could read a wrong number: it must also line up with the number."""
         field = self.box_finder.find(img, g)
         if not field:
             return None
         learned = self.mesos_digits
         templates = learned.templates() if learned.complete else self.templates
-        return field if templates and read_mesos_positions(img, field, templates) else None
+        if not templates or not mesos_box_lines_up(img, field, templates):
+            return None
+        return field if read_mesos_positions(img, field, templates) else None
 
     def _read_mesos(self, sct, x, y, w, h):
         """Reads the mesos box at (x, y, w, h) on screen. Returns (number, image, boxes)."""
@@ -1205,9 +1368,10 @@ class ExpTracker:
     """Turns noisy readings into trustworthy EXP gains.
 
     Every level needs a fixed amount of EXP (req), and the bar shows exp = pct% * req.
-    req is learned from several *different* readings that agree with each other, then a
-    reading only counts if its EXP and % agree with req. Misread digits break that, so
-    they are ignored instead of being counted as gains.
+    req comes from the EXP table as soon as two clean readings point at the same level
+    (otherwise it's learned from several *different* readings that agree with each other),
+    then a reading only counts if its EXP and % agree with req. Misread digits break that,
+    so they are ignored instead of being counted as gains.
     """
 
     def __init__(self):
@@ -1221,8 +1385,13 @@ class ExpTracker:
         self.pct = None
         self.last_read = None                 # latest reading, trusted or not (for display)
         self.req = None                       # EXP required for the current level
+        self._req_exact = False               # req came straight from the EXP table
+        self._table_level = None              # level the last clean reading pointed at
         self._seen = {}                       # distinct (exp, pct) readings this level -> weight
-        self._pending = None                  # big change waiting for confirmation
+        self._pending = None                  # big change waiting for confirmation (e, p, reads)
+        self._recent = deque(maxlen=40)       # (when, EXP) of the latest trusted readings
+        self._reads = 0                       # readings seen, as a clock for _recent
+        self._misfits = 0                     # readings in a row that didn't fit req
         self._pending_lvl = None              # level-up waiting for confirmation
         self._level_start = None              # (exp, pct) right after a level-up, unverified
         self._prev_req = None                 # previous level's req, bounds the new one
@@ -1235,10 +1404,19 @@ class ExpTracker:
             self.running = True
             self._resumed = time.monotonic()
 
-    def pause(self):
+    def pause(self, at=None):
+        """Stops the clock (as of `at`, e.g. the last EXP gain, so idle time doesn't count)."""
         if self.running:
-            self._accum += time.monotonic() - self._resumed
+            end = time.monotonic() if at is None else min(time.monotonic(), at)
+            self._accum += max(0.0, end - self._resumed)
             self.running = False
+
+    def new_session(self):
+        """Numbers from zero again, keeping what's known about the level and current EXP."""
+        self.running = False
+        self._accum, self._resumed = 0.0, None
+        self.gained, self.levels = 0, 0
+        self.samples = deque()
 
     def elapsed(self):
         if self.running:
@@ -1254,7 +1432,7 @@ class ExpTracker:
     def _learn_req(self, candidates, confident):
         weight = 2 if confident else 1        # font-matched readings are rarely wrong
         for e, p in candidates:
-            if p >= 0.2:
+            if p >= 0.2 and e > 0:                # (a misread 0 says nothing about req)
                 self._seen[(e, p)] = max(self._seen.get((e, p), 0), weight)
         while len(self._seen) > 60:
             del self._seen[next(iter(self._seen))]
@@ -1275,6 +1453,8 @@ class ExpTracker:
             if not rivals or weight_of(best) >= 2 * weight_of(rivals[0]):
                 self.req = mid
             return
+        if self._req_exact:
+            return                            # straight from the EXP table: misreads can't move it
         current = group_of(self.req, 0.003)
         if 0.99 <= mid / self.req <= 1.01 or weight_of(best) < 1.5 * weight_of(current) + 1:
             if current:
@@ -1282,9 +1462,21 @@ class ExpTracker:
             return
         # A different value now clearly has more support: the old one came from misreads.
         # Switch, and restart the baseline so the change isn't counted as a gain.
-        self.req = mid
+        self.req, self._req_exact = mid, False
         self.exp = self.pct = None
         self._pending = None
+
+    def _req_from_table(self, reading):
+        """Takes the level's EXP straight from the EXP table once two clean readings in a
+        row point at the same single level, so there's no wait for EXP gains."""
+        e, p = reading
+        levels = levels_for(e, p) if p >= 0.5 else []
+        level = levels[0] if len(levels) == 1 else None
+        if level and self._prev_req and EXP_TABLE[level - 1] < 0.98 * self._prev_req:
+            level = None                      # after a level-up, the next level needs more
+        if level and level == self._table_level:
+            self.req, self._req_exact = EXP_TABLE[level - 1], True
+        self._table_level = level
 
     def _consistent(self, e, p):
         return abs(e / self.req * 100 - p) <= 0.02 + 0.003 * p
@@ -1303,18 +1495,31 @@ class ExpTracker:
         candidates = [(e, p) for e, p in candidates if p is not None and 0 <= p < 100]
         if not candidates:
             return False, "unreadable"
+        self._reads += 1
         self.last_read = candidates[0]
 
         if self._check_level_up(candidates):
             return True, "LEVEL UP!"
+        if self._pending_lvl:
+            # Looks like a level-up, not confirmed yet: don't also take it as EXP lost.
+            return False, "level up? waiting to confirm"
 
+        if self.req is None and confident:
+            self._req_from_table(candidates[0])
         self._learn_req(candidates, confident)
         if self.req is None:
             return False, "calibrating: learns your level's EXP after your next EXP gain"
 
         good = [c for c in candidates if self._consistent(*c)]
         if not good:
+            self._misfits += 1
+            if self._req_exact and self._misfits >= 30:
+                # Nothing has fitted this level for a long while: the level itself may be
+                # wrong. Work it out again.
+                self.req, self._req_exact, self._table_level, self._misfits = None, False, None, 0
+                self.exp = self.pct = self._pending = None      # and start counting afresh
             return False, "misread, ignored"
+        self._misfits = 0
         e, p = good[0]
         self.last_read = good[0]
 
@@ -1329,46 +1534,83 @@ class ExpTracker:
 
         if self.exp is None:
             self.exp, self.pct = e, p
+            self._recent.append((self._reads, e))
             return True, "baseline"
 
         delta = e - self.exp
         if abs(delta) > 0.15 * self.req:
             # Unusually big change in one tick: only believe it if the next read agrees.
-            if self._pending and abs(e - self._pending[0]) <= 0.15 * self.req:
-                self._pending = None
-            else:
-                self._pending = (e, p)
+            last = self._pending
+            n = last[2] + 1 if last and abs(e - last[0]) <= 0.15 * self.req else 1
+            self._pending = (e, p, n)
+            if n < 2:
                 return False, "big jump, waiting to confirm"
+            if delta < 0 and not self._undoes_jump(e):
+                # EXP never drops this much (dying costs at most 10%; level-ups are checked
+                # separately), so this is a misread, even twice in a row. If it keeps
+                # showing up, carry on from it, without counting the drop.
+                if n < 8:
+                    return False, "misread, ignored"
+                self._pending, self.exp, self.pct = None, e, p
+                self._recent.append((self._reads, e))
+                return True, "baseline"
         self._pending = None
         self._add_gain(delta)
         self.exp, self.pct = e, p
+        self._recent.append((self._reads, e))
         return True, ""
 
+    def _undoes_jump(self, e):
+        """Was EXP around e a moment ago? Then a big drop to it is the right number coming
+        back after a misread that was too high, and must count, to cancel that out."""
+        return any(self._reads - r <= 40 and abs(e - x) <= 0.15 * self.req for r, x in self._recent)
+
     def _check_level_up(self, candidates):
-        """% dropped a lot and EXP reset low: a level-up, once seen on two reads in a row."""
+        """% dropped a lot and EXP reset low: a level-up, once readings in a row agree on it.
+
+        If the level is known, readings that fit the next level's EXP from the table count,
+        and two in a row are enough. Otherwise a reading that still fits this level's EXP is
+        never a level-up (e.g. the right number coming back after a misread that was too
+        high), and as the next level's EXP is only known to be bigger, it takes five.
+        """
         if self.exp is None or self.pct is None or self.req is None:
             return False
+        level = level_for_req(self.req)
+        nxt = EXP_TABLE[level] if level and level < len(EXP_TABLE) else None
         hits = []
         for e, p in candidates:
             if not (self.pct - p > 30 and e < self.exp):
                 continue
-            if p >= 0.2 and not (0.98 * self.req <= e / (p / 100) <= 2.5 * self.req):
-                continue                      # next level's EXP must be similar or bigger
-            hits.append((e, p))
+            if nxt and abs(e / nxt * 100 - p) <= 0.02 + 0.003 * p:
+                hits.append((e, p, 2))        # fits the next level exactly
+            elif self._consistent(e, p):
+                continue                      # still this level: not a level-up
+            elif p >= 0.2 and 0.98 * self.req <= e / (p / 100) <= 2.5 * self.req:
+                hits.append((e, p, 5))        # next level's EXP is similar or bigger
         if not hits:
             self._pending_lvl = None
             return False
-        if not self._pending_lvl:
-            self._pending_lvl = hits[0]
+        e, p, need = hits[0]
+        last = self._pending_lvl
+        # Each reading must carry on from the one before (EXP only goes up from there).
+        n = last[2] + 1 if last and 0 <= e - last[0] <= 0.15 * (nxt or self.req) else 1
+        self._pending_lvl = (e, p, n)
+        if n < need:
             return False
-        e, p = hits[0]
         self._pending_lvl = self._pending = None
         if self.running:
             self.levels += 1
         self._add_gain(self.req - self.exp + e)
         self.exp, self.pct = e, p
-        self._prev_req, self.req = self.req, None
+        self._prev_req = self.req
+        if need == 2:                          # the new level's EXP is known: no relearning
+            self.req, self._req_exact = nxt, True
+        else:
+            self.req, self._req_exact = None, False
+        self._table_level = None
         self._seen.clear()
+        self._recent.clear()                   # the old level's numbers mean nothing now
+        self._recent.append((self._reads, e))
         self._level_start = (e, p)
         return True
 
@@ -1398,7 +1640,7 @@ class MesoTracker:
     def reset(self):
         self.value = None                     # confirmed mesos count
         self.seen_at = None                   # when it was last confirmed
-        self._candidate = (None, 0)
+        self._candidate = (None, 0, 0)
         self.gained = 0
         self.samples = deque()                # (elapsed, gained)
         self.start = None                     # elapsed time when counting began
@@ -1410,17 +1652,30 @@ class MesoTracker:
     def observe(self, value, now, elapsed, running):
         jump = False
         if value == self.value:
-            self._candidate = (None, 0)           # unchanged: nothing new to confirm
+            self._candidate = (None, 0, 0)        # unchanged: nothing new to confirm
         else:
-            last, n = self._candidate             # how many readings in a row back the new number
+            # How many readings in a row back the new number: close to it, and exactly it.
+            last, n, same = self._candidate
             n = n + 1 if _agrees(value, last) else 1
-            self._candidate = (value, n)
+            same = same + 1 if value == last else 1
+            self._candidate = (value, n, same)
             old = self.value
-            jump = old is not None and (len(str(value)) != len(str(old)) or abs(value - old) > 0.5 * old)
-            big = old is not None and abs(value - old) > max(10000, 0.05 * old)
-            if n < (3 if big or jump else 2):
+            # Measured against the bigger of the two, so a misread and its correction are
+            # always judged the same way (both counted, or both not), and cancel out.
+            top = max(value, old) if old is not None else 0
+            jump = old is not None and (len(str(value)) != len(str(old)) or abs(value - old) > 0.5 * top)
+            big = old is not None and abs(value - old) > max(10000, 0.05 * top)
+            # The first count, and a jump to a new count, need the very same number 3 times:
+            # neither is counted as mesos gained, so a misread there would never cancel out
+            # (and different misreads can be close to each other, e.g. with an extra digit).
+            # About 10x (or a tenth): almost always a digit read too many (or lost).
+            tenfold = old is not None and old > 0 and (9 <= value / old <= 11 or 0.09 <= value / old <= 0.11)
+            if old is None or jump:
+                if same < (8 if tenfold else 3):
+                    return
+            elif n < (3 if big else 2):
                 return
-            self._candidate = (None, 0)
+            self._candidate = (None, 0, 0)
         self.seen_at = now
         if running and not self.counting:
             self.counting = True                  # count changes from this reading on
@@ -1450,6 +1705,84 @@ class MesoTracker:
                 break
             before = g
         return (self.gained - before) / (elapsed - t0) * ROLLING_WINDOW
+
+
+class Session:
+    """What's on screen: EXP and mesos since Start, and when tracking pauses by itself.
+
+    After Start it tracks until Pause is pressed, except that it pauses by itself when no
+    EXP comes in for `gap` seconds or you leave the map, and carries on at the next EXP
+    gain: from zero if that's on a different map, so the numbers are always for the map
+    you're on. Time spent paused never counts, and an idle pause rewinds the clock to the
+    last EXP gain. The gain that ends a pause starts the clock again rather than counting,
+    just like a log stretch's first gain.
+    """
+
+    def __init__(self, gap):
+        self.exp, self.meso = ExpTracker(), MesoTracker()
+        self.gap = gap
+        self.on = False             # Start was pressed (and Pause wasn't)
+        self.waiting = None         # paused by itself: "idle" or "map"
+        self.map = None             # the map these numbers are for
+        self.here = None            # the map you're on now
+        self.last_gain = None
+
+    def start(self, now):
+        self.on, self.waiting, self.last_gain = True, None, now
+        self.map = self.map or self.here
+        self.exp.start()
+
+    def pause(self):
+        self.on, self.waiting = False, None
+        self.exp.pause()
+        self.meso.pause()
+
+    def reset(self):
+        self.exp.reset()
+        self.meso.reset()
+        self.on, self.waiting, self.map, self.last_gain = False, None, None, None
+
+    def _wait(self, why):
+        self.exp.pause(at=self.last_gain)
+        self.meso.pause()
+        self.waiting = why
+
+    def observe(self, candidates, confident, now):
+        """Feeds an EXP reading to the tracker. Returns the tracker's (accepted, note)."""
+        t = self.exp
+        exp_before, gained_before = t.exp, t.gained
+        result = t.observe(candidates, confident)
+        rose = exp_before is not None and t.exp is not None and (
+            t.exp > exp_before or result[1] == "LEVEL UP!")
+        if t.running and t.gained > gained_before:
+            self.last_gain = now
+        elif self.on and self.waiting and rose:
+            if self.map and self.here and self.here != self.map:
+                t.new_session()             # a different map: its own numbers
+                self.meso.reset()
+                self.map = self.here
+            self.waiting = None
+            self.last_gain = now
+            t.start()
+        return result
+
+    def map_seen(self, name):
+        """The map name was read (already matched to known names, see AutoLog.canonical)."""
+        self.here = name
+        if not self.on:
+            return
+        if self.map is None:
+            self.map = name
+        elif name != self.map:              # left the map
+            if self.exp.running:
+                self._wait("map")
+            elif self.waiting:
+                self.waiting = "map"
+
+    def tick(self, now):
+        """Call regularly: pauses after `gap` seconds without EXP."""
+        if self.on and self.exp.running and now - self.last_gain > self.gap:
+            self._wait("idle")
 
 
 # --------------------------------------------------------------------------- auto log
@@ -1518,6 +1851,7 @@ class AutoLog:
         self.gap = gap_seconds
         self.path, self.text_path = path, text_path
         self.entries, self.aliases = [], {}           # aliases: misread/renamed map -> name to use
+        self._kept = set()                            # problems a copy of the file was kept for
         if self._load() < LOG_VERSION:
             def clear_old_mesos():                    # logged by the old, unreliable mesos counting
                 for e in self.entries:
@@ -1533,13 +1867,42 @@ class AutoLog:
     def _load(self):
         """Reads the log file into memory (keeps what's there if it can't be read).
         Returns the file's format version."""
-        try:
-            data = json.loads(self.path.read_text())
-        except Exception:
+        if not self.path.exists():
             return LOG_VERSION
-        self.entries = data.get("entries", [])
-        self.aliases = data.get("aliases", {})
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            entries, aliases = data.get("entries", []), data.get("aliases", {})
+            if not isinstance(entries, list) or not isinstance(aliases, dict):
+                raise ValueError("unexpected contents")
+        except Exception as e:
+            self._keep_copy("reading the EXP log", e)        # damaged, e.g. edited by hand
+            return LOG_VERSION
+        good = [e for e in entries if self._valid(e)]
+        if len(good) < len(entries):
+            self._keep_copy(f"reading the EXP log: left out {len(entries) - len(good)} damaged lines")
+        self.entries, self.aliases = good, aliases
         return data.get("version", 1)
+
+    def _keep_copy(self, what, exc=None):
+        """Keeps a copy of the log file before it's saved over (once per problem)."""
+        backup = self.path.with_name(f"exp_log.damaged-{time.strftime('%Y%m%d-%H%M%S')}.json")
+        if what not in self._kept:
+            self._kept.add(what)
+            try:
+                shutil.copy2(self.path, backup)
+            except Exception:
+                pass
+            log_error(f"{what} (the file was copied to {backup.name})", exc)
+
+    @staticmethod
+    def _valid(e):
+        """An entry with everything the log needs (anything else is left out, not crashed on)."""
+        try:
+            date.fromisoformat(e["date"])
+            float(e["exp"]), float(e["seconds"])
+            return isinstance(e["map"], str) and "level" in e
+        except Exception:
+            return False
 
     def _change(self, change):
         """Applies change() to the latest log on disk and saves it."""
@@ -1613,11 +1976,12 @@ class AutoLog:
             return e
         return self._change(add)
 
-    def canonical(self, name):
-        """The name to log a map under: applies renames and fixes small misreads."""
+    def canonical(self, name, also=()):
+        """The name to log a map under: applies renames and fixes small misreads (matching
+        the maps in the log, and any names in `also`, e.g. the map you were just on)."""
         name = self.aliases.get(name, name)
         best, score = name, 0.0
-        for known in {e["map"] for e in self.entries} | set(self.aliases.values()):
+        for known in {e["map"] for e in self.entries} | set(self.aliases.values()) | {n for n in also if n}:
             if _numbers(known) == _numbers(name):
                 s = SequenceMatcher(None, known.lower(), name.lower()).ratio()
                 if s > score:
@@ -1672,9 +2036,10 @@ class AutoLog:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_suffix(".tmp")
             tmp.write_text(json.dumps({"version": LOG_VERSION, "entries": self.entries,
-                                       "aliases": self.aliases}, indent=1))
+                                       "aliases": self.aliases}, indent=1), encoding="utf-8")
             os.replace(tmp, self.path)
-            self.text_path.write_text("".join(format_entry(e) + "\n" for e in self.newest_first()))
+            self.text_path.write_text("".join(format_entry(e) + "\n" for e in self.newest_first()),
+                                      encoding="utf-8")
         except Exception as e:
             log_error("saving the EXP log", e)
 
@@ -1692,6 +2057,18 @@ def fmt_short(n):
         if abs(n) >= div:
             return f"{n / div:.2f}{suffix}"
     return f"{n:,.0f}"
+
+
+def fmt_eta(seconds):
+    """A time to wait, the way people say it: '36 min', '2 h 05 min'. None if too far off."""
+    if seconds is None or seconds < 0 or seconds >= 100 * 3600:
+        return None
+    minutes = int(seconds // 60)
+    if minutes < 1:
+        return "under 1 min"
+    if minutes < 60:
+        return f"{minutes} min"
+    return f"{minutes // 60} h {minutes % 60:02d} min"
 
 
 def fmt_dur(seconds):
@@ -1753,6 +2130,7 @@ class RegionSelector:
 # --------------------------------------------------------------------------- app
 
 BG, FG, DIM, ACCENT, FIELD = "#1b1d23", "#e8e8e8", "#8a8f98", "#ffcc33", "#2c3038"
+ACCENT_SOFT = "#d9b04a"     # a quieter gold, for text that goes with the big number
 LIST_BG, LIST_BG2 = "#23262d", "#282b33"
 LOG_HINT = "Click a line for details. Right-click to copy, rename or delete it."
 
@@ -1766,8 +2144,8 @@ class App:
         saved = self.cfg.get("mesos_box")
         if isinstance(saved, list) and len(saved) == 6:
             self.reader.saved_mesos = tuple(saved)
-        self.tracker = ExpTracker()
-        self.meso = MesoTracker()
+        self.session = Session(self.cfg["gap_seconds"])
+        self.tracker, self.meso = self.session.exp, self.session.meso
         self.party = 1
         self._party_seen = (None, 0)
         self.last_mesos = None
@@ -1777,6 +2155,9 @@ class App:
         self.level = None
         self.note = None
         self.last_logged = None
+        self.skip_log = False               # "Don't log" is on: this run isn't logged
+        self.found_at = None                # when the EXP bar was first read for this level
+        self.level_up_at = None
         self.log_open = False
         self.settings_win = None
         self.q = queue.Queue()
@@ -1795,8 +2176,10 @@ class App:
         self._apply_window_settings()
         self._restore_position()
 
-        main = tk.Frame(root, bg=BG)
+        main = self.main = tk.Frame(root, bg=BG)
         main.grid(row=0, column=0, sticky="n")
+        root.columnconfigure(1, weight=1)                 # the log gets any extra room
+        root.rowconfigure(0, weight=1)
         self.vars = {}
         tk.Label(main, text="EXP / hr", bg=BG, fg=DIM, font=("Segoe UI", 9)).grid(
             row=0, column=0, sticky="w", padx=12, pady=(10, 0))
@@ -1809,10 +2192,13 @@ class App:
         self.log_btn.pack(side="left")
         self.big = tk.Label(main, text="—", bg=BG, fg=ACCENT, font=("Segoe UI", 24, "bold"))
         self.big.grid(row=1, column=0, columnspan=2, sticky="w", padx=12)
+        # Under the big number, like a caption: when you'll reach the next level.
+        self.next_level = tk.Label(main, text="", bg=BG, fg=ACCENT_SOFT, font=("Segoe UI Semibold", 11))
+        self.next_level.grid(row=2, column=0, columnspan=2, sticky="nw", padx=(14, 12), pady=(0, 8))
 
-        rows = ["Last 5 min", "% / hr", "Gained", "Current", "To level",
+        rows = ["Last 5 min", "% / hr", "Gained", "Current",
                 "Mesos", "Mesos / hr", "Mesos / 5 min", "Elapsed"]
-        for i, name in enumerate(rows, start=2):
+        for i, name in enumerate(rows, start=3):
             tk.Label(main, text=name, bg=BG, fg=DIM, font=("Segoe UI", 10)).grid(
                 row=i, column=0, sticky="w", padx=(12, 8))
             v = tk.StringVar(value="—")
@@ -1821,28 +2207,39 @@ class App:
             self.vars[name] = v
 
         bar = tk.Frame(main, bg=BG)
-        bar.grid(row=len(rows) + 2, column=0, columnspan=2, pady=(10, 4), padx=8)
+        bar.grid(row=len(rows) + 3, column=0, columnspan=2, pady=(10, 4), padx=8)
         btn = dict(bg=FIELD, fg=FG, activebackground="#3a3f49", activeforeground=FG,
                    relief="flat", padx=8, pady=3, font=("Segoe UI", 9))
         self.start_btn = tk.Button(bar, text="Start", command=self.toggle, **btn)
         self.start_btn.pack(side="left", padx=2)
         tk.Button(bar, text="Reset", command=self.reset, **btn).pack(side="left", padx=2)
-        tk.Button(bar, text="Follow game", command=self.follow_game, **btn).pack(side="left", padx=2)
-        tk.Button(bar, text="Select area", command=self.select_area, **btn).pack(side="left", padx=2)
+        # Keeps this run out of the log (everything is still shown). Turns itself off when
+        # the run ends: when you leave the map or stop getting EXP.
+        self._btn_style = btn
+        self.skip_btn = tk.Button(bar, command=self.toggle_skip_log, **btn)
+        self.skip_btn.pack(side="left", padx=2)
+        self._show_skip_log()
+        # Normally the EXP bar is found by itself; this switches to an area you drag out
+        # yourself (if it ever can't find it) and back.
+        self.area_btn = tk.Button(bar, command=self.toggle_area, **btn)
+        self.area_btn.pack(side="left", padx=2)
         tk.Button(bar, text="View capture", command=self.view_capture, **btn).pack(side="left", padx=2)
+        self._show_area_mode()
 
         self.status = tk.StringVar()
-        tk.Label(main, textvariable=self.status, bg=BG, fg=DIM, font=("Segoe UI", 8),
-                 wraplength=380, justify="left").grid(
-            row=len(rows) + 3, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 8))
+        status = tk.Label(main, textvariable=self.status, bg=BG, fg=DIM, font=("Segoe UI", 8),
+                          justify="left")
+        status.grid(row=len(rows) + 4, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 8))
+        main.update_idletasks()
+        status.config(wraplength=main.winfo_reqwidth() - 24)    # use the window's width
 
         self._build_log_panel()
         if self.cfg.get("log_open"):
             self.toggle_log()
 
         if not templates:
-            self.status.set("digits.npz is missing or outdated, so only Tesseract can read "
-                            "the bar (less reliable).")
+            self.status.set("Some of the program's files are missing, so EXP reading is less "
+                            "reliable. Please download it again.")
         else:
             self.status.set("Looking for the MapleStory window..." if mode == "window"
                             else "Using your selected area.")
@@ -1850,6 +2247,8 @@ class App:
         threading.Thread(target=self._worker, daemon=True).start()
         root.after(200, self._pump)
         root.after(500, self._refresh)
+        if self.cfg["check_updates"]:
+            self.check_updates()                       # only now, when it starts
 
     # ---- log panel
     def _build_log_panel(self):
@@ -1860,45 +2259,68 @@ class App:
         tk.Label(p, textvariable=self.log_status, bg=BG, fg=FG, font=("Segoe UI", 9),
                  justify="left", anchor="w").grid(row=1, column=0, columnspan=2, sticky="we", pady=(2, 6))
 
-        # A compact table: one row per day, map, level and party size.
+        # A compact table: one row per day, map, level and party size. Drag the lines between
+        # the column titles to resize a column; widths are remembered.
         cell = tkfont.Font(family="Segoe UI", size=9)
-        pt = float(self.root.tk.call("tk", "scaling"))         # screen pixels per point
+        head = tkfont.Font(family="Segoe UI", size=8)
         style = ttk.Style(self.root)
         style.theme_use("clam")
         style.layout("Log.Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
         style.configure("Log.Treeview", background=LIST_BG, fieldbackground=LIST_BG, foreground=FG,
                         font=cell, rowheight=int(cell.metrics("linespace") * 1.45), borderwidth=0)
         style.configure("Log.Treeview.Heading", background=FIELD, foreground=DIM, relief="flat",
-                        borderwidth=0, font=("Segoe UI", 8))
+                        borderwidth=0, font=head)
         style.map("Log.Treeview", background=[("selected", "#3a3f49")], foreground=[("selected", FG)])
         style.map("Log.Treeview.Heading", background=[("active", "#3a3f49")])
-        columns = (("date", "Date", 40, "w"), ("map", "Map", 124, "w"), ("lv", "Lv", 20, "center"),
-                   ("party", "Party", 34, "center"), ("exp", "EXP/hr", 48, "e"), ("mesos", "Mesos/hr", 50, "e"))
+        # (key, title, widest usual value, alignment): starting widths are measured in the
+        # real font, so nothing is cut off at any screen scaling.
+        columns = (("date", "Date", "Sep 30", "w"), ("map", "Map", "The Swamp of Despair II", "w"),
+                   ("lv", "Lv", "99", "center"), ("party", "Party", "6ppl", "center"),
+                   ("exp", "EXP/hr", "888,888", "e"), ("mesos", "Mesos/hr", "888,888", "e"))
+        saved = self.cfg.get("log_columns") or {}
+        pad = cell.measure("00")
         tree = self.log_tree = ttk.Treeview(p, columns=[c[0] for c in columns], show="headings",
                                             style="Log.Treeview", height=11, selectmode="browse")
-        for key, title, width, anchor in columns:
+        for key, title, sample, anchor in columns:
+            width = max(cell.measure(sample), head.measure(title)) + pad
+            if isinstance(saved.get(key), int) and 10 <= saved[key] <= 2000:
+                width = saved[key]
             tree.heading(key, text=title, anchor=anchor)
-            tree.column(key, width=int(width * pt), minwidth=int(width * pt), anchor=anchor, stretch=False)
+            tree.column(key, width=width, minwidth=pad, anchor=anchor, stretch=False)
         tree.tag_configure("odd", background=LIST_BG2)
         tree.grid(row=2, column=0, sticky="nsew")
         scroll = tk.Scrollbar(p, orient="vertical", command=tree.yview)
         scroll.grid(row=2, column=1, sticky="ns")
         tree.configure(yscrollcommand=scroll.set)
         self.log_hint = tk.StringVar(value=LOG_HINT)
-        tk.Label(p, textvariable=self.log_hint, bg=BG, fg=DIM, font=("Segoe UI", 8), justify="left",
-                 anchor="w", wraplength=int(sum(c[2] for c in columns) * pt)).grid(
-            row=3, column=0, columnspan=2, sticky="we", pady=(4, 0))
+        hint = tk.Label(p, textvariable=self.log_hint, bg=BG, fg=DIM, font=head, justify="left", anchor="w")
+        hint.grid(row=3, column=0, columnspan=2, sticky="we", pady=(4, 0))
+        p.bind("<Configure>", lambda e: hint.config(wraplength=max(120, e.width - 8)))
+        p.columnconfigure(0, weight=1)
+        p.rowconfigure(2, weight=1)
         tree.bind("<Button-3>", self._log_menu)
         tree.bind("<<TreeviewSelect>>", self._log_selected)
         self.shown = {}
         self._fill_log()
 
     def toggle_log(self):
-        self.log_open = not self.log_open
         if self.log_open:
+            self._remember_log_size()                   # before it closes
+        self.log_open = not self.log_open
+        root = self.root
+        if self.log_open:
+            # With the log open the window can be resized (e.g. for long map names).
             self.log_panel.grid(row=0, column=1, sticky="nsew", padx=(0, 12), pady=(10, 8))
+            root.update_idletasks()
+            root.minsize(self.main.winfo_reqwidth() + 150, self.main.winfo_reqheight())
+            root.resizable(True, True)
+            size = self.cfg.get("log_size")
+            root.geometry(f"{size[0]}x{size[1]}" if size else "")
         else:
             self.log_panel.grid_remove()
+            root.resizable(False, False)
+            root.minsize(1, 1)
+            root.geometry("")                           # back to just the tracker's size
         self.log_btn.config(text="<" if self.log_open else ">")
         self.cfg["log_open"] = self.log_open
         save_config(self.cfg)
@@ -1943,6 +2365,8 @@ class App:
             self.autolog.rename(entry, name.strip())
             if self.map_name:
                 self.map_name = self.autolog.canonical(self.map_name)
+            s = self.session                    # so a renamed map isn't taken as a new one
+            s.map, s.here = (self.autolog.canonical(n) if n else n for n in (s.map, s.here))
             self._fill_log()
 
     def _delete(self, entry):
@@ -1954,8 +2378,12 @@ class App:
     def _log_status_text(self, now):
         where = (f"{self.map_name or 'Map not read yet'} · Lv {self.level or '?'} · "
                  f"{party_label(self.party)}")
-        if not self.tracker.running:
+        if self.skip_log:
+            return f"{where}\nNot logging this run."
+        if not self.session.on:
             return f"{where}\nPress Start to log EXP/hr here."
+        if self.session.waiting:
+            return f"{where}\nPaused. Logging carries on at your next EXP gain."
         left = self.autolog.seconds_left(now)
         if left is None:
             text = f"{where}\nWaiting for EXP gain..."
@@ -1983,7 +2411,8 @@ class App:
         text = dict(bg=BG, fg=FG, font=("Segoe UI", 9))
 
         gap = tk.StringVar(value=str(self.cfg["gap_seconds"]))
-        tk.Label(w, text="Restart the 5-minute log clock after no EXP for", **text).grid(
+        tk.Label(w, text="Pause tracking (and restart the 5-minute log timer)\nafter no EXP for",
+                 justify="left", **text).grid(
             row=0, column=0, sticky="w", padx=14, pady=(14, 4))
         line = tk.Frame(w, bg=BG)
         line.grid(row=1, column=0, sticky="w", padx=14)
@@ -2003,6 +2432,10 @@ class App:
         tk.Checkbutton(w, text="Always on top of other windows", variable=topmost, bg=BG, fg=FG,
                        selectcolor=FIELD, activebackground=BG, activeforeground=FG,
                        font=("Segoe UI", 9)).grid(row=4, column=0, sticky="w", padx=10, pady=(10, 0))
+        updates = tk.BooleanVar(value=bool(self.cfg["check_updates"]))
+        tk.Checkbutton(w, text="Check for updates when it starts", variable=updates, bg=BG, fg=FG,
+                       selectcolor=FIELD, activebackground=BG, activeforeground=FG,
+                       font=("Segoe UI", 9)).grid(row=5, column=0, sticky="w", padx=10, pady=(2, 0))
 
         def apply(*_):
             try:
@@ -2010,27 +2443,30 @@ class App:
             except ValueError:
                 seconds = 0
             if 1 <= seconds <= 3600:
-                self.cfg["gap_seconds"] = self.autolog.gap = seconds
+                self.cfg["gap_seconds"] = self.autolog.gap = self.session.gap = seconds
             self.cfg["transparency"] = int(transparency.get())
             self.cfg["topmost"] = bool(topmost.get())
+            self.cfg["check_updates"] = bool(updates.get())
             self._apply_window_settings()
             w.attributes("-topmost", self.cfg["topmost"])
             save_config(self.cfg)
 
-        for var in (gap, transparency, topmost):
+        for var in (gap, transparency, topmost, updates):
             var.trace_add("write", apply)
         buttons = tk.Frame(w, bg=BG)
-        buttons.grid(row=5, column=0, sticky="we", padx=14, pady=(14, 6))
+        buttons.grid(row=6, column=0, sticky="we", padx=14, pady=(14, 6))
         style = dict(bg=FIELD, fg=FG, activebackground="#3a3f49", activeforeground=FG, relief="flat",
                      padx=12, pady=3, font=("Segoe UI", 9))
         tk.Button(buttons, text="Open data folder", command=self.open_data_folder, **style).pack(side="left")
-        tk.Button(buttons, text="Close", command=w.destroy, **style).pack(side="right")
+        tk.Button(buttons, text="Check for updates", command=lambda: self.check_updates(manual=True),
+                  **style).pack(side="left", padx=(6, 0))
+        tk.Button(buttons, text="Close", command=w.destroy, **style).pack(side="right", padx=(6, 0))
         pt = float(self.root.tk.call("tk", "scaling"))         # screen pixels per point
         tk.Label(w, text=f"Your log and settings are saved in {DATA_DIR}", bg=BG, fg=DIM,
                  font=("Segoe UI", 8), wraplength=int(250 * pt), justify="left").grid(
-            row=6, column=0, sticky="w", padx=14)
+            row=7, column=0, sticky="w", padx=14)
         tk.Label(w, text=f"Maple EXP/hr v{VERSION}. This is a beta: it's still being improved.",
-                 bg=BG, fg=DIM, font=("Segoe UI", 8)).grid(row=7, column=0, sticky="w", padx=14, pady=(2, 12))
+                 bg=BG, fg=DIM, font=("Segoe UI", 8)).grid(row=8, column=0, sticky="w", padx=14, pady=(2, 12))
 
     def open_data_folder(self):
         try:
@@ -2044,10 +2480,12 @@ class App:
         if not pos:
             return
         with mss.mss() as sct:
-            v = sct.monitors[0]
-        if (v["left"] <= pos[0] < v["left"] + v["width"] - 50
-                and v["top"] <= pos[1] < v["top"] + v["height"] - 50):
-            self.root.geometry(f"+{pos[0]}+{pos[1]}")    # only if it's still on a screen
+            screens = sct.monitors[1:]
+        # Only if its top-left is still on a screen (not one that was unplugged, nor the
+        # gap between two screens of different sizes).
+        if any(v["left"] <= pos[0] < v["left"] + v["width"] - 50
+               and v["top"] <= pos[1] < v["top"] + v["height"] - 50 for v in screens):
+            self.root.geometry(f"+{pos[0]}+{pos[1]}")
 
     def _window_rect(self):
         """This app's window on screen (physical pixels), or None."""
@@ -2072,6 +2510,70 @@ class App:
                     self.q.put(("error", f"{type(e).__name__}: {e}"))
                 self.stop_evt.wait(max(0.1, POLL_SECONDS - (time.monotonic() - t0)))
 
+    # ---- updates
+    def check_updates(self, manual=False):
+        """Asks GitHub for a newer version in the background; the answer comes via _pump."""
+        def work():
+            try:
+                self.q.put(("update", (check_for_update(), manual, None)))
+            except Exception as e:
+                self.q.put(("update", (None, manual, e)))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _show_update(self, found, manual, error):
+        parent = self.settings_win if manual and self.settings_win and self.settings_win.winfo_exists() \
+            else self.root
+        if error is not None:
+            if manual:
+                messagebox.showinfo("Updates", "Couldn't check for updates. Are you connected to the "
+                                    "internet?", parent=parent)
+            return                                      # at start: quietly try again next time
+        if not found:
+            if manual:
+                messagebox.showinfo("Updates", f"You have the latest version (v{VERSION}).", parent=parent)
+            return
+        version, notes = found
+        if not manual and self.cfg.get("skip_version") == version:
+            return
+        w = tk.Toplevel(self.root)
+        w.title("Update available")
+        w.configure(bg=BG, padx=16, pady=14)
+        w.resizable(False, False)
+        w.transient(self.root)
+        w.attributes("-topmost", bool(self.cfg["topmost"]))
+        tk.Label(w, text=f"Maple EXP/hr v{version} is out", bg=BG, fg=ACCENT,
+                 font=("Segoe UI Semibold", 12)).pack(anchor="w")
+        tk.Label(w, text=f"You have v{VERSION}. Your log and settings are kept when you update.",
+                 bg=BG, fg=DIM, font=("Segoe UI", 9)).pack(anchor="w", pady=(2, 10))
+        tk.Label(w, text="What's new:", bg=BG, fg=FG, font=("Segoe UI", 9)).pack(anchor="w")
+        box = tk.Frame(w, bg=BG)
+        box.pack(fill="both", expand=True, pady=(4, 12))
+        text = tk.Text(box, width=64, height=12, wrap="word", bg=LIST_BG, fg=FG, relief="flat",
+                       font=("Segoe UI", 9), padx=8, pady=6, highlightthickness=0)
+        scroll = tk.Scrollbar(box, command=text.yview)
+        text.configure(yscrollcommand=scroll.set)
+        text.insert("1.0", notes or "(No details were given for this version.)")
+        text.configure(state="disabled")
+        text.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        buttons = tk.Frame(w, bg=BG)
+        buttons.pack(fill="x")
+        style = dict(bg=FIELD, fg=FG, activebackground="#3a3f49", activeforeground=FG, relief="flat",
+                     padx=12, pady=3, font=("Segoe UI", 9))
+
+        def get_it():
+            webbrowser.open(RELEASES_PAGE)                # always your own releases page
+            w.destroy()
+
+        def skip():
+            self.cfg["skip_version"] = version
+            save_config(self.cfg)
+            w.destroy()
+        tk.Button(buttons, text="Get the update", command=get_it, **{**style, "bg": ACCENT_SOFT, "fg": BG,
+                  "activebackground": ACCENT, "activeforeground": BG}).pack(side="left")
+        tk.Button(buttons, text="Not now", command=w.destroy, **style).pack(side="left", padx=(6, 0))
+        tk.Button(buttons, text="Skip this version", command=skip, **style).pack(side="right")
+
     def _oops(self, what, exc):
         """Something unexpected went wrong: note it in errors.log and keep going."""
         log_error(what, exc)
@@ -2083,7 +2585,10 @@ class App:
             while True:
                 kind, payload = self.q.get_nowait()
                 if kind == "error":
-                    self.status.set(f"Error: {payload}")
+                    self.status.set("Something went wrong reading the screen. Trying again... "
+                                    "(details are in errors.log: Settings > Open data folder)")
+                elif kind == "update":
+                    self._show_update(*payload)
                 else:
                     self._handle(payload)
         except queue.Empty:
@@ -2113,19 +2618,27 @@ class App:
             if n >= 2:
                 self.party = r.party
         if r.map:
-            self.map_name = self.autolog.canonical(r.map)
+            # A slightly misread name of the map you're on still counts as that map.
+            self.map_name = self.autolog.canonical(r.map, also=(self.map_name, self.session.map))
+            waiting = self.session.waiting
+            self.session.map_seen(self.map_name)
+            self._after_pause_check(waiting)
         self.note = r.note
         if r.candidates:
+            if self.found_at is None or t.req is not None:
+                self.found_at = now
             before = t.gained
-            ok, note = t.observe(r.candidates, r.confident)
+            ok, note = self.session.observe(r.candidates, r.confident, now)
             self.rejected = 0 if ok else self.rejected + 1
             if self.rejected >= 10:                 # keeps not adding up: find the EXP bar again
                 self.reader.box, self.rejected = None, 0
-            if t.running and t.gained != before:
+            if t.running and t.gained != before and not self.skip_log:
                 self.autolog.gain(now, t.gained - before)
-            if note == "LEVEL UP!" and self.level:
-                self.level += 1                 # until the new level's EXP confirms it
-            status = f"{r.where}. Read {r.text}  {note}".strip()
+            if note == "LEVEL UP!":
+                self.level_up_at = now
+                if self.level:
+                    self.level += 1             # until the new level's EXP confirms it
+            status = self._status_for(note)
         else:
             status = r.where
         if self.note:
@@ -2134,8 +2647,33 @@ class App:
         self.level = level_for_req(t.req) or self.level
         self._log_tick(now)
 
+    def _status_for(self, note):
+        """What the status line says while the EXP bar is being read (details: View capture)."""
+        t = self.tracker
+        if self.level_up_at and time.monotonic() - self.level_up_at < 6:
+            return f"Level up! You're now Lv {self.level}." if self.level else "Level up!"
+        if self.rejected >= 5:
+            return "Having trouble reading the EXP bar clearly. View capture shows what it sees."
+        if t.req is None:
+            # Normally the level is known within seconds; if not, it needs an EXP gain.
+            if time.monotonic() - self.found_at < 8:
+                return "Found your EXP bar. Working out your level..."
+            return "Found your EXP bar. Your level shows after your next EXP gain."
+        s = self.session
+        if s.waiting == "idle":
+            return (f"Paused: no EXP for {s.gap} seconds, so this time doesn't count. "
+                    "It carries on at your next EXP gain.")
+        if s.waiting == "map":
+            return ("Paused: you left the map. It carries on at your next EXP gain "
+                    "(from zero if that's on a different map).")
+        if t.running:
+            return "Tracking your EXP. Not logging this run." if self.skip_log else "Tracking your EXP."
+        if t.elapsed() > 0:
+            return "Paused. Press Resume to carry on."
+        return "Ready. Press Start when you begin farming."
+
     def _log_tick(self, now):
-        if not self.tracker.running:
+        if not self.tracker.running or self.skip_log:
             return
         m = self.meso
         mesos = (m.gained, m.seen_at) if m.value is not None and now - m.seen_at <= 30 else None
@@ -2156,7 +2694,8 @@ class App:
     def _update_display(self):
         t, now = self.tracker, time.monotonic()
         rate = t.rate()
-        self.big.config(text=fmt_num(rate) if rate is not None else "—")
+        self.big.config(text=fmt_num(rate) if rate is not None else "—",
+                        fg=ACCENT if rate is not None else DIM)
         self.vars["Last 5 min"].set(fmt_num(t.rolling_rate()))
         self.vars["% / hr"].set(f"{rate / t.req * 100:.2f}%" if rate and t.req else "—")
         lvl = f"  (+{t.levels} lvl)" if t.levels else ""
@@ -2165,40 +2704,74 @@ class App:
         if shown:
             self.vars["Current"].set(f"{fmt_num(shown[0])} [{shown[1]:.2f}%]")
         best_rate = t.rolling_rate() or rate
-        if t.req and t.exp is not None and best_rate and best_rate > 0:
-            self.vars["To level"].set(fmt_dur((t.req - t.exp) / best_rate * 3600))
+        level = level_for_req(t.req) or self.level
+        eta = fmt_eta((t.req - t.exp) / best_rate * 3600) if (
+            t.req and t.exp is not None and best_rate and best_rate > 0) else None
+        if level and eta:
+            self.next_level.config(text=f"Lv {level + 1} in {eta}")
         else:
-            self.vars["To level"].set("—")
+            self.next_level.config(text=f"Lv {level}" if level else "")
         m, el = self.meso, t.elapsed()
         if m.value is None:
-            self.vars["Mesos"].set("open inventory")
+            self.vars["Mesos"].set("move this window" if self.reader.mesos_covered else "open inventory")
         else:
             self.vars["Mesos"].set(fmt_num(m.value) + (f"  (+{fmt_short(m.gained)})" if m.gained > 0 else ""))
         self.vars["Mesos / hr"].set(fmt_num(m.per_hour(el)))
         self.vars["Mesos / 5 min"].set(fmt_num(m.per_5min(el)))
         self.vars["Elapsed"].set(fmt_dur(el))
+        waiting = self.session.waiting
+        self.session.tick(now)
+        if self.session.waiting != waiting:             # just paused by itself: say why now
+            self._after_pause_check(waiting)
+            self.status.set(self._status_for(""))
         self._log_tick(now)
         self.log_status.set(self._log_status_text(now))
         self.reader.own_rect = self._window_rect()
 
     # ---- buttons
     def toggle(self):
-        if self.tracker.running:
-            self.tracker.pause()
-            self.meso.pause()
+        if self.session.on:                     # (also while it's paused by itself)
+            self.session.pause()
             self.start_btn.config(text="Resume")
         else:
-            self.tracker.start()
+            self.session.start(time.monotonic())
             self.reader.request_map()           # read the map name now
             self.start_btn.config(text="Pause")
         self.autolog.reset_clock()
+        if self.tracker.exp is not None:
+            self.status.set(self._status_for(""))   # right away, not at the next read
 
     def reset(self):
-        self.tracker.reset()
-        self.meso.reset()
+        self.session.reset()
         self.autolog.reset_clock()
+        self.skip_log = False
+        self._show_skip_log()
         self.start_btn.config(text="Start")
         self.status.set("Reset.")
+
+    def toggle_skip_log(self):
+        self.skip_log = not self.skip_log
+        self.autolog.reset_clock()              # nothing from before or during it is logged
+        self._show_skip_log()
+        self.status.set("This run won't be logged. Logging turns back on when you leave the map "
+                        "or stop getting EXP." if self.skip_log else "Logging this run again.")
+
+    def _show_skip_log(self):
+        if self.skip_log:
+            self.skip_btn.config(text="Not logging", bg=ACCENT_SOFT, fg=BG, activebackground=ACCENT,
+                                 activeforeground=BG)
+        else:
+            style = self._btn_style
+            self.skip_btn.config(text="Don't log", bg=style["bg"], fg=style["fg"],
+                                 activebackground=style["activebackground"],
+                                 activeforeground=style["activeforeground"])
+
+    def _after_pause_check(self, waiting_before):
+        """When the run ends (tracking pauses by itself), "Don't log" turns off again, so
+        the next run is logged. (Pressed while already paused, it's for the next run.)"""
+        if self.skip_log and waiting_before is None and self.session.waiting:
+            self.skip_log = False
+            self._show_skip_log()
 
     def _new_source(self):
         # New place to read from -> new baseline, but keep the session totals.
@@ -2207,10 +2780,20 @@ class App:
         self.autolog.reset_clock()
         save_config(self.cfg)
 
+    def _show_area_mode(self):
+        self.area_btn.config(text="Follow game" if self.reader.mode == "region" else "Select area")
+
+    def toggle_area(self):
+        if self.reader.mode == "region":
+            self.follow_game()
+        else:
+            self.select_area()
+
     def follow_game(self):
         self.reader.use_window()
         self.cfg["mode"] = "window"
         self._new_source()
+        self._show_area_mode()
         self.status.set("Following the MapleStory window...")
 
     def select_area(self):
@@ -2219,6 +2802,7 @@ class App:
                 self.reader.use_region(region)
                 self.cfg.update(mode="region", region=region)
                 self._new_source()
+                self._show_area_mode()
                 self.status.set("Using your selected area. Click Follow game to go back to "
                                 "finding it automatically.")
         RegionSelector(self.root, done)
@@ -2239,7 +2823,9 @@ class App:
     def view_capture(self):
         r, mr = self.last_capture, self.last_mesos
         if not r and not mr:
-            self.status.set("Nothing captured yet.")
+            messagebox.showinfo("View capture", "Nothing has been read from the game yet.\n\n"
+                                "Make sure MapleStory is open and its EXP bar is showing.",
+                                parent=self.root)
             return
         win = tk.Toplevel(self.root)
         win.title("Last capture")
@@ -2247,7 +2833,7 @@ class App:
         win.attributes("-topmost", bool(self.cfg["topmost"]))
         shots = []
         if r:
-            shots.append((r.image, r.boxes, f"EXP bar. Read: {r.text or 'nothing'}"))
+            shots.append((r.image, r.boxes, f"EXP bar. Read: {r.text or 'nothing'}   ({r.where})"))
         if mr:
             read = fmt_num(mr.mesos) if mr.mesos is not None else "nothing (waiting for a clear look)"
             shots.append((mr.mesos_image, mr.mesos_boxes, f"Mesos. Read: {read}"))
@@ -2259,8 +2845,21 @@ class App:
         tk.Label(win, text="Boxes show where each digit was found.", bg=BG, fg=DIM).pack(
             anchor="w", padx=8, pady=(4, 8))
 
+    def _remember_log_size(self):
+        """Keeps the log's column widths, and the window size if the user resized it."""
+        tree, root = self.log_tree, self.root
+        self.cfg["log_columns"] = {c: int(tree.column(c, "width")) for c in tree["columns"]}
+        if self.log_open:
+            size = [root.winfo_width(), root.winfo_height()]
+            natural = [root.winfo_reqwidth(), root.winfo_reqheight()]
+            self.cfg["log_size"] = size if size != natural else None
+
     def close(self):
         self.stop_evt.set()
+        try:
+            self._remember_log_size()
+        except Exception as e:
+            log_error("saving the log size", e)
         self.cfg["pos"] = [self.root.winfo_x(), self.root.winfo_y()]
         save_config(self.cfg)
         self.root.destroy()
@@ -2273,10 +2872,20 @@ def main():
     lock = "Local\\MapleEXP-" + hashlib.md5(str(DATA_DIR).lower().encode()).hexdigest()[:12]
     _single_instance = _CreateMutex(None, False, lock)
     if ctypes.get_last_error() == 183:                      # ERROR_ALREADY_EXISTS
-        hwnd = _FindWindow(None, WINDOW_TITLE)
-        if hwnd:
-            _ShowWindow(hwnd, 9)                            # SW_RESTORE
-            _SetForegroundWindow(hwnd)
+        found = []
+
+        def check(hwnd, _):                                 # any version's main window
+            title = ctypes.create_unicode_buffer(256)
+            _GetWindowText(hwnd, title, 256)
+            if title.value.startswith(WINDOW_TITLE) and _IsWindowVisible(hwnd):
+                found.append(hwnd)
+            return True
+        _EnumWindows(_EnumWindowsProc(check), 0)
+        if found:
+            _ShowWindow(found[0], 9)                        # SW_RESTORE
+            _SetForegroundWindow(found[0])
+        else:
+            ctypes.windll.user32.MessageBoxW(None, "Maple EXP/hr is already running.", WINDOW_TITLE, 0x40)
         return
     move_old_data()
     tess = find_tesseract()
