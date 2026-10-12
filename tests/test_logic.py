@@ -80,6 +80,8 @@ e = {"date": "2026-10-11", "map": "The Land of Wild Boar II", "level": 29, "part
 check("full line format", m.format_entry(e) ==
       "Oct 11th, 2026 - The Land of Wild Boar II - Lv 29 - 4ppl party - 51,862exp/hr - 32,713mesos/hr - 1 h 00 min")
 check("table row format", m.log_row(e)[1:] == ("The Land of Wild Boar II", 29, "4ppl", "1h 00m", "51,862", "32,713"))
+check("release notes are shown as plain text, keeping names like exp_log.txt",
+      m._plain_text("**New**\n- **Time** in `exp_log.txt`, see [README](https://x)") == "New\n• Time in exp_log.txt, see README")
 check("how long each line was measured over", [m.fmt_logged(s) for s in (300.4, 1500, 3900)] == ["5 min", "25 min", "1 h 05 min"]
       and [m.fmt_logged(s, short=True) for s in (300.4, 1500, 3900)] == ["5m", "25m", "1h 05m"])
 

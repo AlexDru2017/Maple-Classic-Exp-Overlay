@@ -208,7 +208,8 @@ def version_key(version):
 def _plain_text(markdown):
     """Release notes from GitHub, readable as plain text."""
     t = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", markdown)          # [text](link) -> text
-    t = re.sub(r"[*_`]{1,3}", "", t)
+    t = re.sub(r"(\*\*|__)(.+?)\1", r"\2", t)                       # **bold** (keeps exp_log.txt)
+    t = re.sub(r"`([^`]*)`", r"\1", t)
     t = re.sub(r"^#+\s*", "", t, flags=re.M)
     t = re.sub(r"^\s*[-*]\s+", "• ", t, flags=re.M)
     t = re.sub(r"\n{3,}", "\n\n", t.replace("\r", ""))
