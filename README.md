@@ -4,9 +4,11 @@
 
 > **This is a beta.** It works, but you might run into rough edges. I'm actively improving it, so check back for updates. If something doesn't work, please [tell me](../../issues)!
 
-![The tracker while farming, with its log open](docs/screenshot-main.png)
+![The tracker next to MapleStory, while farming](docs/screenshot-game.jpg)
 
 ## What it shows
+
+![The tracker up close, with its log open](docs/screenshot-main.png)
 
 - **EXP per hour**, for your whole session and for the last 5 minutes
 - **How long until your next level**, right under your EXP/hr (for example "Lv 31 in 36 min")
@@ -59,7 +61,7 @@ Within a few seconds it shows your level and how much EXP you have. The per-hour
 
 ## The log
 
-Click **>** at the top right of the tracker to open the log. It's the table on the right in the picture at the top.
+Click **>** at the top right of the tracker to open the log. It's the table on the right in the close-up picture above.
 
 - **After 5 minutes of non-stop farming**, it adds a line for that map, your level and your party size.
 - **Every 5 more minutes** it updates that line, so the numbers get more accurate the longer you farm.
