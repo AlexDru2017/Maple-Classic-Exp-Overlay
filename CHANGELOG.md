@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.9.2-beta
+
+**New**
+- **Time** in the log: how long each line is based on, growing by 5 minutes with every update. Also in copied lines and `exp_log.txt`.
+- **Report a bug** button (in Settings and in View capture): opens a bug report on GitHub, already filled in with what the tracker was reading, plus a picture to drag in. Nothing is sent until you click Submit.
+- **Reset** now also looks for the minimap, inventory and party list again, so it picks them up after you move them.
+
+**Fixed**
+- The map name wasn't read when the tracker's window was right next to the minimap (but not covering it). The same is fixed for the party list.
+
 ## 0.9.1-beta
 
 **New**

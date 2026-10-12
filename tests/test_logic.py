@@ -78,8 +78,10 @@ check("two copies of the app can't erase each other's lines",
 e = {"date": "2026-10-11", "map": "The Land of Wild Boar II", "level": 29, "party": 4,
      "exp": 51862, "seconds": 3600, "mesos": 32713, "mesos_seconds": 3600}
 check("full line format", m.format_entry(e) ==
-      "Oct 11th, 2026 - The Land of Wild Boar II - Lv 29 - 4ppl party - 51,862exp/hr - 32,713mesos/hr")
-check("table row format", m.log_row(e)[1:] == ("The Land of Wild Boar II", 29, "4ppl", "51,862", "32,713"))
+      "Oct 11th, 2026 - The Land of Wild Boar II - Lv 29 - 4ppl party - 51,862exp/hr - 32,713mesos/hr - 1 h 00 min")
+check("table row format", m.log_row(e)[1:] == ("The Land of Wild Boar II", 29, "4ppl", "1h 00m", "51,862", "32,713"))
+check("how long each line was measured over", [m.fmt_logged(s) for s in (300.4, 1500, 3900)] == ["5 min", "25 min", "1 h 05 min"]
+      and [m.fmt_logged(s, short=True) for s in (300.4, 1500, 3900)] == ["5m", "25m", "1h 05m"])
 
 log, _ = new_log()
 log.entries = [{"date": "2026-10-08", "map": "Kerning City", "level": 27, "exp": 1, "seconds": 1},

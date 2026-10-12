@@ -50,7 +50,7 @@ Within a few seconds it shows your level and how much EXP you have. The per-hour
 | Button | What it does |
 |---|---|
 | **Start / Pause / Resume** | Starts tracking. **Pause** stops it until you press **Resume**. |
-| **Reset** | Starts a new session from zero |
+| **Reset** | Starts a new session from zero, and looks for the minimap, inventory and party list again (handy after moving them around) |
 | **Don't log** | Keeps the current run out of the log, for example while you're testing a map or waiting for your party. Everything is still shown on screen. It turns itself off when you leave the map or stop getting EXP, so your next run is logged as usual. |
 | **Select area** | Lets you drag a box around the EXP numbers, if it ever can't find them. The button then turns into **Follow game**, which goes back to finding them by itself. |
 | **View capture** | Shows exactly what it read from your screen |
@@ -63,11 +63,11 @@ Click **>** at the top right of the tracker to open the log. It's the table on t
 
 - **After 5 minutes of non-stop farming**, it adds a line for that map, your level and your party size.
 - **Every 5 more minutes** it updates that line, so the numbers get more accurate the longer you farm.
+- **Time** shows how long a line is based on. It grows by 5 minutes with each update.
 - **Taking a break restarts the 5-minute timer.** A break means no EXP for 15 seconds (you can change this in ⚙). Changing maps or party size restarts it too.
 - **Don't want a run logged?** Press **Don't log**. It switches back on its own when that run ends.
 - **Solo** means just you. **4ppl** means a party of 4.
 - **?** under Mesos/hr means your inventory wasn't open.
-- **Click a line** to see how many minutes of farming it's based on.
 - **Right-click a line** to:
   - **Copy line**, to paste it into Discord or anywhere else
   - **Rename map**, if it read the name wrong (it remembers the fix for next time)
@@ -82,6 +82,7 @@ Click **>** at the top right of the tracker to open the log. It's the table on t
 - **Check for updates when it starts.** On by default. See [Updates](#updates).
 - **Open data folder.** Opens the folder where your log and settings are saved.
 - **Check for updates.** Checks right now.
+- **Report a bug.** See below.
 
 ## How accurate is it?
 
@@ -110,11 +111,12 @@ Every version is tested against thousands of misread numbers, and against real s
 | The log says "Map not read yet" | Make sure the minimap is open at the top left of the game, and the tracker isn't covering it. |
 | The map name is wrong | Right-click the log line and choose **Rename map**. |
 | "This window is covering..." | Drag the tracker to another spot. |
-| Numbers stopped updating, or anything else | Please [report it](../../issues). |
+| Numbers stopped updating, or anything else | Please report it (see below). |
 
-**When you report a problem,** please include:
-1. A screenshot of **View capture**.
-2. The file **errors.log**, if there is one. Open ⚙, click **Open data folder**, and it's in there.
+**To report a bug,** click **Report a bug** in ⚙ (or **Something's wrong? Report a bug** in View capture):
+1. Your browser opens a bug report on GitHub, already filled in with your version and what the tracker was reading. Nothing personal is included, and nothing is sent until you click Submit.
+2. A folder opens with **bug-report.png**, a picture of what the tracker read. Drag it into the report.
+3. Write a sentence about what went wrong, and click **Submit**. (You need a free GitHub account.)
 
 ## Is it safe? Is it allowed?
 

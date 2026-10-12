@@ -16,6 +16,9 @@ inside %APPDATA%.
 import ctypes
 import json
 import os
+import platform
+import subprocess
+import urllib.parse
 import urllib.request
 import webbrowser
 import queue
@@ -50,7 +53,7 @@ except Exception:
     except Exception:
         pass
 
-VERSION = "0.9.1-beta"
+VERSION = "0.9.2-beta"
 WINDOW_TITLE = "Maple EXP/hr"                 # the version is shown in Settings
 
 # Files that come with the program (inside the .exe when packaged), the folder it runs from,
@@ -1055,6 +1058,7 @@ class ScreenReader:
         self.party_area = None      # where the party list was last seen, on screen
         self.next_scan = 0.0
         self.own_rect = None        # this app's window, which screenshots can't see through
+        self.look_again_requested = False
 
     def use_window(self):
         self.mode, self.hwnd, self.box = "window", None, None
@@ -1066,7 +1070,23 @@ class ScreenReader:
         """Read the map name on the next look, even if it doesn't seem to have changed."""
         self.next_map_search, self.next_map_read, self.map_unread = 0.0, 0.0, True
 
+    def look_again(self):
+        """Forget where everything was (EXP bar, minimap, inventory, party list) and look
+        for it all again. Done by the reading thread itself, at its next look."""
+        self.look_again_requested = True
+
+    def _forget_places(self):
+        self.box, self.misses = None, 0
+        self.map_box, self.map_print = None, None
+        self.mesos_box = self.saved_mesos = None
+        self.mesos_fails, self.mesos_count, self.mesos_pending = 0, None, (None, 0)
+        self.mesos_covered, self.party_area, self.next_scan = False, None, 0.0
+        self.request_map()
+
     def read(self, sct):
+        if self.look_again_requested:
+            self.look_again_requested = False
+            self._forget_places()
         rect = self._game_rect()
         if self.mode == "region":
             reading = self._read_region(sct, rect)
@@ -1225,8 +1245,10 @@ class ScreenReader:
                     if len(bars) >= 2:
                         x0, y0 = min(b[0] for b in bars), min(b[1] for b in bars)
                         x1, y1 = max(b[0] + b[2] for b in bars), max(b[1] + b[3] for b in bars)
-                        self.party_area = (sx + x0 - int(12 * g), sy + y0 - int(g),
-                                           x1 - x0 + int(13 * g), y1 - y0 + int(2 * g))
+                        # Only the HP bars are counted, so only they (and a little room
+                        # around them) must be clear of this window.
+                        self.party_area = (sx + x0 - int(g), sy + y0 - int(g),
+                                           x1 - x0 + int(2 * g), y1 - y0 + int(2 * g))
         mesos, image, boxes = None, None, ()
         self.mesos_covered = False
         if self.mesos_box:
@@ -1341,9 +1363,10 @@ class ScreenReader:
                 note = "Can't see the map name. Is the minimap open?"
         else:
             bx, by, bw, bh = self.map_box
-            if self._covered(wx + bx, wy + by, bw, bh, margin=g):
-                # Even a box that only touches this window may be cut off by it. Find the
-                # whole box again (and read the name) once this window is out of the way.
+            if self._covered(wx + bx, wy + by, bw, bh, margin=max(3, int(0.1 * g))):
+                # Even a box that only touches this window may be cut off by it (it was
+                # found with this window blacked out). Find the whole box again (and read
+                # the name) once this window is out of the way.
                 note = "This window is covering the minimap. Move it so the map name can be read."
                 self.map_box, self.map_unread = None, True
             else:
@@ -1798,8 +1821,16 @@ def party_label(n):
     return "Solo" if not n or n <= 1 else f"{n}ppl party"
 
 
+def fmt_logged(seconds, short=False):
+    """How long a log line was measured over: '25 min' / '1 h 05 min', or short '25m' / '1h 05m'."""
+    hours, minutes = divmod(int(round((seconds or 0) / 60)), 60)
+    if short:
+        return f"{hours}h {minutes:02d}m" if hours else f"{minutes}m"
+    return f"{hours} h {minutes:02d} min" if hours else f"{minutes} min"
+
+
 def format_entry(e):
-    """e.g. 'Oct 8th, 2026 - Rocky Road II - Lv 27 - Solo - 15,429exp/hr - 3,210mesos/hr'"""
+    """e.g. 'Oct 8th, 2026 - Rocky Road II - Lv 27 - Solo - 15,429exp/hr - 3,210mesos/hr - 25 min'"""
     d = date.fromisoformat(e["date"])
     level = e["level"] if e["level"] is not None else "?"
     parts = [f"{MONTHS[d.month - 1]} {_ordinal(d.day)}, {d.year}", e["map"], f"Lv {level}"]
@@ -1810,11 +1841,12 @@ def format_entry(e):
     if tracked:
         ms = e.get("mesos_seconds", 0)
         parts.append(f"{e['mesos'] / ms * 3600:,.0f}mesos/hr" if ms else "?mesos/hr")
+    parts.append(fmt_logged(e["seconds"]))
     return " - ".join(parts)
 
 
 def log_row(e):
-    """The log table's cells for an entry: Date, Map, Lv, Party, EXP/hr, Mesos/hr."""
+    """The log table's cells for an entry: Date, Map, Lv, Party, Time, EXP/hr, Mesos/hr."""
     d = date.fromisoformat(e["date"])
     day = f"{MONTHS[d.month - 1]} {d.day}" + ("" if d.year == date.today().year else f" '{d.year % 100:02d}")
     level = e["level"] if e["level"] is not None else "?"
@@ -1823,7 +1855,7 @@ def log_row(e):
     exp = f"{e['exp'] / e['seconds'] * 3600:,.0f}" if e["seconds"] else "—"
     ms = e.get("mesos_seconds", 0)
     mesos = f"{e['mesos'] / ms * 3600:,.0f}" if ms else ("?" if tracked else "")
-    return day, e["map"], level, party, exp, mesos
+    return day, e["map"], level, party, fmt_logged(e["seconds"], short=True), exp, mesos
 
 
 def _numbers(name):
@@ -2132,7 +2164,7 @@ class RegionSelector:
 BG, FG, DIM, ACCENT, FIELD = "#1b1d23", "#e8e8e8", "#8a8f98", "#ffcc33", "#2c3038"
 ACCENT_SOFT = "#d9b04a"     # a quieter gold, for text that goes with the big number
 LIST_BG, LIST_BG2 = "#23262d", "#282b33"
-LOG_HINT = "Click a line for details. Right-click to copy, rename or delete it."
+LOG_HINT = "Right-click a line to copy, rename or delete it."
 
 
 class App:
@@ -2276,6 +2308,7 @@ class App:
         # real font, so nothing is cut off at any screen scaling.
         columns = (("date", "Date", "Sep 30", "w"), ("map", "Map", "The Swamp of Despair II", "w"),
                    ("lv", "Lv", "99", "center"), ("party", "Party", "6ppl", "center"),
+                   ("time", "Time", "12h 30m", "center"),
                    ("exp", "EXP/hr", "888,888", "e"), ("mesos", "Mesos/hr", "888,888", "e"))
         saved = self.cfg.get("log_columns") or {}
         pad = cell.measure("00")
@@ -2459,6 +2492,8 @@ class App:
                      padx=12, pady=3, font=("Segoe UI", 9))
         tk.Button(buttons, text="Open data folder", command=self.open_data_folder, **style).pack(side="left")
         tk.Button(buttons, text="Check for updates", command=lambda: self.check_updates(manual=True),
+                  **style).pack(side="left", padx=(6, 0))
+        tk.Button(buttons, text="Report a bug", command=lambda: self.report_bug(w),
                   **style).pack(side="left", padx=(6, 0))
         tk.Button(buttons, text="Close", command=w.destroy, **style).pack(side="right", padx=(6, 0))
         pt = float(self.root.tk.call("tk", "scaling"))         # screen pixels per point
@@ -2747,7 +2782,12 @@ class App:
         self.skip_log = False
         self._show_skip_log()
         self.start_btn.config(text="Start")
-        self.status.set("Reset.")
+        # Also look for the minimap, inventory and party list again (e.g. after moving them).
+        self.reader.look_again()
+        self.map_name, self.party, self._party_seen = None, 1, (None, 0)
+        self.cfg.pop("mesos_box", None)
+        save_config(self.cfg)
+        self.status.set("Reset. Looking for the map name, inventory and party list again...")
 
     def toggle_skip_log(self):
         self.skip_log = not self.skip_log
@@ -2808,7 +2848,7 @@ class App:
         RegionSelector(self.root, done)
 
     @staticmethod
-    def _boxed(bgr, boxes):
+    def _boxed_image(bgr, boxes):
         """A screenshot crop, enlarged, with a box drawn around each digit found."""
         img = Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
         scale = min(4.0, max(1.0, 120 / img.height), 900 / img.width)
@@ -2818,7 +2858,10 @@ class App:
         for x0, y0, x1, y1, kind in boxes:
             draw.rectangle([x0 * scale, y0 * scale, x1 * scale, y1 * scale],
                            outline=colors[kind], width=2)
-        return ImageTk.PhotoImage(img)
+        return img
+
+    def _boxed(self, bgr, boxes):
+        return ImageTk.PhotoImage(self._boxed_image(bgr, boxes))
 
     def view_capture(self):
         r, mr = self.last_capture, self.last_mesos
@@ -2842,8 +2885,99 @@ class App:
             win._imgs.append(self._boxed(shot, boxes))
             tk.Label(win, image=win._imgs[-1], bg=BG).pack(padx=8, pady=(8, 2))
             tk.Label(win, text=text, bg=BG, fg=FG).pack(anchor="w", padx=8)
-        tk.Label(win, text="Boxes show where each digit was found.", bg=BG, fg=DIM).pack(
-            anchor="w", padx=8, pady=(4, 8))
+        bottom = tk.Frame(win, bg=BG)
+        bottom.pack(fill="x", padx=8, pady=(4, 8))
+        tk.Label(bottom, text="Boxes show where each digit was found.", bg=BG, fg=DIM).pack(side="left")
+        tk.Button(bottom, text="Something's wrong? Report a bug", command=lambda: self.report_bug(win),
+                  bg=FIELD, fg=FG, activebackground="#3a3f49", activeforeground=FG, relief="flat",
+                  padx=10, pady=2, font=("Segoe UI", 9)).pack(side="right")
+
+    # ---- bug reports
+    def report_bug(self, parent=None):
+        """Opens a new GitHub issue in the browser, filled in with what the tracker knows, and
+        saves a picture of what it last read for the player to drag in. Nothing is sent by
+        the tracker itself: the player sees everything and clicks Submit (or doesn't)."""
+        parent = parent or self.root
+        if not messagebox.askokcancel(
+                "Report a bug",
+                "Your browser will open a bug report on GitHub, already filled in with your "
+                "version and what the tracker was reading (nothing personal).\n\n"
+                "1. Write a sentence about what went wrong.\n"
+                "2. Drag in the picture from the folder that opens.\n"
+                "3. Click Submit.\n\n"
+                "You need a free GitHub account.", parent=parent):
+            return
+        picture = self._save_report_picture()
+        query = urllib.parse.urlencode({"title": f"Bug: (describe it here) [v{VERSION}]",
+                                        "body": self._report_text(picture)})
+        webbrowser.open(f"https://github.com/{GITHUB_REPO}/issues/new?{query}")
+        if picture:
+            try:
+                subprocess.Popen(["explorer", f"/select,{picture}"])
+            except Exception as e:
+                log_error("opening the bug report picture's folder", e)
+
+    def _save_report_picture(self):
+        """What the tracker last read (EXP bar and mesos, with the digit boxes), as one PNG."""
+        parts = []
+        if self.last_capture is not None:
+            parts.append(self._boxed_image(self.last_capture.image, self.last_capture.boxes))
+        if self.last_mesos is not None:
+            parts.append(self._boxed_image(self.last_mesos.mesos_image, self.last_mesos.mesos_boxes))
+        if not parts:
+            return None
+        sheet = Image.new("RGB", (max(p.width for p in parts), sum(p.height + 8 for p in parts)), BG)
+        y = 0
+        for p in parts:
+            sheet.paste(p, (0, y))
+            y += p.height + 8
+        path = DATA_DIR / "bug-report.png"
+        try:
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            sheet.save(path)
+            return path
+        except Exception as e:
+            log_error("saving the bug report picture", e)
+            return None
+
+    def _report_text(self, picture):
+        """The bug report's text: room to describe it, then the details, without anything
+        personal (your Windows user name is taken out of file paths)."""
+        def private(text):
+            for secret in {str(Path.home()), os.environ.get("USERNAME", "")}:
+                if len(secret) > 2:
+                    text = text.replace(secret, "<you>")
+            return text
+        r, mr, t = self.last_capture, self.last_mesos, self.tracker
+        errors = ""
+        try:
+            errors = private(ERROR_LOG_PATH.read_text(encoding="utf-8", errors="replace"))[-1500:]
+        except Exception:
+            pass
+        lines = [
+            "**What went wrong?**", "(Describe it here: what did you do, what did you expect, what did it show?)", "",
+            "**Screenshot**",
+            ("(Drag in `bug-report.png` from the folder that just opened: it shows what the tracker read.)"
+             if picture else "(If you can, add a screenshot of the game and the tracker.)"), "",
+            "---", "<details><summary>Details (filled in by the tracker)</summary>", "",
+            f"- Version: {VERSION} ({'download' if getattr(sys, 'frozen', False) else 'from source'})",
+            f"- Windows: {platform.version()}",
+            f"- Game window: {'x'.join(map(str, self.reader.size)) if self.reader.size else 'not found'}"
+            f" (EXP digits {fmt_num(self.reader.gh) if self.reader.gh else '?'} px)",
+            f"- Last EXP read: {r.text if r else 'nothing'}",
+            f"- Level: {self.level or '?'}, map: {self.map_name or 'not read'}, party: {party_label(self.party)}",
+            f"- Mesos: {fmt_num(self.meso.value) if self.meso.value is not None else 'not read'}"
+            f" (last read {fmt_num(mr.mesos) if mr and mr.mesos is not None else 'nothing'})",
+            f"- Tracking: {'on' if self.session.on else 'off'}, paused: {self.session.waiting or 'no'},"
+            f" gained {fmt_num(t.gained)} EXP in {fmt_dur(t.elapsed())}",
+            f"- Status: {private(self.status.get())}",
+            f"- Settings: pause after {self.cfg['gap_seconds']} s, transparency {self.cfg['transparency']}%,"
+            f" map names {'on' if tesseract_ok else 'off (no Tesseract)'}",
+        ]
+        if errors:
+            lines += ["", "Recent errors:", "```", errors.strip(), "```"]
+        lines += ["", "</details>"]
+        return "\n".join(lines)
 
     def _remember_log_size(self):
         """Keeps the log's column widths, and the window size if the user resized it."""
