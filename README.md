@@ -56,6 +56,7 @@ Within a few seconds it shows your level and how much EXP you have. The per-hour
 | **Don't log** | Keeps the current run out of the log, for example while you're testing a map or waiting for your party. Everything is still shown on screen. It turns itself off when you leave the map or stop getting EXP, so your next run is logged as usual. |
 | **Select area** | Lets you drag a box around the EXP numbers, if it ever can't find them. The button then turns into **Follow game**, which goes back to finding them by itself. |
 | **View capture** | Shows exactly what it read from your screen |
+| **Best maps** | Opens the [best-maps website](#best-maps-for-your-class), already showing maps for your level, party size and class |
 | **⚙** | Settings |
 | **>** | Opens the log |
 
@@ -67,7 +68,7 @@ Click **>** at the top right of the overlay to open the log. It's the table on t
 - **Every 5 more minutes** it updates that line, so the numbers get more accurate the longer you farm.
 - **Time** shows how long a line is based on. It grows by 5 minutes with each update.
 - **Class** is read from the status bar (never your character's name). Different classes get separate lines.
-- **1-hour runs:** under the log it also counts toward a full hour of non-stop farming on one map with the same party size ("1-hour run: 37 of 60 min"). A level-up doesn't stop it; a break, a new map or a new party size starts it over. Finished hours are saved separately and, if you said yes, shared with the [best-maps site](#best-maps-for-your-class).
+- **15-minute runs:** under the log it also counts toward 15 minutes of non-stop farming on one map with the same party size ("15-min run: 7 of 15 min"). A level-up doesn't stop it; a break, a new map or a new party size starts it over. Finished runs are saved separately and, if you said yes, shared with the [best-maps site](#best-maps-for-your-class).
 - **Greyed-out lines** were changed outside the overlay. Every line the overlay writes is sealed, so a line edited or added by hand is easy to spot, and it won't count toward the best-maps site. Deleting a line, or renaming a map in the overlay, is fine.
 - **Taking a break restarts the 5-minute timer.** A break means no EXP for 15 seconds (you can change this in ⚙). Changing maps or party size restarts it too.
 - **Don't want a run logged?** Press **Don't log**. It switches back on its own when that run ends.
@@ -85,21 +86,22 @@ Click **>** at the top right of the overlay to open the log. It's the table on t
 - **Window transparency.** Makes the overlay see-through.
 - **Always on top of other windows.** Keeps the overlay above the game. It's on by default.
 - **Check for updates when it starts.** On by default. See [Updates](#updates).
-- **Share my 1-hour runs.** See [Best maps for your class](#best-maps-for-your-class).
+- **Share my 15-minute runs.** See [Best maps for your class](#best-maps-for-your-class).
 - **Open data folder.** Opens the folder where your log and settings are saved.
 - **Check for updates.** Checks right now.
 - **Report a bug.** See below.
 
 ## Best maps for your class
 
-**[maple-classic-exp-overlay.pages.dev](https://maple-classic-exp-overlay.pages.dev)** shows which maps give the most EXP/hr and mesos/hr for your class, level and party size, from real hours farmed by players.
+**[maple-classic-exp-overlay.pages.dev](https://maple-classic-exp-overlay.pages.dev)** shows which maps give the most EXP/hr and mesos/hr for your class and level, solo or in a party, from real hours farmed by players. Click **Best maps** at the top of the overlay to open it, already filled in for you.
 
-- **Enter your level and party size, then pick your class and path.** Paths are named after their 4th job, like Night Lord or Bishop, and include the jobs before it (Shadower is Bandits, Chief Bandits and Shadowers). Under Lv 30 you're still 1st job, so Path is greyed out and you see what every player of your class gets.
+- **Enter your level and whether you're solo or in a party, then pick your class and path.** Paths are named after their 4th job, like Night Lord or Bishop, and include the jobs before it (Shadower is Bandits, Chief Bandits and Shadowers). Under Lv 30 you're still 1st job, so Path is greyed out and you see what every player of your class gets.
+- **Around your level** means within 5 levels either way, and parties of any size count together, so maps fill in sooner.
 
-- **It's built from 1-hour runs:** full hours of non-stop farming on one map with the same party size. The log shows your progress ("1-hour run: 37 of 60 min").
+- **It's built from 15-minute runs:** 15 minutes of non-stop farming on one map with the same party size. The log shows your progress ("15-min run: 7 of 15 min").
 - **Sharing is your choice.** The first time you start the overlay, it asks whether to share your runs. You can change it any time in ⚙.
 - **What's shared:** the map, your level, class and party size, the EXP and mesos you got, and a random ID for your copy of the overlay. Never your character's name.
-- **Keeping it honest:** the site uses the typical (median) hour, counts each player once, leaves out hours far from what other players get there, and only shows a map once 3 different players have farmed it.
+- **Keeping it honest:** the site uses the typical (median) run, counts each player once, leaves out runs far from what other players get there, and only shows a map once 3 different players have farmed it.
 
 ## How accurate is it?
 
@@ -138,9 +140,24 @@ Every version is tested against thousands of misread numbers, and against real s
 ## Is it safe? Is it allowed?
 
 - **It only looks at your screen, like a screen recorder.** It never touches the game's files or memory, and never presses keys or clicks for you.
-- **It only goes online for two things:** asking GitHub whether there's a newer version when it starts, and, only if you said yes, sharing your finished 1-hour runs (see above). Nothing about who you are is sent. Both can be turned off in ⚙.
+- **It only goes online for two things:** asking GitHub whether there's a newer version when it starts, and, only if you said yes, sharing your finished 15-minute runs (see above). Nothing about who you are is sent. Both can be turned off in ⚙. See [Privacy](#privacy).
 - **Your antivirus might warn about it.** Antivirus programs sometimes flag small new programs by mistake. All of the code is public right here, so anyone can check what it does.
 - **It isn't made by or affiliated with Nexon.** Like any third-party tool, you use it at your own risk.
+
+## Privacy
+
+- **Your log and settings stay on your PC**, in `%APPDATA%\MapleEXP`.
+- **The update check** (on by default, can be turned off in ⚙) asks GitHub for the newest version and what's new in it. Nothing about you is sent.
+- **15-minute runs are only shared if you said yes.** Each one is the map, when you farmed it, your level, class and party size, the EXP and mesos you got, the overlay's version, and a random ID made by your copy of the overlay. Never your character's name, your game account or your Windows user name.
+- **The website keeps** those runs. To limit spam it also keeps a scrambled code made from your internet address, which changes every day. Your address itself isn't kept.
+- **Bug reports** only go to GitHub if you click Submit there yourself.
+
+## Code signing policy
+
+Windows downloads can be built on GitHub straight from this code ([Build workflow](.github/workflows/build.yml)), so anyone can check that a download matches it. Free code signing from [SignPath Foundation](https://signpath.org) is planned, so Windows stops warning about new downloads.
+
+- Committers and reviewers: [beanguri](https://github.com/beanguri)
+- Approvers: [beanguri](https://github.com/beanguri)
 
 ## Updates
 
@@ -168,7 +185,7 @@ py -3 -m pip install -r requirements.txt
 run.bat
 ```
 
-**Build the download** (puts `Maple-Classic-Exp-Overlay-v<version>.zip` in `release/`):
+**Build the download** (puts `Maple-Classic-Exp-Overlay-v<version>.zip` in `release/`, and a copy to use right away in the project folder: `Maple Classic Exp Overlay.exe` with its `_internal` folder):
 
 ```
 py -3 -m pip install -r requirements.txt pyinstaller
@@ -181,6 +198,8 @@ py -3 build.py
 py -3 tests/test_logic.py
 py -3 tests/test_screen.py
 ```
+
+GitHub runs the logic tests on every push ([Tests workflow](.github/workflows/tests.yml)). The [Build workflow](.github/workflows/build.yml) builds the download on GitHub (Actions tab, **Build**, **Run workflow**), runs all the tests first, and signs the .exe once code signing is set up.
 
 **The stats site** is in `server/`: a Cloudflare Pages site with a D1 database (free tier). The page is `server/public/`, the API is `server/src/index.js`. `npm --prefix server install`, then `npm --prefix server run dev` runs it locally, `py -3 server/test_server.py http://localhost:8787` tests it, and `npm --prefix server run deploy` puts it online.
 

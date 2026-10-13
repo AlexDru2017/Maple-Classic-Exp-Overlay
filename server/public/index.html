@@ -4,10 +4,19 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Maple Classic Exp Overlay · Best maps to farm in MapleStory Classic World</title>
-<meta name="description" content="Find the best place to farm in MapleStory Classic World: real EXP/hr and mesos/hr for your class, level and party size, shared by players using the free Maple Classic Exp Overlay.">
-<meta property="og:title" content="Maple Classic Exp Overlay · Where should you farm?">
-<meta property="og:description" content="Real EXP/hr and mesos/hr per map, for your class, level and party size. A community project, filled in by players.">
-<meta property="og:image" content="/game.webp">
+<meta name="description" content="Find the best place to farm in MapleStory Classic World: real EXP/hr and mesos/hr for your class and level, solo or in a party, shared by players using the free Maple Classic Exp Overlay.">
+<meta property="og:title" content="Where should you farm? The best maps for your class and level">
+<meta property="og:description" content="Real EXP/hr and mesos/hr per map, for your class and level, solo or in a party. A community project, filled in by players.">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Maple Classic Exp Overlay">
+<meta property="og:url" content="https://maple-classic-exp-overlay.pages.dev/">
+<meta property="og:image" content="https://maple-classic-exp-overlay.pages.dev/og.jpg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Find the best place to farm: Maple Classic Exp Overlay showing EXP/hr, mesos/hr and a log of maps">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="theme-color" content="#ffcc33">
+<link rel="canonical" href="https://maple-classic-exp-overlay.pages.dev/">
 <link rel="icon" href="/favicon.png">
 <style>
   :root {
@@ -98,6 +107,7 @@
 
   /* ---- results */
   section { padding: 64px 0; }
+  section, .hero { scroll-margin-top: 60px; }     /* not under the top bar when jumped to */
   section.results { padding-top: 40px; }
   .section-head { margin-bottom: 22px; }
   .section-head h2 { font-size: 30px; }
@@ -215,7 +225,7 @@
     <div>
       <span class="eyebrow">A community project · MapleStory Classic World</span>
       <h1>Find the best place<br>to <em>farm</em>.</h1>
-      <p class="sub">Real EXP/hr and mesos/hr for every map, for your class, level and party size. Every number is a real hour of farming, shared by players using the free <a href="#overlay">Maple Classic Exp Overlay</a>.</p>
+      <p class="sub">Real EXP/hr and mesos/hr for every map, for your class and level, solo or in a party. Every number is real farming, shared by players using the free <a href="#overlay">Maple Classic Exp Overlay</a>.</p>
       <div class="counts" id="counts">
         <div class="count"><b id="c-hours">–</b><span>hours shared</span></div>
         <div class="count"><b id="c-players">–</b><span>players</span></div>
@@ -225,7 +235,7 @@
 
     <form class="finder" id="ask">
       <h2>Where should I farm?</h2>
-      <p>Pick your level, party size, class and path.</p>
+      <p>Pick your level, solo or party, your class and path.</p>
       <div class="fields">
         <div>
           <label for="level">Level</label>
@@ -234,8 +244,7 @@
         <div>
           <label for="party">Party</label>
           <select id="party">
-            <option value="1">Solo</option><option value="2">2 people</option><option value="3">3 people</option>
-            <option value="4">4 people</option><option value="5">5 people</option><option value="6">6 people</option>
+            <option value="solo">Solo</option><option value="party">In a party</option>
           </select>
         </div>
         <fieldset class="wide">
@@ -264,7 +273,7 @@
   <div class="wrap">
     <div class="section-head">
       <span class="eyebrow">Made by players, for players</span>
-      <h2 style="margin-top:14px">Every number here is a real hour someone farmed.</h2>
+      <h2 style="margin-top:14px">Every number here is real farming someone did.</h2>
       <p>There's no secret formula and no guesswork. This site is filled in by players using the overlay who choose to share their farming. The more people share, the more maps, classes and levels it covers, and the more accurate it gets.</p>
     </div>
     <div class="steps">
@@ -272,8 +281,8 @@
         <p>A free program for Windows that sits next to the game and reads your EXP bar, mesos and map.</p></div>
       <div class="step"><div class="num">2</div><h3>Farm like you always do</h3>
         <p>It shows your EXP/hr, mesos/hr and time to your next level, and keeps a log of every map you farm.</p></div>
-      <div class="step"><div class="num">3</div><h3>Share your hours</h3>
-        <p>If you say yes, each full hour of farming is added here, anonymously, for everyone to use.</p></div>
+      <div class="step"><div class="num">3</div><h3>Share your farming</h3>
+        <p>If you say yes, every 15 minutes of non-stop farming is added here, anonymously, for everyone to use.</p></div>
     </div>
   </div>
 </section>
@@ -321,11 +330,11 @@
       <p>Anyone could send made-up numbers, so nothing is taken on trust.</p></div>
     <div class="rules">
       <div class="rule"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2M9 2h6"/></svg>
-        <h3>Full hours only</h3><p>An hour of non-stop farming on one map with the same party. Short runs don't count.</p></div>
+        <h3>15 minutes non-stop</h3><p>Each run is 15 minutes of non-stop farming on one map with the same party. Breaks don't count.</p></div>
       <div class="rule"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-6 8-6s8 2 8 6"/></svg>
-        <h3>One player, one vote</h3><p>Each player counts once (their typical hour), however much they play.</p></div>
+        <h3>One player, one vote</h3><p>Each player counts once (their typical run), however much they play.</p></div>
       <div class="rule"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>
-        <h3>Outliers left out</h3><p>Hours under half or over double what others get on that map are dropped.</p></div>
+        <h3>Outliers left out</h3><p>Runs under half or over double what others get on that map are dropped.</p></div>
       <div class="rule"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="9" r="3"/><circle cx="16" cy="9" r="3"/><path d="M2 20c0-3 2.7-5 6-5s6 2 6 5m0-5c3.3 0 8 2 8 5"/></svg>
         <h3>3 players or more</h3><p>A map only shows once at least 3 different players have farmed it.</p></div>
     </div>
@@ -336,7 +345,7 @@
   <div class="wrap"><div style="max-width:820px">
     <div class="section-head"><h2>Questions</h2></div>
     <details><summary>What gets shared?</summary>
-      <p>Only full 1-hour runs, and only if you said yes in the overlay: the map, your level, job and party size, the EXP and mesos you got, and a random ID for your copy of the overlay. Never your character's name. You can stop sharing any time in the overlay's settings.</p></details>
+      <p>Only 15-minute runs of non-stop farming, and only if you said yes in the overlay: the map, when you farmed it, your level, job and party size, the EXP and mesos you got, and a random ID for your copy of the overlay. Never your character's name. You can stop sharing any time in the overlay's settings.</p></details>
     <details><summary>Why is Path greyed out?</summary>
       <p>Under Lv 30 you're still 1st job, and everyone plays the same until they pick their 2nd job, so you see what every player of your class gets around your level. Path opens at Lv 30. From then on, each path only counts its own jobs: Shadower is Bandits, Chief Bandits and Shadowers, for example.</p></details>
     <details><summary>Is the overlay safe?</summary>
@@ -344,7 +353,7 @@
     <details><summary>Does it cost anything?</summary>
       <p>No. The overlay and this site are free, made by a player for the community.</p></details>
     <details><summary>Why isn't my map or class here yet?</summary>
-      <p>A map shows up once 3 different players around your level (within 2 levels), on the same path and with the same party size, have shared a full hour there. The more people share, the faster it fills in. You can help by sharing yours!</p></details>
+      <p>A map shows up once 3 different players around your level (within 5 levels), on the same path, and solo or in a party like you, have shared a run there. The more people share, the faster it fills in. You can help by sharing yours!</p></details>
     <details><summary>Found a problem?</summary>
       <p>Use <b>Report a bug</b> in the overlay's settings, or open an issue on <a href="https://github.com/beanguri/Maple-Classic-Exp-Overlay/issues">GitHub</a>.</p></details>
   </div></div>
@@ -354,7 +363,7 @@
   <div class="wrap">
     <div>
       <a class="brand" href="/"><img src="/icon.png" alt=""><span>Maple Classic <em>Exp</em> Overlay</span></a>
-      <div style="margin-top:8px">A community project, filled in by the players who share their hours.<br>
+      <div style="margin-top:8px">A community project, filled in by the players who share their farming.<br>
         Not affiliated with Nexon. MapleStory is a trademark of Nexon.</div>
     </div>
     <nav>
@@ -371,16 +380,42 @@
   const short = (n) => n >= 1e6 ? (n / 1e6).toFixed(2) + "M" : n >= 1e5 ? Math.round(n / 1e3) + "k"
     : n >= 1e4 ? (n / 1e3).toFixed(1) + "k" : fmt(n);
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-  const partyName = (p) => p === 1 ? "solo" : `in a party of ${p}`;
+  const LEVEL_WINDOW = 5;  // "around your level", as the server counts it
+  const partyName = (p) => p === "solo" ? "solo" : "in a party";
+  const soloOrParty = (p) => p === "solo" || p === "1" ? "solo"          // also party sizes, from the
+    : p === "party" || /^[2-6]$/.test(p ?? "") ? "party" : null;         // overlay's link or older visits
   const plural = (n, word) => `${fmt(n)} ${word}${n === 1 ? "" : "s"}`;
   const mostPlayers = (list) => [...list].sort((a, b) => b.players - a.players)[0];
-  const JOIN = `<a class="more" href="#overlay">Get the overlay and share your hours</a>`;
+  const JOIN = `<a class="more" href="#overlay">Get the overlay and share your farming</a>`;
+  // Hours of farming: "45 min", "2.5 hours", "1,204 hours"
+  const hours = (h) => {
+    if (h < 1) return `${Math.max(1, Math.round(h * 60))} min`;
+    const n = h < 10 ? Math.round(h * 10) / 10 : Math.round(h);
+    return `${n.toLocaleString("en-US")} hour${n === 1 ? "" : "s"}`;
+  };
   const SECOND_JOB = 30;   // the level paths start at (2nd job); before it, a class is one group
   let classes = [];        // from the server: Warrior, Magician, Archer, Thief, each with its paths
   let wantPath = null;     // the path last picked, kept while the level is under SECOND_JOB
 
   function saved() {
     try { return JSON.parse(localStorage.getItem("ask") || "null") || {}; } catch { return {}; }
+  }
+
+  /** What the overlay's "Best maps" link asks for, e.g. ?level=32&party=1&job=Bandit (party: its size). */
+  function fromLink() {
+    const q = new URLSearchParams(location.search), job = q.get("job"), out = {};
+    const level = parseInt(q.get("level"), 10);
+    if (level >= 1 && level <= 250) out.level = level;
+    if (soloOrParty(q.get("party"))) out.party = soloOrParty(q.get("party"));
+    for (const c of classes) {
+      if (c.name === job || (job === "Bowman" && c.name === "Archer")) out.job = c.name;
+      for (const p of c.paths) {
+        const at = p.steps.indexOf(job);
+        if (at >= 0) out.job = c.name;
+        if (at > 0) out.path = p.name;      // a 2nd to 4th job: that path (a 1st job is on all of them)
+      }
+    }
+    return out;
   }
 
   function chosenClass() {
@@ -429,28 +464,31 @@
     }
     classes = data.classes;
     $("counts").style.display = data.runs ? "" : "none";       // no big zeros on day one
-    $("c-hours").textContent = fmt(data.runs || 0);
+    $("c-hours").textContent = (data.hours || 0) < 10 ? String(Math.round((data.hours || 0) * 10) / 10) : fmt(data.hours);
     $("c-players").textContent = fmt(data.players || 0);
     $("c-maps").textContent = fmt(data.maps || 0);
     $("classes").innerHTML = classes.map((c) => `<label><input type="radio" name="job" value="${esc(c.name)}">` +
       `<span>${esc(c.name)}</span></label>`).join("");
-    const last = saved();
+    const link = fromLink(), linked = Object.keys(link).length > 0;
+    const last = { ...saved(), ...link };
+    if (linked) history.replaceState(null, "", location.pathname);    // a reload shows the form as left
     if (last.level) $("level").value = last.level;
-    if (["1", "2", "3", "4", "5", "6"].includes(String(last.party))) $("party").value = last.party;
+    if (soloOrParty(String(last.party))) $("party").value = soloOrParty(String(last.party));
     wantPath = last.path || null;
     pickClass(last.job);
     if (!data.runs) {
       $("results-title").textContent = "The community map is just getting started";
       $("results-sub").textContent = "";
       $("results").innerHTML = `<div class="note"><h3>Be one of the first to share!</h3>
-        Every full hour farmed by a player using the overlay shows up here. As more players join in,
+        Every 15 minutes farmed by a player using the overlay shows up here. As more players join in,
         this fills with the best maps for every class, path and level.<br>${JOIN}</div>`;
+      if (linked) $("results-section").scrollIntoView({ block: "start" });
       return;
     }
-    ask();
+    ask(null, linked);
   }
 
-  async function ask(event) {
+  async function ask(event, scroll = !!event) {
     if (event) event.preventDefault();
     const c = chosenClass();
     if (!c) return;
@@ -459,11 +497,11 @@
     fillPaths();
     const job = c.name, path = level < SECOND_JOB ? null : $("path").value;
     try { localStorage.setItem("ask", JSON.stringify({ job, path: path || wantPath, level, party })); } catch {}
-    const where = `${path ? `${esc(path)} (${esc(job)})` : esc(job)}, Lv ${Math.max(1, level - 2)}–${level + 2}, ${partyName(+party)}`;
+    const where = `${path ? `${esc(path)} (${esc(job)})` : esc(job)}, Lv ${Math.max(1, level - LEVEL_WINDOW)}–${level + LEVEL_WINDOW}, ${partyName(party)}`;
     $("results-title").textContent = "Best maps";
     $("results-sub").innerHTML = `For <b>${where}</b>.`;
     $("results").innerHTML = `<div class="note">Looking...</div>`;
-    if (event) $("results-section").scrollIntoView({ behavior: "smooth", block: "start" });
+    if (scroll) $("results-section").scrollIntoView({ behavior: "smooth", block: "start" });
     let data;
     try {
       const query = new URLSearchParams({ class: job, ...(path ? { path } : {}), level, party });
@@ -476,9 +514,9 @@
     if (!data.maps.length) {
       const close = data.maps_waiting_for_players;
       $("results").innerHTML = `<div class="note"><h3>No maps here yet</h3>
-        A map shows up once ${data.min_players} players have shared a full hour there.
+        A map shows up once ${data.min_players} players have shared a run there.
         ${close ? `${plural(close, "map")} ${close === 1 ? "is" : "are"} almost there.` : ""}
-        Help fill it in by sharing your own hours.<br>${JOIN}</div>`;
+        Help fill it in by sharing your own farming.<br>${JOIN}</div>`;
       return;
     }
     const top = Math.max(...data.maps.map((m) => m.exp_hr_high || m.exp_hr));
@@ -488,7 +526,7 @@
       return `<div class="map${i === 0 ? " best" : ""}">
         <div class="rank">${i + 1}</div>
         <div><h3>${esc(m.map)}${i === 0 ? '<span class="tag">Best pick</span>' : ""}</h3>
-          <div class="meta">From ${plural(m.players, "player")} · ${plural(m.runs, "hour")} of farming ·
+          <div class="meta">From ${plural(m.players, "player")} · ${hours(m.hours)} of farming ·
             typically ${short(m.exp_hr_low)}–${short(m.exp_hr_high)} EXP/hr</div>
           <div class="range" title="EXP/hr compared to the best map (the lighter band is the typical range)">
             <u style="left:${lo}%;width:${Math.max(1, hi - lo)}%"></u><i style="width:${pct(m.exp_hr)}%"></i></div></div>

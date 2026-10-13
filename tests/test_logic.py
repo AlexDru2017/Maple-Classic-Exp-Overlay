@@ -83,7 +83,7 @@ check("table row format", m.log_row(e)[1:] == ("The Land of Wild Boar II", 29, "
 check("the class is in the line", m.format_entry({**e, "class": "Bandit"}).startswith(
     "Oct 11th, 2026 - The Land of Wild Boar II - Lv 29 - Bandit - 4ppl party"))
 
-# ---- class, seals and 1-hour runs
+# ---- class, seals and 15-minute runs
 log, _ = new_log()
 t, _ = farm(log, 0, 310, job="Bandit")
 farm(log, t + 60, 310, job="Hunter")
@@ -111,33 +111,37 @@ check("renaming a map in the app keeps the line sealed (the name as read stays o
       log.sealed(log.entries[0]) and log.entries[0]["map_read"] == "Rocky Road II")
 
 log, path = new_log()
-farm(log, 0, 3700, job="Bandit")
+farm(log, 0, 950, job="Bandit")
 runs = log.runs
-check(f"an hour of non-stop farming is saved as a sealed 1-hour run ({len(runs)})",
-      len(runs) == 1 and abs(runs[0]["seconds"] - 3600) < 2 and log.sealed(runs[0], m._SEALED_RUN)
+check(f"15 minutes of non-stop farming is saved as a sealed run ({len(runs)})",
+      len(runs) == 1 and abs(runs[0]["seconds"] - 900) < 2 and log.sealed(runs[0], m._SEALED_RUN)
       and abs(runs[0]["exp"] / runs[0]["seconds"] * 3600 - 120000) < 2000)
-check("the log line counts its full hours", log.runs_done("Rocky Road II", 1, "Bandit") == 1)
+check("the log line counts its runs", log.runs_done("Rocky Road II", 1, "Bandit") == 1)
 data = json.loads(path.read_text())
 data["runs"][0]["exp"] *= 3                                      # a run edited by hand
 path.write_text(json.dumps(data))
-check("an edited 1-hour run isn't counted", m.AutoLog(15, path, path.with_suffix(".txt")).runs_done(
+check("an edited run isn't counted", m.AutoLog(15, path, path.with_suffix(".txt")).runs_done(
     "Rocky Road II", 1, "Bandit") == 0)
 log, _ = new_log()
-t, _ = farm(log, 0, 1800, level=30)
-farm(log, t, 1900, level=31)
-check("a level-up doesn't stop the hour (the run records both levels)",
+farm(log, 0, 3650)
+check(f"an hour of farming makes 4 runs, one after another ({len(log.runs)})",
+      len(log.runs) == 4 and all(abs(r["seconds"] - 900) < 2 for r in log.runs))
+log, _ = new_log()
+t, _ = farm(log, 0, 500, level=30)
+farm(log, t, 500, level=31)
+check("a level-up doesn't stop a run (the run records both levels)",
       len(log.runs) == 1 and (log.runs[0]["level_start"], log.runs[0]["level_end"]) == (30, 31))
 log, _ = new_log()
-t, _ = farm(log, 0, 1800, party=1)
-farm(log, t, 2400, party=4)
-check("a party-size change restarts the hour", len(log.runs) == 0)
+t, _ = farm(log, 0, 600, party=1)
+farm(log, t, 600, party=4)
+check("a party-size change restarts the run", len(log.runs) == 0)
 log, _ = new_log()
-farm(log, 0, 3700, gap_at=1800, gap=20)
-check("a break restarts the hour", len(log.runs) == 0)
+farm(log, 0, 1000, gap_at=500, gap=20)
+check("a break restarts the run", len(log.runs) == 0)
 log, _ = new_log()
-t, _ = farm(log, 0, 1800)
-farm(log, t, 2400, map_name="The Swamp of Despair I")
-check("a new map restarts the hour", len(log.runs) == 0)
+t, _ = farm(log, 0, 600)
+farm(log, t, 600, map_name="The Swamp of Despair I")
+check("a new map restarts the run", len(log.runs) == 0)
 check("release notes are shown as plain text, keeping names like exp_log.txt",
       m._plain_text("**New**\n- **Time** in `exp_log.txt`, see [README](https://x)") == "New\n• Time in exp_log.txt, see README")
 check("how long each line was measured over", [m.fmt_logged(s) for s in (300.4, 1500, 3900)] == ["5 min", "25 min", "1 h 05 min"]

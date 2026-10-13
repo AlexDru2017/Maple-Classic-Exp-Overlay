@@ -55,7 +55,7 @@ except Exception:
     except Exception:
         pass
 
-VERSION = "0.9.3-beta"
+VERSION = "0.9.4-beta"
 WINDOW_TITLE = "Maple Classic Exp Overlay"    # the version is shown in Settings
 OLD_TITLES = ("Maple EXP/hr",)               # what versions before 0.9.3 were called
 
@@ -82,7 +82,7 @@ MESOS_BOX_PATH = ASSETS / "mesos_box.npz"
 SCAN_SECONDS = 4            # how often the whole window is checked for the inventory and party
 DEFAULTS = {"gap_seconds": 15, "transparency": 0, "topmost": True,
             "check_updates": True, "skip_version": ""}
-STATS_SITE = "https://maple-classic-exp-overlay.pages.dev"       # shared 1-hour runs (server/)
+STATS_SITE = "https://maple-classic-exp-overlay.pages.dev"       # shared 15-minute runs (server/)
 GITHUB_REPO = "beanguri/Maple-Classic-Exp-Overlay"
 RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
 LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -201,7 +201,7 @@ def find_tesseract():
 # --------------------------------------------------------------------------- updates
 #
 # At start (unless turned off in Settings) it asks GitHub for the latest release. The only
-# other time it goes online is to share finished 1-hour runs, if the player agreed to that.
+# other time it goes online is to share finished 15-minute runs, if the player agreed to that.
 
 def version_key(version):
     """'v0.9.1-beta' -> something to compare versions by. A full release beats its betas."""
@@ -237,7 +237,7 @@ def check_for_update(timeout=8):
 
 
 def post_runs(install, runs, timeout=15):
-    """Sends finished 1-hour runs to the stats site (only if the player agreed to share).
+    """Sends finished runs to the stats site (only if the player agreed to share).
     Returns the start times of the runs the site has (now or from before)."""
     shared = ("date", "started", "map_read", "class", "level_start", "level_end", "party", "exp",
               "seconds", "mesos", "mesos_seconds", "version", "seal")
@@ -1981,8 +1981,9 @@ def _numbers(name):
     return re.findall(r"\b(?:[IVX]+|\d+)\b", name)
 
 
-LOG_VERSION = 3     # 2: mesos/hr from the mesos tracker; 3: class, seals and 1-hour runs
-RUN_SECONDS = 3600  # a 1-hour run: an hour of non-stop farming on one map, one party size
+LOG_VERSION = 3     # 2: mesos/hr from the mesos tracker; 3: class, seals and runs
+RUN_SECONDS = 900   # a run: 15 minutes of non-stop farming on one map, one party size
+                    # (until 0.9.4 a run was an hour; those are still shared as they are)
 
 # Each line the tracker writes is sealed: a code worked out from its numbers. A line edited
 # (or added) by hand doesn't match its seal any more, so it's known not to be the tracker's
@@ -1997,15 +1998,15 @@ _SEALED_RUN = ("date", "started", "map_read", "class", "level_start", "level_end
 
 class AutoLog:
     """EXP/hr and mesos/hr per day, map, level, class and party size, measured over 5-minute
-    stretches of non-stop EXP gain, plus 1-hour runs (shared with the stats site, if agreed).
+    stretches of non-stop EXP gain, plus 15-minute runs (shared with the stats site, if agreed).
 
     A stretch starts with an EXP gain and is thrown away if no EXP comes in for `gap`
     seconds, or the map or party size changes. Each finished stretch is added to that day's
     entry for the map, level, class and party size, so the entry gets more accurate the
     longer you play there. Mesos are counted for a stretch when the mesos were read during it.
 
-    Alongside, a 1-hour run goes on as long as the stretches do (a level-up doesn't stop it,
-    a new map or party size does). Each full hour is saved as a run of its own.
+    Alongside, a run goes on as long as the stretches do (a level-up doesn't stop it, a new
+    map or party size does). Every full 15 minutes is saved as a run of its own.
 
     Every change re-reads the log file first and saves straight away, so lines written by
     anyone else (another copy of the app, or by hand) are never overwritten.
@@ -2104,7 +2105,7 @@ class AutoLog:
     def reset_clock(self):
         self.start = self.last_gain = self.block_map = self.block_party = self.meso0 = None
         self.block_exp = 0
-        self.run = None                                  # the 1-hour run going on, if any
+        self.run = None                                  # the 15-minute run going on, if any
 
     def gain(self, now, amount):
         if amount > 0:
@@ -2159,7 +2160,7 @@ class AutoLog:
             return
         if r["map"] is None:                                 # what the run is about, once known
             if not map_name:
-                r["start"] = now                             # no map yet: the hour can't start
+                r["start"] = now                             # no map yet: the run can't start
                 r["exp"] = 0
                 return
             r.update(map=map_name, map_read=map_read or map_name, party=party, job=job,
@@ -2177,22 +2178,22 @@ class AutoLog:
         if r["meso0"] and mesos and mesos[1] > r["meso0"][1]:
             meso_gain, meso_seconds = mesos[0] - r["meso0"][0], mesos[1] - r["meso0"][1]
         self._add_run(r, now - r["start"], meso_gain, meso_seconds)
-        self.run = {"start": now, "exp": 0, "map": None}     # straight on into the next hour
+        self.run = {"start": now, "exp": 0, "map": None}     # straight on into the next run
         self._run_tick(now, map_name, level, party, mesos, job, map_read)
 
     def run_progress(self, now):
-        """Seconds into the 1-hour run going on, or None."""
+        """Seconds into the 15-minute run going on, or None."""
         r = self.run
         return None if r is None or r["map"] is None else max(0.0, now - r["start"])
 
     def runs_done(self, map_name, party, job, day=None):
-        """How many 1-hour runs were finished (sealed) on a day for a map, party size and class."""
+        """How many runs were finished (sealed) on a day for a map, party size and class."""
         day = day or date.today().isoformat()
         return sum(1 for r in self.runs if r.get("date") == day and r.get("map") == map_name
                    and r.get("party") == party and r.get("class") == job and self.sealed(r, _SEALED_RUN))
 
     def unshared_runs(self):
-        """Finished 1-hour runs (exactly as the tracker saved them) not shared yet."""
+        """Finished runs (exactly as the overlay saved them) not shared yet."""
         return [r for r in self.runs if not r.get("shared") and self.sealed(r, _SEALED_RUN)][:50]
 
     def mark_shared(self, started):
@@ -2431,7 +2432,7 @@ class App:
         self.note = None
         self.last_logged = None
         self.skip_log = False               # "Don't log" is on: this run isn't logged
-        self._sharing, self._next_share = False, 0.0       # sending 1-hour runs to the site
+        self._sharing, self._next_share = False, 0.0       # sending runs to the site
         self.job = None                     # the class, from the status bar
         self.map_read = None                # the map name exactly as read
         self.found_at = None                # when the EXP bar was first read for this level
@@ -2465,6 +2466,9 @@ class App:
         corner.grid(row=0, column=1, sticky="ne", padx=(0, 6), pady=(4, 0))
         small = dict(bg=BG, fg=DIM, activebackground=FIELD, activeforeground=FG, relief="flat",
                      bd=0, padx=6, pady=0, font=("Segoe UI", 11), cursor="hand2")
+        tk.Button(corner, text="Best maps", command=self.open_best_maps,
+                  **{**small, "fg": ACCENT_SOFT, "activebackground": BG, "activeforeground": ACCENT,
+                     "font": ("Segoe UI", 9, "underline")}).pack(side="left", padx=(0, 4))
         tk.Button(corner, text="⚙", command=self.open_settings, **small).pack(side="left")
         self.log_btn = tk.Button(corner, text=">", command=self.toggle_log, **small)
         self.log_btn.pack(side="left")
@@ -2626,7 +2630,8 @@ class App:
                                   "the overlay's seal), so it won't count toward the best-maps site.")
                 return
             runs = self.autolog.runs_done(e["map"], e.get("party"), e.get("class"), e["date"])
-            hours = f" Includes {runs} full hour{'s' * (runs != 1)} of non-stop farming." if runs else ""
+            hours = (f" Includes {runs} full {RUN_SECONDS // 60}-minute run{'s' * (runs != 1)} of non-stop farming."
+                     if runs else "")
             self.log_hint.set(f"{e['map']}: measured over {fmt_logged(e['seconds'])} of non-stop EXP gain."
                               f"{hours} Right-click to copy, rename or delete.")
 
@@ -2683,7 +2688,7 @@ class App:
         run = self.autolog.run_progress(now)
         done = self.autolog.runs_done(self.map_name, self.party, self.job) if self.map_name else 0
         if run is not None or done:
-            line = f"1-hour run: {int(run // 60) if run is not None else 0} of {RUN_SECONDS // 60} min"
+            line = f"{RUN_SECONDS // 60}-min run: {int(run // 60) if run is not None else 0} of {RUN_SECONDS // 60} min"
             text += f"\n{line}" + (f" · {done} done here today" if done else "")
         return text
 
@@ -2733,10 +2738,10 @@ class App:
         sharing = tk.BooleanVar(value=bool(self.cfg.get("share_runs")))
         share_line = tk.Frame(w, bg=BG)
         share_line.grid(row=6, column=0, sticky="w", padx=10, pady=(2, 0))
-        tk.Checkbutton(share_line, text="Share my 1-hour runs (anonymously) on the stats site",
+        tk.Checkbutton(share_line, text=f"Share my {RUN_SECONDS // 60}-minute runs (anonymously) on the best-maps site",
                        variable=sharing, bg=BG, fg=FG, selectcolor=FIELD, activebackground=BG,
                        activeforeground=FG, font=("Segoe UI", 9)).pack(side="left")
-        tk.Button(share_line, text="Open it", command=lambda: webbrowser.open(STATS_SITE), bg=BG,
+        tk.Button(share_line, text="Open it", command=self.open_best_maps, bg=BG,
                   fg=ACCENT_SOFT, activebackground=BG, activeforeground=ACCENT, relief="flat", bd=0,
                   cursor="hand2", font=("Segoe UI", 9, "underline")).pack(side="left", padx=(4, 0))
 
@@ -2818,16 +2823,21 @@ class App:
                     self.q.put(("error", f"{type(e).__name__}: {e}"))
                 self.stop_evt.wait(max(0.1, POLL_SECONDS - (time.monotonic() - t0)))
 
-    # ---- sharing 1-hour runs
+    # ---- sharing runs
+    def open_best_maps(self):
+        """The best-maps site, already showing the maps for this level, party size and class."""
+        ask = {k: v for k, v in (("level", self.level), ("party", self.party), ("job", self.job)) if v}
+        webbrowser.open(STATS_SITE + ("/?" + urllib.parse.urlencode(ask) if ask else ""))
+
     def _ask_to_share(self):
         if "share_runs" in self.cfg:
             return
         yes = messagebox.askyesno(
             "Help other players pick maps?",
-            "Share your 1-hour runs, so everyone can see which maps give the most EXP for their "
+            "Share your farming, so everyone can see which maps give the most EXP for their "
             "class and level?\n\n"
-            "Only full hours of non-stop farming are shared: the map, your level, class and party "
-            "size, and the EXP and mesos you got. Never your character's name.\n\n"
+            f"Every {RUN_SECONDS // 60} minutes of non-stop farming is shared: the map, your level, "
+            "class and party size, and the EXP and mesos you got. Never your character's name.\n\n"
             f"They're combined with other players' on {STATS_SITE.split('//')[1]}. You can change "
             "this any time in Settings.", parent=self.root)
         self.cfg["share_runs"] = bool(yes)
@@ -2835,7 +2845,7 @@ class App:
         self.share_runs()
 
     def share_runs(self):
-        """Sends finished 1-hour runs to the stats site in the background (if agreed to)."""
+        """Sends finished runs to the stats site in the background (if agreed to)."""
         self._next_share = time.monotonic() + 1800
         if not self.cfg.get("share_runs") or self._sharing:
             return
@@ -3028,7 +3038,7 @@ class App:
         runs = len(self.autolog.runs)
         entry = self.autolog.tick(now, self.map_name, self.level, self.party, mesos, self.job, self.map_read)
         if len(self.autolog.runs) > runs:
-            self.share_runs()                          # a 1-hour run just finished
+            self.share_runs()                          # a run just finished
         if entry:
             self.last_logged = now
             self._fill_log()
@@ -3290,7 +3300,7 @@ class App:
             f"- Tracking: {'on' if self.session.on else 'off'}, paused: {self.session.waiting or 'no'},"
             f" gained {fmt_num(t.gained)} EXP in {fmt_dur(t.elapsed())}",
             f"- Status: {private(self.status.get())}",
-            f"- Sharing 1-hour runs: {'on' if self.cfg.get('share_runs') else 'off'}"
+            f"- Sharing runs: {'on' if self.cfg.get('share_runs') else 'off'}"
             f" ({len(self.autolog.runs)} runs, {len(self.autolog.unshared_runs())} not sent)",
             f"- Settings: pause after {self.cfg['gap_seconds']} s, transparency {self.cfg['transparency']}%,"
             f" map names {'on' if tesseract_ok else 'off (no Tesseract)'}",

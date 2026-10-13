@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.9.4-beta
+
+**New**
+- **Best maps** link at the top of the overlay: opens the best-maps website already showing the maps for your level, party size and class.
+- **Runs for the best-maps site are 15 minutes** instead of an hour, so more of your farming counts (a break or a new map no longer throws away up to an hour).
+- **Smaller download:** 82 MB instead of 98 MB. Parts of the libraries it never used are left out.
+- **The best-maps website** fills in sooner: it now looks 5 levels either way, and counts parties of any size together (solo or party).
+- Downloads can now be built on GitHub straight from the code, the first step toward code signing (so Windows stops warning about new downloads).
+
 ## 0.9.3-beta
 
 **New**

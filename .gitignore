@@ -6,9 +6,11 @@
 /mesos_digits.npz
 *.tmp
 
-# Build output (made by build.py)
+# Build output (made by build.py), including the copy to use in the project folder
 /build/
 /release/
+/Maple Classic Exp Overlay.exe
+/_internal/
 
 # Python
 __pycache__/

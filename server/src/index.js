@@ -1,21 +1,22 @@
 // Maple Classic Exp Overlay's shared farming stats, on Cloudflare Pages with a D1 database.
 //
-//   POST /api/runs    the overlay sends finished 1-hour runs (only if the player agreed)
-//   GET  /api/stats   best maps for a class and path, level and party size
+//   POST /api/runs    the overlay sends finished runs (only if the player agreed)
+//   GET  /api/stats   best maps for a class and path, level, solo or in a party
 //   GET  /api/options the classes and paths, how many players each has, and totals
 //   everything else   the website, from public/ (served by Cloudflare without running this)
 //
 // Anyone can send anything to a public server, so nothing is taken on trust: every run is
-// checked for being a plausible 1-hour run, each install and connection can only send so
+// checked for being a plausible run, each install and connection can only send so
 // many a day, and the numbers shown are medians in which a player counts once, with runs
-// far from what other players get (same map, class, level and party size) left out.
+// far from what other players get (same map, class, level, solo or party) left out.
 
 const MIN_PLAYERS = 3;              // different players needed before a map is shown
 const BAND = [0.5, 2.0];            // runs outside this share of the median are outliers
-const LEVEL_WINDOW = 2;             // "around your level": within this many levels
+const LEVEL_WINDOW = 5;             // "around your level": within this many levels
 const MAX_PER_REQUEST = 50;
-const MAX_PER_INSTALL_DAY = 30;     // more than a day's worth of hours can't be real
-const MAX_PER_IP_DAY = 120;
+const RUN_SECONDS = [890, 3720];   // a run is 15 minutes (an hour from 0.9.3, still taken)
+const MAX_PER_INSTALL_DAY = 100;    // more than a day's worth of 15-minute runs can't be real
+const MAX_PER_IP_DAY = 400;
 const CACHE_SECONDS = 60;         // new runs show up on the site within a minute
 
 // The four classes, each split into paths named after the job they end in (4th job). A run
@@ -110,18 +111,18 @@ export function checkRun(r) {
   const levelStart = inRange(r.level_start, 1, 250, true);
   const levelEnd = inRange(r.level_end, 1, 250, true);
   const party = inRange(r.party, 1, 6, true);
-  const seconds = inRange(r.seconds, 3590, 3720);
+  const seconds = inRange(r.seconds, ...RUN_SECONDS);
   const exp = inRange(r.exp, 0, 1e11);
   const mesos = inRange(r.mesos ?? 0, -1e10, 1e11);
-  const mesosSeconds = inRange(r.mesos_seconds ?? 0, 0, 3720);
+  const mesosSeconds = inRange(r.mesos_seconds ?? 0, 0, RUN_SECONDS[1]);
   if (!map || !job || !started || !minutes(started)) return { why: "missing map, class or start time" };
   if (!levelStart || !levelEnd || !party) return { why: "bad level or party size" };
   if (levelEnd < levelStart || levelEnd - levelStart > 10) return { why: "impossible level change" };
-  if (!seconds) return { why: "not an hour long" };
+  if (!seconds) return { why: "not a 15-minute run" };
   if (exp === null || mesos === null || mesosSeconds === null) return { why: "bad EXP or mesos" };
   const expHr = exp / seconds * 3600;
   if (expHr > 5e6) return { why: "impossible EXP/hr" };
-  // Mesos/hr only when the mesos were seen for at least 10 minutes of the hour.
+  // Mesos/hr only when the mesos were seen for at least 10 minutes of the run.
   const mesosHr = mesosSeconds >= 600 ? Math.max(0, mesos) / mesosSeconds * 3600 : null;
   if (mesosHr !== null && mesosHr > 5e7) return { why: "impossible mesos/hr" };
   return {
@@ -158,9 +159,12 @@ async function postRuns(request, env) {
   let mine = counts.mine, fromIp = counts.ip;
   // This install's runs, to catch runs that overlap in time (one person can't farm two at once).
   const { results: earlier } = await env.DB.prepare(
-    "SELECT started FROM runs WHERE install = ?1 ORDER BY started DESC LIMIT 500"
+    "SELECT started, seconds FROM runs WHERE install = ?1 ORDER BY started DESC LIMIT 2000"
   ).bind(install).all();
-  const taken = earlier.map((e) => minutes(e.started));
+  const taken = earlier.map((e) => ({ at: minutes(e.started), long: e.seconds / 60 }));
+  // Two runs overlap if each starts before the other ends. Start times are to the minute, and
+  // the next run starts as one ends, so a minute's leeway.
+  const overlaps = (a, b) => a.at < b.at + b.long - 1 && b.at < a.at + a.long - 1;
 
   const results = [];
   for (const raw of body.runs.slice(0, MAX_PER_REQUEST)) {
@@ -170,12 +174,12 @@ async function postRuns(request, env) {
       results.push({ started, ok: false, why });
       continue;
     }
-    const at = minutes(run.started);
-    if (taken.some((t) => t === at)) {
+    const at = { at: minutes(run.started), long: run.seconds / 60 };
+    if (taken.some((t) => t.at === at.at)) {
       results.push({ started, ok: true, already: true });       // sent before: fine
       continue;
     }
-    if (taken.some((t) => Math.abs(t - at) < 59)) {
+    if (taken.some((t) => overlaps(t, at))) {
       results.push({ started, ok: false, why: "overlaps another run" });
       continue;
     }
@@ -243,6 +247,7 @@ export function summarize(runs) {
     mesos_hr: mesos.length ? Math.round(median(mesos)) : null,
     players,
     runs: kept.length,
+    hours: Math.round(kept.reduce((sum, r) => sum + r.seconds, 0) / 360) / 10,
     outliers: runs.length - kept.length,
   };
 }
@@ -251,14 +256,17 @@ async function getStats(url, env) {
   const name = url.searchParams.get("class"), path = url.searchParams.get("path") || null;
   const jobs = jobsFor(name, path);
   const level = parseInt(url.searchParams.get("level"), 10);
-  const party = parseInt(url.searchParams.get("party") || "1", 10);
-  if (!jobs || !(level >= 1 && level <= 250) || !(party >= 1 && party <= 6)) {
-    return json({ error: "give class (and path), level (1-250) and party (1-6)" }, 400);
+  // Solo, or in a party of any size: parties of 2 to 6 are put together so maps fill in sooner.
+  const asked = url.searchParams.get("party") || "solo";
+  const party = asked === "solo" || asked === "1" ? "solo" : asked === "party" || /^[2-6]$/.test(asked) ? "party" : null;
+  if (!jobs || !(level >= 1 && level <= 250) || !party) {
+    return json({ error: "give class (and path), level (1-250) and party (solo or party)" }, 400);
   }
   const { results: runs } = await env.DB.prepare(
-    `SELECT install, map, exp_hr, mesos_hr FROM runs
-     WHERE job IN (${jobs.map((_, i) => `?${i + 4}`).join(", ")}) AND party = ?1 AND level_start BETWEEN ?2 AND ?3`
-  ).bind(party, level - LEVEL_WINDOW, level + LEVEL_WINDOW, ...jobs).all();
+    `SELECT install, map, seconds, exp_hr, mesos_hr FROM runs
+     WHERE job IN (${jobs.map((_, i) => `?${i + 3}`).join(", ")}) AND party ${party === "solo" ? "= 1" : ">= 2"}
+       AND level_start BETWEEN ?1 AND ?2`
+  ).bind(level - LEVEL_WINDOW, level + LEVEL_WINDOW, ...jobs).all();
   const byMap = new Map();
   for (const r of runs) {
     if (!byMap.has(r.map)) byMap.set(r.map, []);
@@ -300,7 +308,8 @@ async function getOptions(env) {
     })),
   }));
   const totals = await env.DB.prepare(
-    "SELECT COUNT(*) AS runs, COUNT(DISTINCT install) AS players, COUNT(DISTINCT map) AS maps FROM runs"
+    `SELECT COUNT(*) AS runs, ROUND(COALESCE(SUM(seconds), 0) / 3600.0, 1) AS hours,
+            COUNT(DISTINCT install) AS players, COUNT(DISTINCT map) AS maps FROM runs`
   ).first();
   return json({ classes, ...totals });
 }
