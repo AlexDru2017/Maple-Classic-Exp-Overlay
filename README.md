@@ -1,6 +1,8 @@
 <h1><img src="docs/icon.png" width="40" align="top"> Maple Classic Exp Overlay</h1>
 
-**A small window that sits next to MapleStory Classic World and shows how fast you're leveling and making mesos.**
+**A free EXP tracker for MapleStory Classic World.** A small window sits next to the game and shows how fast you're leveling and making mesos, and the [best maps for your class](https://maple-classic-exp-overlay.pages.dev).
+
+**[Download it here](../../releases/latest)** · [How to install](#how-to-install)
 
 > **This is a beta.** It works, but you might run into rough edges. I'm actively improving it, so check back for updates. If something doesn't work, please [tell me](../../issues)!
 
