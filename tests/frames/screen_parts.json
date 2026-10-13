@@ -57,5 +57,31 @@
     "party_row_gh11_0.png"
    ]
   }
+ },
+ "status": {
+  "status_gh7.png": {
+   "gh": 7.0,
+   "x0": 462,
+   "cy": 21.5,
+   "job": "Bandit"
+  },
+  "status_gh11.png": {
+   "gh": 11.0,
+   "x0": 726,
+   "cy": 33.5,
+   "job": "Bandit"
+  },
+  "status_gh28.png": {
+   "gh": 28.0,
+   "x0": 1848,
+   "cy": 84.0,
+   "job": "Bandit"
+  },
+  "status_gh28_rogue.png": {
+   "gh": 28.0,
+   "x0": 1848,
+   "cy": 84.0,
+   "job": "Rogue"
+  }
  }
 }

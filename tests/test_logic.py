@@ -27,7 +27,7 @@ def new_log():
     return m.AutoLog(15, folder / "log.json", folder / "log.txt"), folder / "log.json"
 
 
-def farm(log, t0, seconds, party=1, map_name="Rocky Road II", level=27, every=3, gap_at=None, gap=0):
+def farm(log, t0, seconds, party=1, map_name="Rocky Road II", level=27, every=3, gap_at=None, gap=0, job=None):
     """100 EXP every `every` seconds (optionally with a pause); returns (end time, logs written)."""
     t, nxt, logged = t0, t0, []
     while t < t0 + seconds:
@@ -36,7 +36,7 @@ def farm(log, t0, seconds, party=1, map_name="Rocky Road II", level=27, every=3,
             if not paused:
                 log.gain(t, 100)
             nxt = t + every
-        entry = log.tick(t, map_name, level, party, None)
+        entry = log.tick(t, map_name, level, party, None, job)
         if entry:
             logged.append(round(t - t0))
         t += 0.5
@@ -79,7 +79,65 @@ e = {"date": "2026-10-11", "map": "The Land of Wild Boar II", "level": 29, "part
      "exp": 51862, "seconds": 3600, "mesos": 32713, "mesos_seconds": 3600}
 check("full line format", m.format_entry(e) ==
       "Oct 11th, 2026 - The Land of Wild Boar II - Lv 29 - 4ppl party - 51,862exp/hr - 32,713mesos/hr - 1 h 00 min")
-check("table row format", m.log_row(e)[1:] == ("The Land of Wild Boar II", 29, "4ppl", "1h 00m", "51,862", "32,713"))
+check("table row format", m.log_row(e)[1:] == ("The Land of Wild Boar II", 29, "", "4ppl", "1h 00m", "51,862", "32,713"))
+check("the class is in the line", m.format_entry({**e, "class": "Bandit"}).startswith(
+    "Oct 11th, 2026 - The Land of Wild Boar II - Lv 29 - Bandit - 4ppl party"))
+
+# ---- class, seals and 1-hour runs
+log, _ = new_log()
+t, _ = farm(log, 0, 310, job="Bandit")
+farm(log, t + 60, 310, job="Hunter")
+check("a different class gets its own line", sorted(e["class"] for e in log.entries) == ["Bandit", "Hunter"])
+
+log, path = new_log()
+farm(log, 0, 310)
+check("a line the tracker wrote is sealed", log.sealed(log.entries[0]) and not log.edited(log.entries[0]))
+data = json.loads(path.read_text())
+data["entries"][0]["exp"] *= 2                                   # someone edits the file by hand
+path.write_text(json.dumps(data))
+log = m.AutoLog(15, path, path.with_suffix(".txt"))
+check("a line edited by hand is marked as edited", log.edited(log.entries[0]))
+farm(log, 1000, 310)
+check("more EXP added to an edited line doesn't make it trusted again",
+      len(log.entries) == 1 and log.edited(log.entries[0]))
+data["entries"].append(dict(data["entries"][0], level=28, seal="0" * 24))   # a made-up line
+path.write_text(json.dumps(data))
+check("a line added by hand isn't trusted either", m.AutoLog(15, path, path.with_suffix(".txt")).edited(
+    [e for e in json.loads(path.read_text())["entries"] if e["level"] == 28][0]))
+log, _ = new_log()
+farm(log, 0, 310)
+log.rename(log.entries[0], "Renamed Map")
+check("renaming a map in the app keeps the line sealed (the name as read stays on record)",
+      log.sealed(log.entries[0]) and log.entries[0]["map_read"] == "Rocky Road II")
+
+log, path = new_log()
+farm(log, 0, 3700, job="Bandit")
+runs = log.runs
+check(f"an hour of non-stop farming is saved as a sealed 1-hour run ({len(runs)})",
+      len(runs) == 1 and abs(runs[0]["seconds"] - 3600) < 2 and log.sealed(runs[0], m._SEALED_RUN)
+      and abs(runs[0]["exp"] / runs[0]["seconds"] * 3600 - 120000) < 2000)
+check("the log line counts its full hours", log.runs_done("Rocky Road II", 1, "Bandit") == 1)
+data = json.loads(path.read_text())
+data["runs"][0]["exp"] *= 3                                      # a run edited by hand
+path.write_text(json.dumps(data))
+check("an edited 1-hour run isn't counted", m.AutoLog(15, path, path.with_suffix(".txt")).runs_done(
+    "Rocky Road II", 1, "Bandit") == 0)
+log, _ = new_log()
+t, _ = farm(log, 0, 1800, level=30)
+farm(log, t, 1900, level=31)
+check("a level-up doesn't stop the hour (the run records both levels)",
+      len(log.runs) == 1 and (log.runs[0]["level_start"], log.runs[0]["level_end"]) == (30, 31))
+log, _ = new_log()
+t, _ = farm(log, 0, 1800, party=1)
+farm(log, t, 2400, party=4)
+check("a party-size change restarts the hour", len(log.runs) == 0)
+log, _ = new_log()
+farm(log, 0, 3700, gap_at=1800, gap=20)
+check("a break restarts the hour", len(log.runs) == 0)
+log, _ = new_log()
+t, _ = farm(log, 0, 1800)
+farm(log, t, 2400, map_name="The Swamp of Despair I")
+check("a new map restarts the hour", len(log.runs) == 0)
 check("release notes are shown as plain text, keeping names like exp_log.txt",
       m._plain_text("**New**\n- **Time** in `exp_log.txt`, see [README](https://x)") == "New\n• Time in exp_log.txt, see README")
 check("how long each line was measured over", [m.fmt_logged(s) for s in (300.4, 1500, 3900)] == ["5 min", "25 min", "1 h 05 min"]

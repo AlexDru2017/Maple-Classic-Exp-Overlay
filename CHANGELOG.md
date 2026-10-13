@@ -1,14 +1,26 @@
 # Changelog
 
+## 0.9.3-beta
+
+**New**
+- **New name: Maple Classic Exp Overlay** (it was Maple EXP/hr). The program is now `Maple Classic Exp Overlay.exe`. Your log and settings carry over.
+- **Class**: read from the status bar (never your character's name), shown in the log, and different classes get separate lines.
+- **1-hour runs**: the overlay counts toward a full hour of non-stop farming on one map with the same party size, and saves each finished hour (these are what the best-maps site uses). A level-up doesn't stop a run; a break, a new map or a new party size starts it over.
+- **Best maps for your class**: if you agree (it asks once), finished 1-hour runs are shared anonymously with the new stats site, maple-classic-exp-overlay.pages.dev, which shows the best maps for each class and path (named after its 4th job, like Night Lord or Bishop), level and party size. You can change this in Settings.
+- **Sealed log**: every line the overlay writes is sealed, so lines edited or added by hand are greyed out, and an edited 1-hour run is never shared. Deleting a line, or renaming a map in the overlay, keeps everything else trusted.
+
+**Fixed**
+- The update window showed names with underscores wrong (e.g. explog.txt).
+
 ## 0.9.2-beta
 
 **New**
 - **Time** in the log: how long each line is based on, growing by 5 minutes with every update. Also in copied lines and `exp_log.txt`.
-- **Report a bug** button (in Settings and in View capture): opens a bug report on GitHub, already filled in with what the tracker was reading, plus a picture to drag in. Nothing is sent until you click Submit.
+- **Report a bug** button (in Settings and in View capture): opens a bug report on GitHub, already filled in with what the overlay was reading, plus a picture to drag in. Nothing is sent until you click Submit.
 - **Reset** now also looks for the minimap, inventory and party list again, so it picks them up after you move them.
 
 **Fixed**
-- The map name wasn't read when the tracker's window was right next to the minimap (but not covering it). The same is fixed for the party list.
+- The map name wasn't read when the overlay's window was right next to the minimap (but not covering it). The same is fixed for the party list.
 
 ## 0.9.1-beta
 
@@ -21,7 +33,7 @@
 
 **Fixed**
 - In a 1920x1080 window, the EXP number could be read with its first digits cut off.
-- Mesos weren't read when the tracker's window was close to (but not covering) the inventory, or when a see-through inventory was in front of a busy background.
+- Mesos weren't read when the overlay's window was close to (but not covering) the inventory, or when a see-through inventory was in front of a busy background.
 
 **More reliable**
 - Much stronger protection against misread numbers, tested with thousands of simulated misreads and screenshots over many backgrounds: a misread can't pass for a level-up, a lost level, or extra mesos.

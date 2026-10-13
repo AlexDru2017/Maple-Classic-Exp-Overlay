@@ -1,5 +1,5 @@
 """
-MapleStory Classic World - EXP/hr tracker.
+Maple Classic Exp Overlay: EXP/hr, mesos/hr and time to level for MapleStory Classic World.
 
 Finds the MapleStory window, locates the "EXP. 12,345 [12.34%]" text in its status bar at
 any window size, reads the digits by matching them against examples of the game's font
@@ -11,25 +11,27 @@ map, level and party size.
 
 It only looks at the screen: it never reads or changes the game's files or memory and
 never sends input to the game. Your settings and log are kept in the MapleEXP folder
-inside %APPDATA%.
+inside %APPDATA% (named after its old name, Maple EXP/hr, so updating keeps them).
 """
 import ctypes
+import hashlib
+import hmac
 import json
 import os
 import platform
-import subprocess
-import urllib.parse
-import urllib.request
-import webbrowser
 import queue
 import re
-import hashlib
+import secrets
 import shutil
+import subprocess
 import sys
 import threading
 import time
 import tkinter as tk
 import traceback
+import urllib.parse
+import urllib.request
+import webbrowser
 from collections import Counter, deque, namedtuple
 from ctypes import wintypes
 from datetime import date
@@ -53,8 +55,9 @@ except Exception:
     except Exception:
         pass
 
-VERSION = "0.9.2-beta"
-WINDOW_TITLE = "Maple EXP/hr"                 # the version is shown in Settings
+VERSION = "0.9.3-beta"
+WINDOW_TITLE = "Maple Classic Exp Overlay"    # the version is shown in Settings
+OLD_TITLES = ("Maple EXP/hr",)               # what versions before 0.9.3 were called
 
 # Files that come with the program (inside the .exe when packaged), the folder it runs from,
 # and the folder for your settings, log and learned digits (MAPLE_EXP_DATA can override it).
@@ -79,7 +82,8 @@ MESOS_BOX_PATH = ASSETS / "mesos_box.npz"
 SCAN_SECONDS = 4            # how often the whole window is checked for the inventory and party
 DEFAULTS = {"gap_seconds": 15, "transparency": 0, "topmost": True,
             "check_updates": True, "skip_version": ""}
-GITHUB_REPO = "beanguri/Maplestory-Classic-EXP-Meso-Tracker"
+STATS_SITE = "https://maple-classic-exp-overlay.pages.dev"       # shared 1-hour runs (server/)
+GITHUB_REPO = "beanguri/Maple-Classic-Exp-Overlay"
 RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
 LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
@@ -148,7 +152,8 @@ def load_config():
               "mesos_box": lambda v: ints(v, 6), "mode": lambda v: v in ("window", "region"),
               "region": lambda v: isinstance(v, dict) and all(type(v.get(k)) is int and (
                   k in ("left", "top") or v[k] > 0) for k in ("left", "top", "width", "height")),
-              "log_columns": lambda v: isinstance(v, dict), "log_open": lambda v: type(v) is bool}
+              "log_columns": lambda v: isinstance(v, dict), "log_open": lambda v: type(v) is bool,
+              "share_runs": lambda v: type(v) is bool}       # missing: not asked yet
     for key, ok in checks.items():
         if key in cfg and cfg[key] is not None and not ok(cfg[key]):
             del cfg[key]
@@ -195,8 +200,8 @@ def find_tesseract():
 
 # --------------------------------------------------------------------------- updates
 #
-# At start (unless turned off in Settings) it asks GitHub for the latest release, the only
-# time it goes online. Nothing about you or the game is sent.
+# At start (unless turned off in Settings) it asks GitHub for the latest release. The only
+# other time it goes online is to share finished 1-hour runs, if the player agreed to that.
 
 def version_key(version):
     """'v0.9.1-beta' -> something to compare versions by. A full release beats its betas."""
@@ -220,7 +225,7 @@ def check_for_update(timeout=8):
     """(newer version, its release notes) if GitHub has a newer release, else None.
     Raises if GitHub can't be reached."""
     request = urllib.request.Request(LATEST_RELEASE_API, headers={
-        "User-Agent": f"MapleEXP/{VERSION}", "Accept": "application/vnd.github+json"})
+        "User-Agent": f"MapleClassicExpOverlay/{VERSION}", "Accept": "application/vnd.github+json"})
     with urllib.request.urlopen(request, timeout=timeout) as response:
         data = json.loads(response.read(1_000_000).decode("utf-8"))
     tag = str(data.get("tag_name", ""))
@@ -229,6 +234,19 @@ def check_for_update(timeout=8):
     if version_key(tag) <= version_key(VERSION):
         return None
     return tag.lstrip("vV"), _plain_text(str(data.get("body") or ""))
+
+
+def post_runs(install, runs, timeout=15):
+    """Sends finished 1-hour runs to the stats site (only if the player agreed to share).
+    Returns the start times of the runs the site has (now or from before)."""
+    shared = ("date", "started", "map_read", "class", "level_start", "level_end", "party", "exp",
+              "seconds", "mesos", "mesos_seconds", "version", "seal")
+    body = json.dumps({"install": install, "runs": [{k: r.get(k) for k in shared} for r in runs]}).encode()
+    request = urllib.request.Request(f"{STATS_SITE}/api/runs", data=body, headers={
+        "content-type": "application/json", "User-Agent": f"MapleClassicExpOverlay/{VERSION}"})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        data = json.loads(response.read(1_000_000).decode("utf-8"))
+    return [r.get("started") for r in data.get("results", []) if r.get("ok")]
 
 
 # --------------------------------------------------------------------------- game window
@@ -582,6 +600,76 @@ def fits_exp_table(exp, pct):
     """True if exp at pct% matches some level's EXP requirement. A misread almost never does
     (e.g. '1 [71.68%]' for '68,601 [71.68%]'), so a reading that doesn't isn't trusted."""
     return pct < 0.2 or bool(levels_for(exp, pct))      # under 0.2%: too little EXP to tell
+
+
+# Job names as the status bar shows them (old-style, as in Classic World). A reading is
+# matched to the closest of these; a clear reading that matches none is kept as read.
+JOBS = ["Beginner",
+        "Swordman", "Fighter", "Crusader", "Hero", "Page", "White Knight", "Paladin",
+        "Spearman", "Dragon Knight", "Dark Knight",
+        "Magician", "Wizard (Fire,Poison)", "Mage (Fire,Poison)", "Arch Mage (Fire,Poison)",
+        "Wizard (Ice,Lightning)", "Mage (Ice,Lightning)", "Arch Mage (Ice,Lightning)",
+        "Cleric", "Priest", "Bishop",
+        "Archer", "Hunter", "Ranger", "Bowmaster", "Crossbowman", "Sniper", "Marksman",
+        "Rogue", "Assassin", "Hermit", "Night Lord", "Bandit", "Chief Bandit", "Shadower",
+        "Pirate", "Brawler", "Marauder", "Buccaneer", "Gunslinger", "Outlaw", "Corsair",
+        "Warrior", "Bowman", "Thief"]
+
+
+def _clean_job(text):
+    t = re.sub(r"[^A-Za-z(),/ ]", "", text)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t if len(t) >= 3 else ""
+
+
+def read_job(bgr, x0, cy, g):
+    """The job name in the status bar (e.g. 'Bandit'), from a shot where the EXP number's
+    first digit is at x0 and its middle at cy, or None if it can't be read clearly.
+
+    The job sits on the line of the HP bar's label ("HP"), right before it; the character
+    name is on the line under it and is never read."""
+    reg = bgr[max(0, int(cy - 2.5 * g)):int(cy + 3 * g), max(0, int(x0 - 64 * g)):max(0, int(x0 - 20 * g))]
+    if reg.size == 0:
+        return None
+    white = _whiteness(reg)
+    _, blobs = _blobs(white > 0.3)                    # thin letters: a gentle white check
+    # The HP bar: 13-16 EXP digits wide, its left end 31-35 of them before the EXP number
+    # (the region starts 64 before it). Not to be mixed up with the panels' light borders.
+    bars = [b for b in blobs if 9 * g <= b.w <= 20 * g and 1.4 * g <= b.h <= 2.8 * g
+            and 24 * g <= b.x <= 39 * g]
+    if not bars:
+        return None
+    hp = min(bars, key=lambda b: b.x)                 # the HP bar (the MP bar is right of it)
+    label = [b for b in blobs if hp.x - 0.5 * g <= b.x <= hp.x + 3 * g
+             and b.y + b.h <= hp.y + 0.2 * g and 0.6 * g <= b.h <= 1.6 * g]
+    if not label:
+        return None
+    top, bottom = min(b.y for b in label), max(b.y + b.h for b in label)
+    row = sorted((b for b in blobs if b.x + b.w <= hp.x - g and b.y >= top - 0.3 * g
+                  and b.y + b.h <= bottom + 0.4 * g and b.h >= 0.3 * g), key=lambda b: b.x)
+    if len(row) < 2:
+        return None
+    words = [[row[0]]]
+    for b in row[1:]:
+        if b.x - max(c.x + c.w for c in words[-1]) > 2.0 * g:
+            words.append([b])
+        else:
+            words[-1].append(b)
+    word = words[-1]                                  # the letters right before "HP"
+    x_a, x_b = max(0, min(b.x for b in word) - int(0.4 * g)), max(b.x + b.w for b in word) + int(0.4 * g)
+    crop = white[max(0, top - int(0.4 * g)):bottom + int(0.4 * g), x_a:x_b]
+    glyph_h = max(b.h for b in word)
+    if glyph_h > 10:                                  # big screens: read at small-window size,
+        k = 10.0 / glyph_h                            # where Tesseract reads this font best
+        crop, glyph_h = cv2.resize(crop, None, fx=k, fy=k, interpolation=cv2.INTER_AREA), 10.0
+    votes = _ocr_votes(crop.astype(np.float32), glyph_h, "--psm 7", _clean_job)
+    text, n = votes.most_common(1)[0] if votes else ("", 0)
+    if n < 2:
+        return None
+    score, best = max((SequenceMatcher(None, text.lower(), j.lower()).ratio(), j) for j in JOBS)
+    if score >= 0.72:
+        return best
+    return text.title() if n >= 3 else None
 
 
 def _whiteness(bgr):
@@ -1060,6 +1148,9 @@ class ScreenReader:
         self.next_scan = 0.0
         self.own_rect = None        # this app's window, which screenshots can't see through
         self.look_again_requested = False
+        self.exp_anchor = None      # where the EXP number starts, relative to the game window
+        self.job = None             # the class shown in the status bar
+        self.next_job_read = 0.0
 
     def use_window(self):
         self.mode, self.hwnd, self.box = "window", None, None
@@ -1082,6 +1173,7 @@ class ScreenReader:
         self.mesos_box = self.saved_mesos = None
         self.mesos_fails, self.mesos_count, self.mesos_pending = 0, None, (None, 0)
         self.mesos_covered, self.party_area, self.next_scan = False, None, 0.0
+        self.exp_anchor, self.next_job_read = None, 0.0
         self.request_map()
 
     def read(self, sct):
@@ -1100,7 +1192,27 @@ class ScreenReader:
         if rect and self.gh:
             name, note = self._read_info(sct, rect)
             reading = self._read_extras(sct, rect, reading._replace(map=name, note=note))
+            if self.exp_anchor and self.mode == "window":
+                self._read_job(sct, rect)
         return reading
+
+    def _read_job(self, sct, rect):
+        """Reads the class from the status bar now and then (it only changes at a job advance)."""
+        now = time.monotonic()
+        if not tesseract_ok or now < self.next_job_read:
+            return
+        wx, wy, _, _ = rect
+        ax, ay = self.exp_anchor
+        g = self.gh
+        x0, y0, w, h = wx + int(ax - 65 * g), wy + int(ay - 3 * g), int(46 * g), int(6.5 * g)
+        if self._covered(x0, y0, w, h):
+            self.next_job_read = now + 5
+            return
+        shot = grab(sct, x0, y0, w, h)
+        job = read_job(shot[0], wx + ax - shot[1], wy + ay - shot[2], g) if shot else None
+        if job:
+            self.job = job
+        self.next_job_read = now + (60 if job else 10)
 
     def _game_rect(self):
         if not (self.hwnd and _IsWindow(self.hwnd)):
@@ -1108,6 +1220,7 @@ class ScreenReader:
         rect = client_rect(self.hwnd) if self.hwnd else None
         if rect and rect[2:] != self.size:                  # resized: find everything again
             self.size, self.box, self.map_box, self.gh = rect[2:], None, None, None
+            self.exp_anchor, self.next_job_read = None, 0.0
             self.mesos_box, self.party_area, self.next_scan = None, None, 0.0
             saved = self.saved_mesos
             if saved and tuple(saved[:2]) == tuple(rect[2:]):
@@ -1133,9 +1246,11 @@ class ScreenReader:
         return bool(r) and (x - margin < r[0] + r[2] and r[0] < x + w + margin
                             and y - margin < r[1] + r[3] and r[1] < y + h + margin)
 
-    def _remember(self, lay, rect):
+    def _remember(self, lay, rect, shot=None):
         if lay and rect:
             self.gh = lay.gh                # tells the minimap reader how big the UI is
+            if shot:                        # where the EXP number starts: the class is left of it
+                self.exp_anchor = (shot[1] - rect[0] + lay.box[0], shot[2] - rect[1] + lay.cy)
 
     def _read_region(self, sct, rect):
         r = self.region
@@ -1158,7 +1273,7 @@ class ScreenReader:
             reading, lay = self._read(shot, where)
             if reading.confident:
                 self.misses = 0
-                self._remember(lay, rect)
+                self._remember(lay, rect, shot)
                 return reading
             # Not reading cleanly here (a dialog in the way, or this was the wrong spot):
             # after a few tries, look for the EXP text again.
@@ -1187,7 +1302,7 @@ class ScreenReader:
         if reading.confident:             # only remember a spot whose digits match the game font
             self.box = (sx - wx + x0, sy - wy + y0, x1 - x0, y1 - y0)
             self.misses = 0
-            self._remember(lay, rect)
+            self._remember(lay, rect, shot)
         return reading
 
     def _read(self, shot, where, lay=None):
@@ -1831,10 +1946,12 @@ def fmt_logged(seconds, short=False):
 
 
 def format_entry(e):
-    """e.g. 'Oct 8th, 2026 - Rocky Road II - Lv 27 - Solo - 15,429exp/hr - 3,210mesos/hr - 25 min'"""
+    """e.g. 'Oct 8th, 2026 - Rocky Road II - Lv 27 - Bandit - Solo - 15,429exp/hr - 3,210mesos/hr - 25 min'"""
     d = date.fromisoformat(e["date"])
     level = e["level"] if e["level"] is not None else "?"
     parts = [f"{MONTHS[d.month - 1]} {_ordinal(d.day)}, {d.year}", e["map"], f"Lv {level}"]
+    if e.get("class"):
+        parts.append(e["class"])
     tracked = "party" in e                    # entries from before party/mesos tracking lack these
     if tracked:
         parts.append(party_label(e["party"]))
@@ -1847,7 +1964,7 @@ def format_entry(e):
 
 
 def log_row(e):
-    """The log table's cells for an entry: Date, Map, Lv, Party, Time, EXP/hr, Mesos/hr."""
+    """The log table's cells for an entry: Date, Map, Lv, Class, Party, Time, EXP/hr, Mesos/hr."""
     d = date.fromisoformat(e["date"])
     day = f"{MONTHS[d.month - 1]} {d.day}" + ("" if d.year == date.today().year else f" '{d.year % 100:02d}")
     level = e["level"] if e["level"] is not None else "?"
@@ -1856,7 +1973,7 @@ def log_row(e):
     exp = f"{e['exp'] / e['seconds'] * 3600:,.0f}" if e["seconds"] else "—"
     ms = e.get("mesos_seconds", 0)
     mesos = f"{e['mesos'] / ms * 3600:,.0f}" if ms else ("?" if tracked else "")
-    return day, e["map"], level, party, fmt_logged(e["seconds"], short=True), exp, mesos
+    return day, e["map"], level, e.get("class") or "", party, fmt_logged(e["seconds"], short=True), exp, mesos
 
 
 def _numbers(name):
@@ -1864,17 +1981,31 @@ def _numbers(name):
     return re.findall(r"\b(?:[IVX]+|\d+)\b", name)
 
 
-LOG_VERSION = 2     # 2: mesos/hr comes from the mesos tracker (earlier values could be way off)
+LOG_VERSION = 3     # 2: mesos/hr from the mesos tracker; 3: class, seals and 1-hour runs
+RUN_SECONDS = 3600  # a 1-hour run: an hour of non-stop farming on one map, one party size
+
+# Each line the tracker writes is sealed: a code worked out from its numbers. A line edited
+# (or added) by hand doesn't match its seal any more, so it's known not to be the tracker's
+# own. (Someone who digs into the program could still forge one, which is why anything
+# shared will also be checked against what other players get.)
+# (The old name stays in the key: changing it would unseal every log written so far.)
+_SEAL_KEY = hashlib.sha256(b"Maple EXP/hr log seal: keep this log honest").digest()
+_SEALED_LINE = ("date", "map_read", "level", "party", "class", "exp", "seconds", "mesos", "mesos_seconds")
+_SEALED_RUN = ("date", "started", "map_read", "class", "level_start", "level_end", "party", "exp",
+               "seconds", "mesos", "mesos_seconds", "version")
 
 
 class AutoLog:
-    """EXP/hr and mesos/hr per day, map, level and party size, measured over 5-minute
-    stretches of non-stop EXP gain.
+    """EXP/hr and mesos/hr per day, map, level, class and party size, measured over 5-minute
+    stretches of non-stop EXP gain, plus 1-hour runs (shared with the stats site, if agreed).
 
     A stretch starts with an EXP gain and is thrown away if no EXP comes in for `gap`
     seconds, or the map or party size changes. Each finished stretch is added to that day's
-    entry for the map, level and party size, so the entry gets more accurate the longer you
-    play there. Mesos are counted for a stretch when the mesos were read during it.
+    entry for the map, level, class and party size, so the entry gets more accurate the
+    longer you play there. Mesos are counted for a stretch when the mesos were read during it.
+
+    Alongside, a 1-hour run goes on as long as the stretches do (a level-up doesn't stop it,
+    a new map or party size does). Each full hour is saved as a run of its own.
 
     Every change re-reads the log file first and saves straight away, so lines written by
     anyone else (another copy of the app, or by hand) are never overwritten.
@@ -1883,20 +2014,41 @@ class AutoLog:
     def __init__(self, gap_seconds, path=LOG_PATH, text_path=LOG_TEXT_PATH):
         self.gap = gap_seconds
         self.path, self.text_path = path, text_path
-        self.entries, self.aliases = [], {}           # aliases: misread/renamed map -> name to use
+        self.entries, self.aliases, self.runs = [], {}, []   # aliases: misread/renamed map -> name
+        self.install = secrets.token_hex(8)           # this log's own id, part of its seals
         self._kept = set()                            # problems a copy of the file was kept for
-        if self._load() < LOG_VERSION:
+        version = self._load()
+        if version < 2:
             def clear_old_mesos():                    # logged by the old, unreliable mesos counting
                 for e in self.entries:
                     if "party" in e:
                         e["mesos"] = e["mesos_seconds"] = 0
             self._change(clear_old_mesos)
+        elif version < LOG_VERSION:
+            self._change(lambda: None)                # saves this log's id with it
         self.reset_clock()
 
     @staticmethod
     def key(e):
-        return e["date"], e["map"], e["level"], e.get("party")
+        return e["date"], e["map"], e["level"], e.get("party"), e.get("class")
 
+    # ---- seals
+    def _seal(self, record, fields):
+        data = json.dumps([record.get(k) for k in fields], separators=(",", ":"))
+        return hmac.new(_SEAL_KEY + self.install.encode(), data.encode(), hashlib.sha256).hexdigest()[:24]
+
+    def sealed(self, e, fields=_SEALED_LINE):
+        """True for a line exactly as the tracker wrote it."""
+        return isinstance(e.get("seal"), str) and hmac.compare_digest(e["seal"], self._seal(e, fields))
+
+    def edited(self, e):
+        """True for a line that was changed outside the tracker (older lines have no seal)."""
+        return "seal" in e and not self.sealed(e)
+
+    def _reseal(self, e, ok):
+        e["seal"] = self._seal(e, _SEALED_LINE) if ok else "edited"
+
+    # ---- the file
     def _load(self):
         """Reads the log file into memory (keeps what's there if it can't be read).
         Returns the file's format version."""
@@ -1905,7 +2057,8 @@ class AutoLog:
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
             entries, aliases = data.get("entries", []), data.get("aliases", {})
-            if not isinstance(entries, list) or not isinstance(aliases, dict):
+            runs = data.get("runs", [])
+            if not isinstance(entries, list) or not isinstance(aliases, dict) or not isinstance(runs, list):
                 raise ValueError("unexpected contents")
         except Exception as e:
             self._keep_copy("reading the EXP log", e)        # damaged, e.g. edited by hand
@@ -1914,6 +2067,9 @@ class AutoLog:
         if len(good) < len(entries):
             self._keep_copy(f"reading the EXP log: left out {len(entries) - len(good)} damaged lines")
         self.entries, self.aliases = good, aliases
+        self.runs = [r for r in runs if isinstance(r, dict)]
+        if isinstance(data.get("install"), str) and re.fullmatch(r"[0-9a-f]{16}", data["install"]):
+            self.install = data["install"]
         return data.get("version", 1)
 
     def _keep_copy(self, what, exc=None):
@@ -1944,23 +2100,31 @@ class AutoLog:
         self.save()
         return result
 
+    # ---- tracking
     def reset_clock(self):
         self.start = self.last_gain = self.block_map = self.block_party = self.meso0 = None
         self.block_exp = 0
+        self.run = None                                  # the 1-hour run going on, if any
 
     def gain(self, now, amount):
         if amount > 0:
             if self.start is None:
                 self.start, self.block_exp = now, 0          # this gain starts the clock
+                self.run = self.run or {"start": now, "exp": 0, "map": None}
             else:
                 self.block_exp += amount
+                if self.run:
+                    self.run["exp"] += amount
             self.last_gain = now
         elif self.start is not None:
             self.block_exp += amount                         # EXP lost, e.g. on death
+            if self.run:
+                self.run["exp"] += amount
 
-    def tick(self, now, map_name, level, party=1, mesos=None):
+    def tick(self, now, map_name, level, party=1, mesos=None, job=None, map_read=None):
         """Call regularly while tracking. mesos is (mesos gained so far, when last read) from
-        the MesoTracker, or None. Returns the entry when one was logged."""
+        the MesoTracker, or None; job is the class; map_read the map name exactly as read.
+        Returns the entry when one was logged."""
         if self.start is None:
             return None
         if now - self.last_gain > self.gap:
@@ -1977,37 +2141,103 @@ class AutoLog:
         self.block_party = party
         if self.meso0 is None and mesos and mesos[1] >= self.start - 2:
             self.meso0 = mesos                               # mesos as the stretch began
+        self._run_tick(now, map_name, level, party, mesos, job, map_read)
         if now - self.start < LOG_BLOCK:
             return None
         meso_gain = meso_seconds = 0
         if self.meso0 and mesos and mesos[1] > self.meso0[1]:
             meso_gain, meso_seconds = mesos[0] - self.meso0[0], mesos[1] - self.meso0[1]
         entry = self._add(self.block_map or "Unknown map", level, party, self.block_exp,
-                          now - self.start, meso_gain, meso_seconds)
+                          now - self.start, meso_gain, meso_seconds, job, map_read or self.block_map)
         self.start, self.block_exp = now, 0                  # the next 5 minutes start now
         self.meso0 = mesos if mesos and now - mesos[1] < 10 else None
         return entry
 
+    def _run_tick(self, now, map_name, level, party, mesos, job, map_read):
+        r = self.run
+        if r is None:
+            return
+        if r["map"] is None:                                 # what the run is about, once known
+            if not map_name:
+                r["start"] = now                             # no map yet: the hour can't start
+                r["exp"] = 0
+                return
+            r.update(map=map_name, map_read=map_read or map_name, party=party, job=job,
+                     level_start=level, wall=time.time() - (now - r["start"]), meso0=None)
+        if job and r["job"] and job != r["job"]:
+            self.run = {"start": now, "exp": 0, "map": None}  # a different class: a new run
+            return
+        r["job"] = r["job"] or job
+        r["level"] = level
+        if r["meso0"] is None and mesos and mesos[1] >= r["start"] - 2:
+            r["meso0"] = mesos
+        if now - r["start"] < RUN_SECONDS:
+            return
+        meso_gain = meso_seconds = 0
+        if r["meso0"] and mesos and mesos[1] > r["meso0"][1]:
+            meso_gain, meso_seconds = mesos[0] - r["meso0"][0], mesos[1] - r["meso0"][1]
+        self._add_run(r, now - r["start"], meso_gain, meso_seconds)
+        self.run = {"start": now, "exp": 0, "map": None}     # straight on into the next hour
+        self._run_tick(now, map_name, level, party, mesos, job, map_read)
+
+    def run_progress(self, now):
+        """Seconds into the 1-hour run going on, or None."""
+        r = self.run
+        return None if r is None or r["map"] is None else max(0.0, now - r["start"])
+
+    def runs_done(self, map_name, party, job, day=None):
+        """How many 1-hour runs were finished (sealed) on a day for a map, party size and class."""
+        day = day or date.today().isoformat()
+        return sum(1 for r in self.runs if r.get("date") == day and r.get("map") == map_name
+                   and r.get("party") == party and r.get("class") == job and self.sealed(r, _SEALED_RUN))
+
+    def unshared_runs(self):
+        """Finished 1-hour runs (exactly as the tracker saved them) not shared yet."""
+        return [r for r in self.runs if not r.get("shared") and self.sealed(r, _SEALED_RUN)][:50]
+
+    def mark_shared(self, started):
+        def apply():
+            for r in self.runs:
+                if r.get("started") in started:
+                    r["shared"] = True
+        self._change(apply)
+
     def seconds_left(self, now):
         return None if self.start is None else max(0.0, LOG_BLOCK - (now - self.start))
 
-    def _add(self, map_name, level, party, exp, seconds, mesos, meso_seconds):
+    def _add(self, map_name, level, party, exp, seconds, mesos, meso_seconds, job=None, map_read=None):
         def add():
-            key = (date.today().isoformat(), map_name, level, party)
+            key = (date.today().isoformat(), map_name, level, party, job)
             for e in self.entries:
                 if self.key(e) == key:
+                    ok = self.sealed(e)                      # still exactly the tracker's own?
                     e["exp"] += exp
                     e["seconds"] += seconds
                     e["mesos"] = e.get("mesos", 0) + mesos
                     e["mesos_seconds"] = e.get("mesos_seconds", 0) + meso_seconds
+                    if "seal" in e:
+                        self._reseal(e, ok)
                     break
             else:
-                e = {"date": key[0], "map": map_name, "level": level, "party": party, "exp": exp,
-                     "seconds": seconds, "mesos": mesos, "mesos_seconds": meso_seconds}
+                e = {"date": key[0], "map": map_name, "map_read": map_read or map_name, "level": level,
+                     "party": party, "class": job, "exp": exp, "seconds": seconds, "mesos": mesos,
+                     "mesos_seconds": meso_seconds}
+                self._reseal(e, True)
                 self.entries.append(e)
             e["updated"] = time.time()
             return e
         return self._change(add)
+
+    def _add_run(self, r, seconds, mesos, meso_seconds):
+        run = {"date": date.fromtimestamp(r["wall"]).isoformat(),
+               "started": time.strftime("%Y-%m-%dT%H:%M", time.localtime(r["wall"])),
+               "map": r["map"], "map_read": r["map_read"], "class": r["job"],
+               "level_start": r["level_start"], "level_end": r["level"], "party": r["party"],
+               "exp": r["exp"], "seconds": round(seconds, 1), "mesos": mesos,
+               "mesos_seconds": round(meso_seconds, 1), "version": VERSION}
+        run["seal"] = self._seal(run, _SEALED_RUN)
+        self._change(lambda: self.runs.append(run))
+        return run
 
     def canonical(self, name, also=()):
         """The name to log a map under: applies renames and fixes small misreads (matching
@@ -2022,12 +2252,15 @@ class AutoLog:
         return best if score >= 0.85 else name
 
     def rename(self, entry, new_name):
+        """Renames a map (and remembers it for future reads). The map name as read stays on
+        record (map_read), so renamed lines keep their seal."""
         old, key = entry["map"], self.key(entry)
 
         def apply():
             if old == "Unknown map":
                 for e in self.entries:                       # just this one
                     if self.key(e) == key:
+                        e.setdefault("map_read", old)
                         e["map"] = new_name
             else:
                 self.aliases[old] = new_name                 # and future reads of the old name
@@ -2036,15 +2269,22 @@ class AutoLog:
                         self.aliases[k] = new_name
                 for e in self.entries:
                     if e["map"] == old:
+                        e.setdefault("map_read", old)
                         e["map"] = new_name
+                for r in self.runs:
+                    if r.get("map") == old:
+                        r["map"] = new_name                  # (runs are sealed by map_read)
             merged = {}
             for e in self.entries:                           # combine entries that now match
                 if self.key(e) in merged:
                     m = merged[self.key(e)]
+                    ok = self.sealed(m) and self.sealed(e)
                     for field in ("exp", "seconds", "mesos", "mesos_seconds"):
                         if field in e:
                             m[field] = m.get(field, 0) + e[field]
                     m["updated"] = max(m.get("updated", 0), e.get("updated", 0))
+                    if "seal" in m or "seal" in e:
+                        self._reseal(m, ok)
                 else:
                     merged[self.key(e)] = e
             self.entries = list(merged.values())
@@ -2052,6 +2292,8 @@ class AutoLog:
         self._change(apply)
         if old != "Unknown map" and self.block_map == old:
             self.block_map = new_name
+        if old != "Unknown map" and self.run and self.run.get("map") == old:
+            self.run["map"] = new_name
 
     def delete(self, entry):
         key = self.key(entry)
@@ -2068,8 +2310,8 @@ class AutoLog:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(json.dumps({"version": LOG_VERSION, "entries": self.entries,
-                                       "aliases": self.aliases}, indent=1), encoding="utf-8")
+            tmp.write_text(json.dumps({"version": LOG_VERSION, "install": self.install, "entries": self.entries,
+                                       "aliases": self.aliases, "runs": self.runs}, indent=1), encoding="utf-8")
             os.replace(tmp, self.path)
             self.text_path.write_text("".join(format_entry(e) + "\n" for e in self.newest_first()),
                                       encoding="utf-8")
@@ -2189,6 +2431,9 @@ class App:
         self.note = None
         self.last_logged = None
         self.skip_log = False               # "Don't log" is on: this run isn't logged
+        self._sharing, self._next_share = False, 0.0       # sending 1-hour runs to the site
+        self.job = None                     # the class, from the status bar
+        self.map_read = None                # the map name exactly as read
         self.found_at = None                # when the EXP bar was first read for this level
         self.level_up_at = None
         self.log_open = False
@@ -2282,6 +2527,7 @@ class App:
         root.after(500, self._refresh)
         if self.cfg["check_updates"]:
             self.check_updates()                       # only now, when it starts
+        root.after(1500, self._ask_to_share)           # (asked once, the first time)
 
     # ---- log panel
     def _build_log_panel(self):
@@ -2308,7 +2554,8 @@ class App:
         # (key, title, widest usual value, alignment): starting widths are measured in the
         # real font, so nothing is cut off at any screen scaling.
         columns = (("date", "Date", "Sep 30", "w"), ("map", "Map", "The Swamp of Despair II", "w"),
-                   ("lv", "Lv", "99", "center"), ("party", "Party", "6ppl", "center"),
+                   ("lv", "Lv", "99", "center"), ("class", "Class", "Crossbowman", "w"),
+                   ("party", "Party", "6ppl", "center"),
                    ("time", "Time", "12h 30m", "center"),
                    ("exp", "EXP/hr", "888,888", "e"), ("mesos", "Mesos/hr", "888,888", "e"))
         saved = self.cfg.get("log_columns") or {}
@@ -2322,6 +2569,7 @@ class App:
             tree.heading(key, text=title, anchor=anchor)
             tree.column(key, width=width, minwidth=pad, anchor=anchor, stretch=False)
         tree.tag_configure("odd", background=LIST_BG2)
+        tree.tag_configure("edited", foreground="#6b7079")      # changed outside the tracker
         tree.grid(row=2, column=0, sticky="nsew")
         scroll = tk.Scrollbar(p, orient="vertical", command=tree.yview)
         scroll.grid(row=2, column=1, sticky="ns")
@@ -2364,7 +2612,8 @@ class App:
         tree.delete(*tree.get_children())
         self.shown = {}
         for i, e in enumerate(self.autolog.newest_first()):
-            iid = tree.insert("", "end", values=log_row(e), tags=("odd",) if i % 2 else ())
+            tags = (("odd",) if i % 2 else ()) + (("edited",) if self.autolog.edited(e) else ())
+            iid = tree.insert("", "end", values=log_row(e), tags=tags)
             self.shown[iid] = e
         self.log_hint.set(LOG_HINT if self.shown else "No logs yet. Press Start and gain EXP for 5 minutes.")
 
@@ -2372,8 +2621,14 @@ class App:
         sel = self.log_tree.selection()
         e = self.shown.get(sel[0]) if sel else None
         if e:
-            self.log_hint.set(f"{e['map']}: measured over {e['seconds'] / 60:.0f} min of non-stop EXP "
-                              "gain. Right-click to copy, rename or delete.")
+            if self.autolog.edited(e):
+                self.log_hint.set("This line was changed outside the overlay (it no longer matches "
+                                  "the overlay's seal), so it won't count toward the best-maps site.")
+                return
+            runs = self.autolog.runs_done(e["map"], e.get("party"), e.get("class"), e["date"])
+            hours = f" Includes {runs} full hour{'s' * (runs != 1)} of non-stop farming." if runs else ""
+            self.log_hint.set(f"{e['map']}: measured over {fmt_logged(e['seconds'])} of non-stop EXP gain."
+                              f"{hours} Right-click to copy, rename or delete.")
 
     def _log_menu(self, event):
         iid = self.log_tree.identify_row(event.y)
@@ -2410,8 +2665,8 @@ class App:
             self._fill_log()
 
     def _log_status_text(self, now):
-        where = (f"{self.map_name or 'Map not read yet'} · Lv {self.level or '?'} · "
-                 f"{party_label(self.party)}")
+        where = " · ".join(x for x in (self.map_name or "Map not read yet", f"Lv {self.level or '?'}",
+                                       self.job, party_label(self.party)) if x)
         if self.skip_log:
             return f"{where}\nNot logging this run."
         if not self.session.on:
@@ -2425,6 +2680,11 @@ class App:
             text = f"{where}\nNext log in {int(left) // 60}:{int(left) % 60:02d} of non-stop EXP gain"
         if self.last_logged and now - self.last_logged < 8:
             text += "  (just logged)"
+        run = self.autolog.run_progress(now)
+        done = self.autolog.runs_done(self.map_name, self.party, self.job) if self.map_name else 0
+        if run is not None or done:
+            line = f"1-hour run: {int(run // 60) if run is not None else 0} of {RUN_SECONDS // 60} min"
+            text += f"\n{line}" + (f" · {done} done here today" if done else "")
         return text
 
     # ---- settings
@@ -2470,6 +2730,15 @@ class App:
         tk.Checkbutton(w, text="Check for updates when it starts", variable=updates, bg=BG, fg=FG,
                        selectcolor=FIELD, activebackground=BG, activeforeground=FG,
                        font=("Segoe UI", 9)).grid(row=5, column=0, sticky="w", padx=10, pady=(2, 0))
+        sharing = tk.BooleanVar(value=bool(self.cfg.get("share_runs")))
+        share_line = tk.Frame(w, bg=BG)
+        share_line.grid(row=6, column=0, sticky="w", padx=10, pady=(2, 0))
+        tk.Checkbutton(share_line, text="Share my 1-hour runs (anonymously) on the stats site",
+                       variable=sharing, bg=BG, fg=FG, selectcolor=FIELD, activebackground=BG,
+                       activeforeground=FG, font=("Segoe UI", 9)).pack(side="left")
+        tk.Button(share_line, text="Open it", command=lambda: webbrowser.open(STATS_SITE), bg=BG,
+                  fg=ACCENT_SOFT, activebackground=BG, activeforeground=ACCENT, relief="flat", bd=0,
+                  cursor="hand2", font=("Segoe UI", 9, "underline")).pack(side="left", padx=(4, 0))
 
         def apply(*_):
             try:
@@ -2481,14 +2750,17 @@ class App:
             self.cfg["transparency"] = int(transparency.get())
             self.cfg["topmost"] = bool(topmost.get())
             self.cfg["check_updates"] = bool(updates.get())
+            if bool(sharing.get()) != bool(self.cfg.get("share_runs")):
+                self.cfg["share_runs"] = bool(sharing.get())
+                self.share_runs()
             self._apply_window_settings()
             w.attributes("-topmost", self.cfg["topmost"])
             save_config(self.cfg)
 
-        for var in (gap, transparency, topmost, updates):
+        for var in (gap, transparency, topmost, updates, sharing):
             var.trace_add("write", apply)
         buttons = tk.Frame(w, bg=BG)
-        buttons.grid(row=6, column=0, sticky="we", padx=14, pady=(14, 6))
+        buttons.grid(row=7, column=0, sticky="we", padx=14, pady=(14, 6))
         style = dict(bg=FIELD, fg=FG, activebackground="#3a3f49", activeforeground=FG, relief="flat",
                      padx=12, pady=3, font=("Segoe UI", 9))
         tk.Button(buttons, text="Open data folder", command=self.open_data_folder, **style).pack(side="left")
@@ -2500,9 +2772,9 @@ class App:
         pt = float(self.root.tk.call("tk", "scaling"))         # screen pixels per point
         tk.Label(w, text=f"Your log and settings are saved in {DATA_DIR}", bg=BG, fg=DIM,
                  font=("Segoe UI", 8), wraplength=int(250 * pt), justify="left").grid(
-            row=7, column=0, sticky="w", padx=14)
-        tk.Label(w, text=f"Maple EXP/hr v{VERSION}. This is a beta: it's still being improved.",
-                 bg=BG, fg=DIM, font=("Segoe UI", 8)).grid(row=8, column=0, sticky="w", padx=14, pady=(2, 12))
+            row=8, column=0, sticky="w", padx=14)
+        tk.Label(w, text=f"{WINDOW_TITLE} v{VERSION}. This is a beta: it's still being improved.",
+                 bg=BG, fg=DIM, font=("Segoe UI", 8)).grid(row=9, column=0, sticky="w", padx=14, pady=(2, 12))
 
     def open_data_folder(self):
         try:
@@ -2546,6 +2818,39 @@ class App:
                     self.q.put(("error", f"{type(e).__name__}: {e}"))
                 self.stop_evt.wait(max(0.1, POLL_SECONDS - (time.monotonic() - t0)))
 
+    # ---- sharing 1-hour runs
+    def _ask_to_share(self):
+        if "share_runs" in self.cfg:
+            return
+        yes = messagebox.askyesno(
+            "Help other players pick maps?",
+            "Share your 1-hour runs, so everyone can see which maps give the most EXP for their "
+            "class and level?\n\n"
+            "Only full hours of non-stop farming are shared: the map, your level, class and party "
+            "size, and the EXP and mesos you got. Never your character's name.\n\n"
+            f"They're combined with other players' on {STATS_SITE.split('//')[1]}. You can change "
+            "this any time in Settings.", parent=self.root)
+        self.cfg["share_runs"] = bool(yes)
+        save_config(self.cfg)
+        self.share_runs()
+
+    def share_runs(self):
+        """Sends finished 1-hour runs to the stats site in the background (if agreed to)."""
+        self._next_share = time.monotonic() + 1800
+        if not self.cfg.get("share_runs") or self._sharing:
+            return
+        runs = self.autolog.unshared_runs()
+        if not runs:
+            return
+        self._sharing, install = True, self.autolog.install
+
+        def work():
+            try:
+                self.q.put(("shared", post_runs(install, runs)))
+            except Exception:
+                self.q.put(("shared", None))           # offline or the site is down: later
+        threading.Thread(target=work, daemon=True).start()
+
     # ---- updates
     def check_updates(self, manual=False):
         """Asks GitHub for a newer version in the background; the answer comes via _pump."""
@@ -2577,7 +2882,7 @@ class App:
         w.resizable(False, False)
         w.transient(self.root)
         w.attributes("-topmost", bool(self.cfg["topmost"]))
-        tk.Label(w, text=f"Maple EXP/hr v{version} is out", bg=BG, fg=ACCENT,
+        tk.Label(w, text=f"{WINDOW_TITLE} v{version} is out", bg=BG, fg=ACCENT,
                  font=("Segoe UI Semibold", 12)).pack(anchor="w")
         tk.Label(w, text=f"You have v{VERSION}. Your log and settings are kept when you update.",
                  bg=BG, fg=DIM, font=("Segoe UI", 9)).pack(anchor="w", pady=(2, 10))
@@ -2613,7 +2918,7 @@ class App:
     def _oops(self, what, exc):
         """Something unexpected went wrong: note it in errors.log and keep going."""
         log_error(what, exc)
-        self.status.set("Something went wrong, but the tracker keeps running. Details are in "
+        self.status.set("Something went wrong, but the overlay keeps running. Details are in "
                         "errors.log (Settings > Open data folder).")
 
     def _pump(self):
@@ -2625,6 +2930,10 @@ class App:
                                     "(details are in errors.log: Settings > Open data folder)")
                 elif kind == "update":
                     self._show_update(*payload)
+                elif kind == "shared":
+                    self._sharing = False
+                    if payload:
+                        self.autolog.mark_shared(payload)
                 else:
                     self._handle(payload)
         except queue.Empty:
@@ -2653,7 +2962,10 @@ class App:
             self._party_seen = (r.party, n)
             if n >= 2:
                 self.party = r.party
+        if self.reader.job:
+            self.job = self.reader.job
         if r.map:
+            self.map_read = r.map                       # as read (kept on record if renamed)
             # A slightly misread name of the map you're on still counts as that map.
             self.map_name = self.autolog.canonical(r.map, also=(self.map_name, self.session.map))
             waiting = self.session.waiting
@@ -2713,7 +3025,10 @@ class App:
             return
         m = self.meso
         mesos = (m.gained, m.seen_at) if m.value is not None and now - m.seen_at <= 30 else None
-        entry = self.autolog.tick(now, self.map_name, self.level, self.party, mesos)
+        runs = len(self.autolog.runs)
+        entry = self.autolog.tick(now, self.map_name, self.level, self.party, mesos, self.job, self.map_read)
+        if len(self.autolog.runs) > runs:
+            self.share_runs()                          # a 1-hour run just finished
         if entry:
             self.last_logged = now
             self._fill_log()
@@ -2763,6 +3078,8 @@ class App:
         self._log_tick(now)
         self.log_status.set(self._log_status_text(now))
         self.reader.own_rect = self._window_rect()
+        if now >= self._next_share:                   # retry runs that couldn't be sent
+            self.share_runs()
 
     # ---- buttons
     def toggle(self):
@@ -2902,7 +3219,7 @@ class App:
         if not messagebox.askokcancel(
                 "Report a bug",
                 "Your browser will open a bug report on GitHub, already filled in with your "
-                "version and what the tracker was reading (nothing personal).\n\n"
+                "version and what the overlay was reading (nothing personal).\n\n"
                 "1. Write a sentence about what went wrong.\n"
                 "2. Drag in the picture from the folder that opens.\n"
                 "3. Click Submit.\n\n"
@@ -2958,20 +3275,23 @@ class App:
         lines = [
             "**What went wrong?**", "(Describe it here: what did you do, what did you expect, what did it show?)", "",
             "**Screenshot**",
-            ("(Drag in `bug-report.png` from the folder that just opened: it shows what the tracker read.)"
-             if picture else "(If you can, add a screenshot of the game and the tracker.)"), "",
-            "---", "<details><summary>Details (filled in by the tracker)</summary>", "",
+            ("(Drag in `bug-report.png` from the folder that just opened: it shows what the overlay read.)"
+             if picture else "(If you can, add a screenshot of the game and the overlay.)"), "",
+            "---", "<details><summary>Details (filled in by the overlay)</summary>", "",
             f"- Version: {VERSION} ({'download' if getattr(sys, 'frozen', False) else 'from source'})",
             f"- Windows: {platform.version()}",
             f"- Game window: {'x'.join(map(str, self.reader.size)) if self.reader.size else 'not found'}"
             f" (EXP digits {fmt_num(self.reader.gh) if self.reader.gh else '?'} px)",
             f"- Last EXP read: {r.text if r else 'nothing'}",
-            f"- Level: {self.level or '?'}, map: {self.map_name or 'not read'}, party: {party_label(self.party)}",
+            f"- Level: {self.level or '?'}, class: {self.job or 'not read'}, map: {self.map_name or 'not read'},"
+            f" party: {party_label(self.party)}",
             f"- Mesos: {fmt_num(self.meso.value) if self.meso.value is not None else 'not read'}"
             f" (last read {fmt_num(mr.mesos) if mr and mr.mesos is not None else 'nothing'})",
             f"- Tracking: {'on' if self.session.on else 'off'}, paused: {self.session.waiting or 'no'},"
             f" gained {fmt_num(t.gained)} EXP in {fmt_dur(t.elapsed())}",
             f"- Status: {private(self.status.get())}",
+            f"- Sharing 1-hour runs: {'on' if self.cfg.get('share_runs') else 'off'}"
+            f" ({len(self.autolog.runs)} runs, {len(self.autolog.unshared_runs())} not sent)",
             f"- Settings: pause after {self.cfg['gap_seconds']} s, transparency {self.cfg['transparency']}%,"
             f" map names {'on' if tesseract_ok else 'off (no Tesseract)'}",
         ]
@@ -3003,8 +3323,9 @@ class App:
 def main():
     global tesseract_ok, _single_instance
     # Only one copy at a time (per data folder): two copies would each keep their own log.
-    # If it's already running, bring that window to the front instead.
-    lock = "Local\\MapleEXP-" + hashlib.md5(str(DATA_DIR).lower().encode()).hexdigest()[:12]
+    # If it's already running, bring that window to the front instead. (The lock keeps the old
+    # name, so an older version and this one can't run at the same time either.)
+    lock ="Local\\MapleEXP-" + hashlib.md5(str(DATA_DIR).lower().encode()).hexdigest()[:12]
     _single_instance = _CreateMutex(None, False, lock)
     if ctypes.get_last_error() == 183:                      # ERROR_ALREADY_EXISTS
         found = []
@@ -3012,7 +3333,7 @@ def main():
         def check(hwnd, _):                                 # any version's main window
             title = ctypes.create_unicode_buffer(256)
             _GetWindowText(hwnd, title, 256)
-            if title.value.startswith(WINDOW_TITLE) and _IsWindowVisible(hwnd):
+            if title.value.startswith((WINDOW_TITLE, *OLD_TITLES)) and _IsWindowVisible(hwnd):
                 found.append(hwnd)
             return True
         _EnumWindows(_EnumWindowsProc(check), 0)
@@ -3020,7 +3341,7 @@ def main():
             _ShowWindow(found[0], 9)                        # SW_RESTORE
             _SetForegroundWindow(found[0])
         else:
-            ctypes.windll.user32.MessageBoxW(None, "Maple EXP/hr is already running.", WINDOW_TITLE, 0x40)
+            ctypes.windll.user32.MessageBoxW(None, f"{WINDOW_TITLE} is already running.", WINDOW_TITLE, 0x40)
         return
     move_old_data()
     tess = find_tesseract()

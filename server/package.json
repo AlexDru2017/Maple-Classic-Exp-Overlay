@@ -1,0 +1,12 @@
+{
+  "name": "maple-classic-exp-overlay-site",
+  "private": true,
+  "description": "Server for Maple Classic Exp Overlay's shared farming stats (Cloudflare Pages + D1).",
+  "scripts": {
+    "dev": "wrangler pages dev",
+    "deploy": "wrangler pages deploy --branch main"
+  },
+  "devDependencies": {
+    "wrangler": "^4.149.0"
+  }
+}

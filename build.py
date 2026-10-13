@@ -1,6 +1,7 @@
-"""Builds the Windows download: release/MapleEXP-v<version>.zip
+"""Builds the Windows download: release/Maple-Classic-Exp-Overlay-v<version>.zip
 
-It packs the program, Python and everything it needs into one folder with MapleEXP.exe,
+It packs the program, Python and everything it needs into one folder with
+"Maple Classic Exp Overlay.exe",
 adds Tesseract OCR (for reading map names), and zips it up for a GitHub release.
 
 Needs Python with the packages from requirements.txt plus PyInstaller, and Tesseract
@@ -18,18 +19,19 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-NAME = "MapleEXP"
+NAME = "Maple Classic Exp Overlay"                 # the folder and the .exe
+ZIP_NAME = NAME.replace(" ", "-")                  # GitHub turns spaces in downloads into dots
 VERSION = re.search(r'^VERSION = "([^"]+)"', (ROOT / "maple_exp.py").read_text(encoding="utf-8"), re.M)[1]
 TESSERACT = Path(os.environ.get("TESSERACT_DIR", r"C:\Program Files\Tesseract-OCR"))
 BUILD, RELEASE = ROOT / "build", ROOT / "release"
 
-READ_ME_FIRST = f"""Maple EXP/hr v{VERSION}  (beta)
+READ_ME_FIRST = f"""{NAME} v{VERSION}  (beta)
 
-1. Double-click MapleEXP.exe to start it.
+1. Double-click "{NAME}.exe" to start it.
    If Windows says "Windows protected your PC", click "More info", then "Run anyway".
-2. Start MapleStory and press Start in the tracker.
+2. Start MapleStory and press Start in the overlay.
 
-Keep this whole folder together: MapleEXP.exe needs the files next to it.
+Keep this whole folder together: the .exe needs the files next to it.
 The full guide is on the GitHub page you downloaded this from.
 """
 
@@ -61,7 +63,7 @@ def main():
 
     (app / "READ ME FIRST.txt").write_text(READ_ME_FIRST, encoding="utf-8")
     RELEASE.mkdir(exist_ok=True)
-    zip_path = RELEASE / f"{NAME}-v{VERSION}.zip"
+    zip_path = RELEASE / f"{ZIP_NAME}-v{VERSION}.zip"
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
         for f in sorted(app.rglob("*")):
             z.write(f, Path(NAME) / f.relative_to(app))

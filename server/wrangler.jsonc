@@ -1,0 +1,15 @@
+// Cloudflare Pages project for Maple Classic Exp Overlay's shared farming stats:
+// https://maple-classic-exp-overlay.pages.dev
+// The website (page and pictures) is public/; /api/... goes to functions/api/, which runs src/index.js.
+{
+  "name": "maple-classic-exp-overlay",
+  "compatibility_date": "2025-09-01",
+  "pages_build_output_dir": "./public",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "classicexp",
+      "database_id": "1721fc46-30e4-44cd-a8a3-64605541dc04"
+    }
+  ]
+}
