@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.9.5-beta
+
+**Fixed**
+- Dying (losing a few % of your EXP) made EXP gained and EXP/hr go down, even below zero. Now the loss isn't counted: it says how much you lost and carries on.
+- A run the best-maps site turned down was sent again every 30 minutes, and enough of them could stop newer runs from being shared.
+- A log file edited by hand (or damaged) could stop the overlay from starting. Lines it can't use are now left out (a copy of the file is kept), and it starts as usual.
+
+**The best-maps website** (already live)
+- Checks every run harder: no more EXP than the levels it covers hold, and start times in a sensible range.
+- Only 6 players can share from one internet connection a day, so it's much harder to make up players.
+- Other websites can't make their visitors' browsers send runs.
+- The code kept for spam limits can no longer be turned back into an internet address.
+
 ## 0.9.4-beta
 
 **New**

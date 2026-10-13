@@ -112,6 +112,7 @@ It double-checks everything it reads before counting it:
 - **EXP:** the number and the % have to agree with each other, and with the EXP your level needs.
 - **Mesos:** a new amount has to show up in several readings in a row.
 - **Sudden jumps:** an EXP jump or a level-up has to be confirmed before it counts. A mesos amount that looks like an extra or missing digit is ignored.
+- **Dying:** the EXP you lose isn't taken off your EXP/hr. It says how much you lost, then carries on from there.
 - **When in doubt, it waits.** If it can't read something clearly, it skips it instead of guessing.
 
 Every version is tested against thousands of misread numbers, and against real screenshots of the game pasted over many different backgrounds at different window sizes.
@@ -151,7 +152,7 @@ Every version is tested against thousands of misread numbers, and against real s
 - **Your log and settings stay on your PC**, in `%APPDATA%\MapleEXP`.
 - **The update check** (on by default, can be turned off in ⚙) asks GitHub for the newest version and what's new in it. Nothing about you is sent.
 - **15-minute runs are only shared if you said yes.** Each one is the map, when you farmed it, your level, class and party size, the EXP and mesos you got, the overlay's version, and a random ID made by your copy of the overlay. Never your character's name, your game account or your Windows user name.
-- **The website keeps** those runs. To limit spam it also keeps a scrambled code made from your internet address, which changes every day. Your address itself isn't kept.
+- **The website keeps** those runs. To limit spam it also keeps a scrambled code made from your internet address with a secret key, which changes every day and can't be turned back into the address. Your address itself isn't kept.
 - **Bug reports** only go to GitHub if you click Submit there yourself.
 
 ## Code signing policy

@@ -238,6 +238,72 @@ for _ in range(10):
     tr.observe([(47850, 70.0)], False)                   # a misread that suggests another level
 check("misreads can't change the level's EXP once it's known from the table", tr.req == 95700)
 
+# ---- dying: EXP drops a few % of the level (Lv 30 needs 95,700)
+def read(tr, e):
+    return tr.observe([(e, int(e / 95700 * 10000) / 100)], True)
+
+tr = exp_tracker()
+for e in (48850, 48850):                                 # +1,000
+    read(tr, e)
+for e in (39280, 39280):                                 # dies: -10% (9,570)
+    note = read(tr, e)[1]
+check(f"dying isn't taken off the EXP gained (gained {tr.gained:.0f}, deaths {tr.deaths}, lost {tr.last_loss:.1f}%)",
+      note == "died" and tr.gained == 1000 and tr.deaths == 1 and abs(tr.last_loss - 10) < 0.1)
+read(tr, 39780)
+check(f"after dying, EXP gained counts as usual (gained {tr.gained:.0f})", tr.gained == 1500)
+tr = exp_tracker(479, 0.5)
+for e in (0, 0):                                         # dies at 0.5%: EXP goes to 0
+    read(tr, e)
+check(f"dying with less EXP than it costs (down to 0) isn't counted either (gained {tr.gained:.0f})",
+      tr.gained == 0 and tr.deaths == 1)
+tr = exp_tracker()
+for e in (43065, 47850):                                 # 5% lower once (a misread), then the real number
+    read(tr, e)
+check("a single low reading is ignored", tr.gained == 0 and tr.deaths == 0)
+tr = exp_tracker()
+for e in (43065, 43065, 47850, 47950):                   # the same low misread twice, then the real number
+    read(tr, e)
+check(f"a misread that looks like dying, then the real number: no EXP made up (gained {tr.gained:.0f})",
+      tr.gained == 100 and tr.deaths == 0)
+tr = exp_tracker()
+for e in (50721, 50721, 47850, 47950):                   # 3% too high twice, then the real number
+    read(tr, e)
+check(f"a misread a bit too high and the real number after it cancel out (gained {tr.gained:.0f})",
+      tr.gained == 100 and tr.deaths == 0)
+log, _ = new_log()
+log.gain(0, 100)
+log.gain(1, -2000)                                       # more taken back than gained
+for s in range(2, 1000):
+    if s % 3 == 0:
+        log.gain(s, 1)
+    log.tick(s, "Rocky Road II", 27, 1)
+check(f"no log line or run is ever made of EXP lost (lines: {[e['exp'] for e in log.entries]}, runs: {len(log.runs)})",
+      [e["exp"] for e in log.entries] == [200] and log.runs == [])   # the 5-minute blocks after the loss
+
+
+class FakeResponse:
+    def __init__(self, data):
+        self.data = json.dumps(data).encode()
+
+    def read(self, _=None):
+        return self.data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return False
+
+
+real_urlopen = m.urllib.request.urlopen
+m.urllib.request.urlopen = lambda *a, **k: FakeResponse({"results": [
+    {"started": "a", "ok": True}, {"started": "b", "ok": False, "why": "overlaps another run"},
+    {"started": "c", "ok": False, "why": "too many runs today", "retry": True}]})
+done = m.post_runs("0" * 16, [{"started": x} for x in "abc"])
+m.urllib.request.urlopen = real_urlopen
+check(f"runs the site has, or turned down for good, aren't sent again; 'try tomorrow' ones are ({done})",
+      done == ["a", "b"])
+
 # ---- EXP tracking with noisy readings: misreads must never inflate the gains
 random.seed(1)
 reqs, worst = [54900, 63666, 73080], 0.0

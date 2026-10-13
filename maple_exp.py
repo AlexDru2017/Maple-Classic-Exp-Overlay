@@ -17,6 +17,7 @@ import ctypes
 import hashlib
 import hmac
 import json
+import math
 import os
 import platform
 import queue
@@ -55,7 +56,7 @@ except Exception:
     except Exception:
         pass
 
-VERSION = "0.9.4-beta"
+VERSION = "0.9.5-beta"
 WINDOW_TITLE = "Maple Classic Exp Overlay"    # the version is shown in Settings
 OLD_TITLES = ("Maple EXP/hr",)               # what versions before 0.9.3 were called
 
@@ -238,7 +239,9 @@ def check_for_update(timeout=8):
 
 def post_runs(install, runs, timeout=15):
     """Sends finished runs to the stats site (only if the player agreed to share).
-    Returns the start times of the runs the site has (now or from before)."""
+    Returns the start times of the runs it's done with: the ones the site has (now or from
+    before), and ones it turned down for good. Runs turned down only for today ("retry", too
+    many sent today) are left to be sent again later."""
     shared = ("date", "started", "map_read", "class", "level_start", "level_end", "party", "exp",
               "seconds", "mesos", "mesos_seconds", "version", "seal")
     body = json.dumps({"install": install, "runs": [{k: r.get(k) for k in shared} for r in runs]}).encode()
@@ -246,7 +249,7 @@ def post_runs(install, runs, timeout=15):
         "content-type": "application/json", "User-Agent": f"MapleClassicExpOverlay/{VERSION}"})
     with urllib.request.urlopen(request, timeout=timeout) as response:
         data = json.loads(response.read(1_000_000).decode("utf-8"))
-    return [r.get("started") for r in data.get("results", []) if r.get("ok")]
+    return [r.get("started") for r in data.get("results", []) if r.get("ok") or not r.get("retry")]
 
 
 # --------------------------------------------------------------------------- game window
@@ -1534,6 +1537,9 @@ class ExpTracker:
         self._pending_lvl = None              # level-up waiting for confirmation
         self._level_start = None              # (exp, pct) right after a level-up, unverified
         self._prev_req = None                 # previous level's req, bounds the new one
+        self._before_death = None             # (reads, EXP) just before the last death
+        self.deaths = 0
+        self.last_loss = None                 # % of the level's EXP the last death cost
         self.gained = 0
         self.levels = 0
         self.samples = deque()                # (elapsed, gained)
@@ -1554,7 +1560,7 @@ class ExpTracker:
         """Numbers from zero again, keeping what's known about the level and current EXP."""
         self.running = False
         self._accum, self._resumed = 0.0, None
-        self.gained, self.levels = 0, 0
+        self.gained, self.levels, self.deaths = 0, 0, 0
         self.samples = deque()
 
     def elapsed(self):
@@ -1677,6 +1683,31 @@ class ExpTracker:
             return True, "baseline"
 
         delta = e - self.exp
+        if (0.01 * self.req <= -delta or (e == 0 and delta < 0)) and -delta <= 0.15 * self.req                 and not self._was_near(e):
+            # EXP went down a few % of the level (or to 0): dying (it costs up to about 10%). Once a
+            # second reading agrees, carry on from the new number without counting the loss,
+            # so a death doesn't drag EXP/hr down (or below zero).
+            last = self._pending
+            n = last[2] + 1 if last and abs(e - last[0]) <= 0.005 * self.req else 1
+            self._pending = (e, p, n)
+            if n < 2:
+                return False, "EXP went down, waiting to confirm"
+            self._pending = None
+            self._before_death = (self._reads, self.exp)
+            self.last_loss = -delta / self.req * 100
+            self.deaths += 1
+            self.exp, self.pct = e, p
+            self._recent.append((self._reads, e))
+            return True, "died"
+        if self._before_death and self._reads - self._before_death[0] <= 40 and delta > 0 \
+                and e >= self._before_death[1] - 0.005 * self.req:
+            # Right back to where it was before "dying", in one go: those low readings were a
+            # misread, not a death (EXP lost on dying comes back only slowly, from monsters).
+            self._before_death, self.deaths = None, max(0, self.deaths - 1)
+            self._pending = None
+            self.exp, self.pct = e, p
+            self._recent.append((self._reads, e))
+            return True, "baseline"
         if abs(delta) > 0.15 * self.req:
             # Unusually big change in one tick: only believe it if the next read agrees.
             last = self._pending
@@ -1698,6 +1729,11 @@ class ExpTracker:
         self.exp, self.pct = e, p
         self._recent.append((self._reads, e))
         return True, ""
+
+    def _was_near(self, e):
+        """Was EXP about e a moment ago? Then going down to it is the right number coming
+        back after a misread that was a bit too high (and counts, to cancel that out)."""
+        return any(self._reads - r <= 40 and abs(e - x) <= 0.005 * self.req for r, x in self._recent)
 
     def _undoes_jump(self, e):
         """Was EXP around e a moment ago? Then a big drop to it is the right number coming
@@ -2067,11 +2103,13 @@ class AutoLog:
         good = [e for e in entries if self._valid(e)]
         if len(good) < len(entries):
             self._keep_copy(f"reading the EXP log: left out {len(entries) - len(good)} damaged lines")
-        self.entries, self.aliases = good, aliases
-        self.runs = [r for r in runs if isinstance(r, dict)]
+        self.entries = good
+        self.aliases = {k: v for k, v in aliases.items() if isinstance(k, str) and isinstance(v, str)}
+        self.runs = [r for r in runs if isinstance(r, dict)]   # (only sealed ones are ever shared)
         if isinstance(data.get("install"), str) and re.fullmatch(r"[0-9a-f]{16}", data["install"]):
             self.install = data["install"]
-        return data.get("version", 1)
+        version = data.get("version", 1)
+        return version if type(version) is int else LOG_VERSION
 
     def _keep_copy(self, what, exc=None):
         """Keeps a copy of the log file before it's saved over (once per problem)."""
@@ -2086,11 +2124,25 @@ class AutoLog:
 
     @staticmethod
     def _valid(e):
-        """An entry with everything the log needs (anything else is left out, not crashed on)."""
+        """An entry with everything the log needs, each of the right kind, as the overlay writes
+        them. Anything else is left out, not crashed on: the file may have been edited by hand."""
+        def number(x):
+            return type(x) in (int, float) and math.isfinite(x)
+
+        def optional(key, ok, empty=False):           # missing (or empty), or of the right kind
+            return key not in e or (empty and e[key] is None) or ok(e[key])
         try:
             date.fromisoformat(e["date"])
-            float(e["exp"]), float(e["seconds"])
-            return isinstance(e["map"], str) and "level" in e
+            return (isinstance(e["map"], str) and e["map"].strip() != "" and len(e["map"]) <= 200
+                    and number(e["exp"]) and number(e["seconds"]) and e["seconds"] >= 0
+                    and (e["level"] is None or (type(e["level"]) is int and 1 <= e["level"] <= 300))
+                    and optional("party", lambda v: type(v) is int and 1 <= v <= 6, empty=True)
+                    and optional("class", lambda v: isinstance(v, str), empty=True)
+                    and optional("map_read", lambda v: isinstance(v, str), empty=True)
+                    and optional("seal", lambda v: isinstance(v, str))
+                    and optional("updated", number)
+                    and optional("mesos", number) and optional("mesos_seconds", number)
+                    and (not e.get("mesos_seconds") or number(e.get("mesos"))))
         except Exception:
             return False
 
@@ -2118,7 +2170,7 @@ class AutoLog:
                     self.run["exp"] += amount
             self.last_gain = now
         elif self.start is not None:
-            self.block_exp += amount                         # EXP lost, e.g. on death
+            self.block_exp += amount                         # a misread too high, taken back
             if self.run:
                 self.run["exp"] += amount
 
@@ -2144,6 +2196,9 @@ class AutoLog:
             self.meso0 = mesos                               # mesos as the stretch began
         self._run_tick(now, map_name, level, party, mesos, job, map_read)
         if now - self.start < LOG_BLOCK:
+            return None
+        if self.block_exp <= 0:                              # nothing gained after all
+            self.start, self.block_exp = now, 0
             return None
         meso_gain = meso_seconds = 0
         if self.meso0 and mesos and mesos[1] > self.meso0[1]:
@@ -2177,7 +2232,8 @@ class AutoLog:
         meso_gain = meso_seconds = 0
         if r["meso0"] and mesos and mesos[1] > r["meso0"][1]:
             meso_gain, meso_seconds = mesos[0] - r["meso0"][0], mesos[1] - r["meso0"][1]
-        self._add_run(r, now - r["start"], meso_gain, meso_seconds)
+        if r["exp"] > 0:
+            self._add_run(r, now - r["start"], meso_gain, meso_seconds)
         self.run = {"start": now, "exp": 0, "map": None}     # straight on into the next run
         self._run_tick(now, map_name, level, party, mesos, job, map_read)
 
@@ -2305,7 +2361,7 @@ class AutoLog:
         self._change(apply)
 
     def newest_first(self):
-        return sorted(self.entries, key=lambda e: e.get("updated", 0), reverse=True)
+        return sorted(self.entries, key=lambda e: e.get("updated") or 0, reverse=True)
 
     def save(self):
         try:
@@ -2437,6 +2493,7 @@ class App:
         self.map_read = None                # the map name exactly as read
         self.found_at = None                # when the EXP bar was first read for this level
         self.level_up_at = None
+        self.died_at = None
         self.log_open = False
         self.settings_win = None
         self.q = queue.Queue()
@@ -2992,6 +3049,8 @@ class App:
                 self.reader.box, self.rejected = None, 0
             if t.running and t.gained != before and not self.skip_log:
                 self.autolog.gain(now, t.gained - before)
+            if note == "died":
+                self.died_at = now
             if note == "LEVEL UP!":
                 self.level_up_at = now
                 if self.level:
@@ -3010,6 +3069,8 @@ class App:
         t = self.tracker
         if self.level_up_at and time.monotonic() - self.level_up_at < 6:
             return f"Level up! You're now Lv {self.level}." if self.level else "Level up!"
+        if self.died_at and time.monotonic() - self.died_at < 30 and t.last_loss:
+            return f"You died and lost {t.last_loss:.1f}% EXP. That isn't taken off your EXP/hr."
         if self.rejected >= 5:
             return "Having trouble reading the EXP bar clearly. View capture shows what it sees."
         if t.req is None:

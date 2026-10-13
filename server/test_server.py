@@ -3,10 +3,12 @@ duplicate runs. Run against a local server (npm --prefix server run dev), never 
 
     py -3 server/test_server.py http://localhost:8787
 """
+import hashlib
 import json
 import random
 import sys
 import urllib.request
+from datetime import date, timedelta
 
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:8787"
 assert "localhost" in BASE or "127.0.0.1" in BASE, "only run this against a local test server"
@@ -20,9 +22,15 @@ def check(name, ok):
     failures += not ok
 
 
-def call(path, body=None):
+def call(path, body=None, ip=None, content_type="application/json"):
+    """A request to the test server. Each made-up player sends from their own made-up internet
+    address (the live site gets the real one from Cloudflare), unless `ip` says otherwise."""
+    headers = {"content-type": content_type}
+    if isinstance(body, dict) and isinstance(body.get("install"), str):
+        n = int(hashlib.md5(body["install"].encode()).hexdigest()[:4], 16)
+        headers["CF-Connecting-IP"] = ip or f"10.0.{n >> 8}.{n & 255}"
     req = urllib.request.Request(BASE + path, data=json.dumps(body).encode() if body is not None else None,
-                                 headers={"content-type": "application/json"})
+                                 headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
             return json.loads(r.read())
@@ -43,6 +51,11 @@ def run(started, exp_hr, level=31, map_name="The Land of Wild Boar II", job="Ban
             "version": "0.9.4-beta", "seal": "x" * 24}
 
 
+def day(n):
+    """Dates in the past 30 days (runs older than 60 days aren't taken): day(1) is 29 days ago."""
+    return (date.today() - timedelta(days=30 - n)).isoformat()
+
+
 def hours(day, n, start_hour=10):
     return [f"{day}T{start_hour + i:02d}:00" for i in range(n)]
 
@@ -53,49 +66,66 @@ for i in range(6):
     who = install()
     typical = rnd.uniform(45000, 55000)
     r = call("/api/runs", {"install": who, "runs": [run(t, typical * rnd.uniform(0.93, 1.07), level=30 + i % 4)
-                                                     for t in hours("2026-10-01", 3)]})
+                                                     for t in hours(f"{day(1)}", 3)]})
     normal.append(typical)
     check(f"normal player {i + 1}: all 3 runs received", r.get("received") == 3)
 
 # a faker and an AFK player
-r = call("/api/runs", {"install": install(), "runs": [run(t, 500000) for t in hours("2026-10-01", 3)]})
+r = call("/api/runs", {"install": install(), "runs": [run(t, 500000) for t in hours(f"{day(1)}", 3)]})
 check("a faker's runs are received (but should be left out of the numbers)", r.get("received") == 3)
-call("/api/runs", {"install": install(), "runs": [run(t, 5000) for t in hours("2026-10-01", 3)]})
+call("/api/runs", {"install": install(), "runs": [run(t, 5000) for t in hours(f"{day(1)}", 3)]})
 
 # a map only two players have farmed
 for _ in range(2):
-    call("/api/runs", {"install": install(), "runs": [run("2026-10-01T09:00", 40000, map_name="Rocky Road II")]})
+    call("/api/runs", {"install": install(), "runs": [run(f"{day(1)}T09:00", 40000, map_name="Rocky Road II")]})
 
 # broken runs
-bad = [dict(run("2026-10-02T10:00", 50000), seconds=300),                 # only 5 minutes
-       dict(run("2026-10-02T11:00", 50000), level_start=35, level_end=31),  # level going down
-       dict(run("2026-10-02T12:00", 50000), **{"class": ""}),               # no class
-       dict(run("2026-10-02T13:00", 50000), exp=9e9),                       # impossible EXP
+bad = [dict(run(f"{day(2)}T10:00", 50000), seconds=300),                 # only 5 minutes
+       dict(run(f"{day(2)}T11:00", 50000), level_start=35, level_end=31),  # level going down
+       dict(run(f"{day(2)}T12:00", 50000), **{"class": ""}),               # no class
+       dict(run(f"{day(2)}T13:00", 50000), exp=9e9),                       # impossible EXP
        "not a run at all"]
+bad += [dict(run(f"{day(2)}T14:00", 50000), exp=400000),                   # more than Lv 31 and 32 hold
+        run("2020-01-01T10:00", 50000),                                     # years ago
+        run(f"{(date.today() + timedelta(days=5)).isoformat()}T10:00", 50000)]  # days ahead
 r = call("/api/runs", {"install": install(), "runs": bad})
 check(f"broken runs are refused ({[x.get('why') for x in r['results']]})", r.get("received") == 0)
+why = [x.get("why") for x in r["results"]]
+check(f"more EXP than the levels hold is refused ({why[5]})", why[5] == "impossible EXP for those levels")
+check(f"runs from long ago, or from days ahead, are refused ({why[6]}, {why[7]})",
+      why[6] == why[7] == "start time out of range")
+check("a post that isn't JSON is refused (other websites can't make browsers send runs)",
+      call("/api/runs", {"install": install(), "runs": [run(f"{day(2)}T15:00", 50000)]},
+           content_type="text/plain").get("status") == 415)
+check("other kinds of request are refused", call("/api/runs", None).get("status") == 404)
+crowd = [install() for _ in range(7)]
+got = [call("/api/runs", {"install": who, "runs": [run(f"{day(3)}T08:00", 50000, map_name="Ant Tunnel II", job="Beginner")]},
+            ip="192.0.2.7")["results"][0] for who in crowd]
+check(f"only 6 players can share from one connection a day; the 7th is asked to try later "
+      f"({[g.get('ok') for g in got]}, {got[-1].get('why')})",
+      all(g["ok"] for g in got[:6]) and not got[6]["ok"] and got[6].get("retry") is True)
 check("a request without a proper install id is refused", call("/api/runs", {"install": "me", "runs": []}).get("status") == 400)
 
 # a run sent twice, runs one after another, and runs that overlap in time
 who = install()
-first = run("2026-10-03T10:00", 50000)
+first = run(f"{day(3)}T10:00", 50000)
 call("/api/runs", {"install": who, "runs": [first]})
-r = call("/api/runs", {"install": who, "runs": [first, run("2026-10-03T10:10", 50000)]})
+r = call("/api/runs", {"install": who, "runs": [first, run(f"{day(3)}T10:10", 50000)]})
 check("sending the same run again is fine (not counted twice)", r["results"][0].get("already") is True)
 check("a run overlapping another one is refused", r["results"][1].get("why") == "overlaps another run")
-r = call("/api/runs", {"install": who, "runs": [run("2026-10-03T10:15", 50000), run("2026-10-03T10:30", 50000)]})
+r = call("/api/runs", {"install": who, "runs": [run(f"{day(3)}T10:15", 50000), run(f"{day(3)}T10:30", 50000)]})
 check(f"15-minute runs one after another are all taken ({r.get('received')} of 2)", r.get("received") == 2)
 old = install()
-r = call("/api/runs", {"install": old, "runs": [dict(run("2026-10-03T12:00", 50000, seconds=3600.4, job="Hunter",
+r = call("/api/runs", {"install": old, "runs": [dict(run(f"{day(3)}T12:00", 50000, seconds=3600.4, job="Hunter",
                                                          map_name="Ant Tunnel I"), version="0.9.3-beta")]})
 check("a 1-hour run from 0.9.3 is still taken", r.get("received") == 1)
-r = call("/api/runs", {"install": old, "runs": [run("2026-10-03T12:45", 50000, job="Hunter", map_name="Ant Tunnel I")]})
+r = call("/api/runs", {"install": old, "runs": [run(f"{day(3)}T12:45", 50000, job="Hunter", map_name="Ant Tunnel I")]})
 check("a run inside that hour overlaps it", r["results"][0].get("why") == "overlaps another run")
 
 # a spammer sends 150 runs (50 at a time)
 spammer, received = install(), 0
 for part in range(3):
-    spam = [run(f"2026-10-{4 + i // 24:02d}T{i % 24:02d}:00", 50000) for i in range(part * 50, part * 50 + 50)]
+    spam = [run(f"{day(4 + i // 24)}T{i % 24:02d}:00", 50000) for i in range(part * 50, part * 50 + 50)]
     received += call("/api/runs", {"install": spammer, "runs": spam}).get("received", 0)
 check(f"one install can only send so many a day ({received} of 150 received)", received == 100)
 
@@ -106,14 +136,14 @@ def players(n, job, exp_hr, day):
         call("/api/runs", {"install": install(), "runs": [run(f"{day}T10:00", exp_hr, job=job)]})
 
 
-players(1, "Chief Bandit", 50000, "2026-10-05")
-players(3, "Rogue", 50000, "2026-10-05")
-players(3, "Hermit", 70000, "2026-10-05")
-players(3, "Beginner", 50000, "2026-10-05")
-players(3, "Hunter", 50000, "2026-10-05")
+players(1, "Chief Bandit", 50000, f"{day(5)}")
+players(3, "Rogue", 50000, f"{day(5)}")
+players(3, "Hermit", 70000, f"{day(5)}")
+players(3, "Beginner", 50000, f"{day(5)}")
+players(3, "Hunter", 50000, f"{day(5)}")
 # three Bandits in parties of 2, 4 and 6: shown together under "party", never under "solo"
 for size in (2, 4, 6):
-    call("/api/runs", {"install": install(), "runs": [run("2026-10-06T10:00", 120000, map_name="Sleepywood Dungeon",
+    call("/api/runs", {"install": install(), "runs": [run(f"{day(6)}T10:00", 120000, map_name="Sleepywood Dungeon",
                                                           party=size)]})
 
 # what the site shows

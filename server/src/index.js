@@ -6,9 +6,11 @@
 //   everything else   the website, from public/ (served by Cloudflare without running this)
 //
 // Anyone can send anything to a public server, so nothing is taken on trust: every run is
-// checked for being a plausible run, each install and connection can only send so
-// many a day, and the numbers shown are medians in which a player counts once, with runs
-// far from what other players get (same map, class, level, solo or party) left out.
+// checked for being a plausible run (including no more EXP than its levels hold), each
+// install and connection can only send so many a day (and only a few installs can share
+// from one connection), and the numbers shown are medians in which a player counts once,
+// with runs far from what other players get (same map, class, level, solo or party) left out.
+// Posts must be JSON, so other websites can't make their visitors' browsers send runs.
 
 const MIN_PLAYERS = 3;              // different players needed before a map is shown
 const BAND = [0.5, 2.0];            // runs outside this share of the median are outliers
@@ -17,6 +19,9 @@ const MAX_PER_REQUEST = 50;
 const RUN_SECONDS = [890, 3720];   // a run is 15 minutes (an hour from 0.9.3, still taken)
 const MAX_PER_INSTALL_DAY = 100;    // more than a day's worth of 15-minute runs can't be real
 const MAX_PER_IP_DAY = 400;
+const MAX_INSTALLS_PER_IP_DAY = 6;  // copies of the overlay sharing from one connection a day (a party)
+const MAX_BODY = 200_000;           // bytes in one post (50 runs are about 25,000)
+const DAYS_BACK = 60;               // how old a run can be when it's sent (and up to 2 days ahead)
 const CACHE_SECONDS = 60;         // new runs show up on the site within a minute
 
 // The four classes, each split into paths named after the job they end in (4th job). A run
@@ -56,6 +61,32 @@ export const CLASSES = {
   },
 };
 
+// EXP needed to finish each level in MapleStory Classic World (index 0 = level 1): the same
+// table as the overlay's (maple_exp.py), so a run can't claim more EXP than its levels hold.
+const EXP_TABLE = [
+  15, 34, 57, 92, 135, 372, 560, 840, 1242, 1716, 2360, 3216, 4200, 5460, 7050, 8840, 11040, 13716, 16680,
+  20216, 24402, 28980, 34320, 40512, 47216, 54900, 63666, 73080, 83720, 95700, 108480, 122760, 138666,
+  155540, 174216, 194832, 216600, 240500, 266682, 294216, 324240, 356916, 391160, 428280, 468450, 510420,
+  555680, 604416, 655200, 709716, 748608, 789631, 832902, 878545, 926689, 977471, 1031036, 1087536,
+  1147132, 1209994, 1276301, 1346242, 1420016, 1497832, 1579913, 1666492, 1757815, 1854143, 1955750,
+  2062925, 2175973, 2295216, 2420993, 2553663, 2693603, 2841212, 2996910, 3161140, 3334370, 3517093,
+  3709829, 3913127, 4127566, 4353756, 4592341, 4844001, 5109452, 5389449, 5684790, 11938059, 25069923,
+  52646838, 110558359, 232172553, 487562361, 1023880958, 2150150011, 4515315023, 9482161548
+];
+
+/** Could a run from level `start` to `end` have gained `exp`? At most all of those levels'
+ * EXP (with one level to spare, in case the level was read a moment late), and at least
+ * half of the whole levels in between. Past the table's end: can't tell, so yes. */
+export function expPossible(start, end, exp) {
+  if (end + 1 > EXP_TABLE.length) return true;
+  let most = EXP_TABLE[end], least = 0;
+  for (let level = start; level <= end; level++) {
+    most += EXP_TABLE[level - 1];
+    if (level > start && level < end) least += EXP_TABLE[level - 1];
+  }
+  return exp <= most && exp >= least / 2;
+}
+
 /** The jobs whose runs count for a class and path (no path: the whole class), or null. */
 export function jobsFor(name, path) {
   const c = Object.hasOwn(CLASSES, name) ? CLASSES[name] : null;
@@ -69,13 +100,13 @@ export default {
     const url = new URL(request.url);
     try {
       if (request.method === "POST" && url.pathname === "/api/runs") return await postRuns(request, env);
-      if (request.method === "GET" && url.pathname === "/api/stats") {
-        return await cached(request, ctx, () => getStats(url, env));
-      }
+      if (request.method === "GET" && url.pathname === "/api/stats") return await getStats(url, env, ctx);
       if (request.method === "GET" && url.pathname === "/api/options") {
-        return await cached(request, ctx, () => getOptions(env));
+        return await cached(url, ctx, "options", () => getOptions(env));
       }
-      if (url.pathname.startsWith("/api/")) return json({ error: "not found" }, 404);
+      if (url.pathname.startsWith("/api/")) {
+        return json({ error: "not found" }, ["GET", "POST"].includes(request.method) ? 404 : 405);
+      }
       return env.ASSETS.fetch(request);
     } catch (e) {
       console.error(e);
@@ -101,8 +132,8 @@ function minutes(started) {          // "2026-10-12T14:05" -> minutes since 1970
   return Date.parse(started + ":00Z") / 60000;
 }
 
-/** A plausible 1-hour run, cleaned up, or a reason it isn't. */
-export function checkRun(r) {
+/** A plausible run, cleaned up, or a reason it isn't. */
+export function checkRun(r, now = Date.now()) {
   if (!r || typeof r !== "object") return { why: "not a run" };
   const map = text(r.map_read ?? r.map, 60);
   const job = text(r.class, 40);
@@ -116,12 +147,14 @@ export function checkRun(r) {
   const mesos = inRange(r.mesos ?? 0, -1e10, 1e11);
   const mesosSeconds = inRange(r.mesos_seconds ?? 0, 0, RUN_SECONDS[1]);
   if (!map || !job || !started || !minutes(started)) return { why: "missing map, class or start time" };
+  const ago = now / 60000 - minutes(started);       // (the overlay sends its local time)
+  if (ago > DAYS_BACK * 1440 || ago < -2 * 1440) return { why: "start time out of range" };
   if (!levelStart || !levelEnd || !party) return { why: "bad level or party size" };
   if (levelEnd < levelStart || levelEnd - levelStart > 10) return { why: "impossible level change" };
   if (!seconds) return { why: "not a 15-minute run" };
   if (exp === null || mesos === null || mesosSeconds === null) return { why: "bad EXP or mesos" };
   const expHr = exp / seconds * 3600;
-  if (expHr > 5e6) return { why: "impossible EXP/hr" };
+  if (expHr > 5e6 || !expPossible(levelStart, levelEnd, exp)) return { why: "impossible EXP for those levels" };
   // Mesos/hr only when the mesos were seen for at least 10 minutes of the run.
   const mesosHr = mesosSeconds >= 600 ? Math.max(0, mesos) / mesosSeconds * 3600 : null;
   if (mesosHr !== null && mesosHr > 5e7) return { why: "impossible mesos/hr" };
@@ -134,15 +167,31 @@ export function checkRun(r) {
   };
 }
 
-async function sha256(value) {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+/** A code for a connection on one day. With the IP_SALT secret (set on the live site) it
+ * can't be worked back to the internet address by trying them all. */
+async function connectionCode(ip, day, salt) {
+  const data = new TextEncoder().encode(`${ip} ${day}`);
+  let digest;
+  if (salt) {
+    const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(salt), { name: "HMAC", hash: "SHA-256" },
+      false, ["sign"]);
+    digest = await crypto.subtle.sign("HMAC", key, data);
+  } else {
+    digest = await crypto.subtle.digest("SHA-256", data);     // (only when testing locally)
+  }
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 32);
 }
 
 async function postRuns(request, env) {
+  if (!(request.headers.get("content-type") || "").toLowerCase().startsWith("application/json")) {
+    return json({ error: "send JSON" }, 415);
+  }
+  if (Number(request.headers.get("content-length") || 0) > MAX_BODY) return json({ error: "too big" }, 413);
   let body;
   try {
-    body = await request.json();
+    const raw = await request.text();
+    if (raw.length > MAX_BODY) return json({ error: "too big" }, 413);
+    body = JSON.parse(raw);
   } catch {
     return json({ error: "not JSON" }, 400);
   }
@@ -151,12 +200,17 @@ async function postRuns(request, env) {
 
   const now = new Date();
   const day = now.toISOString().slice(0, 10);
-  const ipHash = await sha256(`${request.headers.get("CF-Connecting-IP") || "?"} ${day}`);
+  const ipHash = await connectionCode(request.headers.get("CF-Connecting-IP") || "?", day, env.IP_SALT);
   const counts = await env.DB.prepare(
     `SELECT (SELECT COUNT(*) FROM runs WHERE install = ?1 AND received_day = ?2) AS mine,
-            (SELECT COUNT(*) FROM runs WHERE ip_hash = ?3 AND received_day = ?2) AS ip`
+            (SELECT COUNT(*) FROM runs WHERE ip_hash = ?3 AND received_day = ?2) AS ip,
+            (SELECT COUNT(DISTINCT install) FROM runs WHERE ip_hash = ?3 AND received_day = ?2) AS installs,
+            (SELECT COUNT(*) FROM runs WHERE ip_hash = ?3 AND received_day = ?2 AND install = ?1) AS here`
   ).bind(install, day, ipHash).first();
   let mine = counts.mine, fromIp = counts.ip;
+  // A connection that has already shared for a few copies of the overlay today can't add
+  // more (made-up players to push a map past MIN_PLAYERS). They're sent again tomorrow.
+  const crowded = counts.installs >= MAX_INSTALLS_PER_IP_DAY && !counts.here;
   // This install's runs, to catch runs that overlap in time (one person can't farm two at once).
   const { results: earlier } = await env.DB.prepare(
     "SELECT started, seconds FROM runs WHERE install = ?1 ORDER BY started DESC LIMIT 2000"
@@ -169,7 +223,7 @@ async function postRuns(request, env) {
   const results = [];
   for (const raw of body.runs.slice(0, MAX_PER_REQUEST)) {
     const started = typeof raw?.started === "string" ? raw.started.slice(0, 16) : null;
-    const { run, why } = checkRun(raw);
+    const { run, why } = checkRun(raw, now.getTime());
     if (!run) {
       results.push({ started, ok: false, why });
       continue;
@@ -183,8 +237,9 @@ async function postRuns(request, env) {
       results.push({ started, ok: false, why: "overlaps another run" });
       continue;
     }
-    if (mine >= MAX_PER_INSTALL_DAY || fromIp >= MAX_PER_IP_DAY) {
-      results.push({ started, ok: false, why: "too many runs today", retry: true });
+    if (mine >= MAX_PER_INSTALL_DAY || fromIp >= MAX_PER_IP_DAY || crowded) {
+      results.push({ started, ok: false, why: crowded ? "too many players on one connection today" : "too many runs today",
+        retry: true });
       continue;
     }
     await env.DB.prepare(
@@ -199,7 +254,7 @@ async function postRuns(request, env) {
     fromIp++;
     results.push({ started, ok: true });
   }
-  return json({ received: results.filter((r) => r.ok).length, results });
+  return json({ received: results.filter((r) => r.ok).length, results }, 200, false);
 }
 
 // ---------------------------------------------------------------- the numbers
@@ -252,7 +307,7 @@ export function summarize(runs) {
   };
 }
 
-async function getStats(url, env) {
+async function getStats(url, env, ctx) {
   const name = url.searchParams.get("class"), path = url.searchParams.get("path") || null;
   const jobs = jobsFor(name, path);
   const level = parseInt(url.searchParams.get("level"), 10);
@@ -262,6 +317,10 @@ async function getStats(url, env) {
   if (!jobs || !(level >= 1 && level <= 250) || !party) {
     return json({ error: "give class (and path), level (1-250) and party (solo or party)" }, 400);
   }
+  return cached(url, ctx, `stats/${name}/${path || ""}/${level}/${party}`, () => findMaps(env, name, path, jobs, level, party));
+}
+
+async function findMaps(env, name, path, jobs, level, party) {
   const { results: runs } = await env.DB.prepare(
     `SELECT install, map, seconds, exp_hr, mesos_hr FROM runs
      WHERE job IN (${jobs.map((_, i) => `?${i + 3}`).join(", ")}) AND party ${party === "solo" ? "= 1" : ">= 2"}
@@ -316,21 +375,24 @@ async function getOptions(env) {
 
 // ---------------------------------------------------------------- helpers
 
-function json(data, status = 200) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { "content-type": "application/json; charset=utf-8", "access-control-allow-origin": "*" },
-  });
+function json(data, status = 200, anySite = true) {
+  const headers = { "content-type": "application/json; charset=utf-8" };
+  if (anySite) headers["access-control-allow-origin"] = "*";      // the numbers are public
+  return new Response(JSON.stringify(data), { status, headers });
 }
 
-async function cached(request, ctx, make) {
+/** An answer kept for a minute, under a key made from the question itself, so extra bits
+ * in the address can't skip the cache and use up the database. (Not when testing locally.) */
+async function cached(url, ctx, key, make) {
+  if (url.hostname === "localhost" || url.hostname === "127.0.0.1") return make();
   const cache = caches.default;
-  const hit = await cache.match(request);
+  const id = new Request(`${url.origin}/__cache/${encodeURIComponent(key)}`);
+  const hit = await cache.match(id);
   if (hit) return hit;
   const response = await make();
   if (response.status === 200) {
     response.headers.set("cache-control", `public, max-age=${CACHE_SECONDS}`);
-    ctx.waitUntil(cache.put(request, response.clone()));
+    ctx.waitUntil(cache.put(id, response.clone()));
   }
   return response;
 }
