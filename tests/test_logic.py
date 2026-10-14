@@ -142,6 +142,34 @@ log, _ = new_log()
 t, _ = farm(log, 0, 600)
 farm(log, t, 600, map_name="The Swamp of Despair I")
 check("a new map restarts the run", len(log.runs) == 0)
+# ---- hotkeys
+check("hotkeys: Shift+1 to 4 by default", m.DEFAULT_HOTKEYS == {"start": "Shift+1", "reset": "Shift+2",
+                                                               "skip": "Shift+3", "compact": "Shift+4"})
+check("a hotkey needs Ctrl, Alt or Shift (or an F key), so it can't block plain typing",
+      m.parse_hotkey("Shift+1") == (4, 0x31) and m.parse_hotkey("F5") == (0, 0x74)
+      and m.parse_hotkey("A") is None and m.parse_hotkey("Win+1") is None and m.parse_hotkey("Shift+!") is None)
+check("keys pressed in Settings get the right names", m.hotkey_text(False, False, True, 0x31) == "Shift+1"
+      and m.hotkey_text(True, True, False, 0x5A) == "Ctrl+Alt+Z" and m.hotkey_text(False, False, False, 0x41) is None)
+m.CONFIG_PATH.write_text(json.dumps({"hotkeys": {"start": "Ctrl+Q", "reset": "", "skip": "nonsense", "compact": 5},
+                                     "ui_scale": 3, "compact": "yes"}))
+cfg = m.load_config()
+check(f"hotkeys from the settings file: kept if valid or off, else the default ({cfg['hotkeys']})",
+      cfg["hotkeys"] == {"start": "Ctrl+Q", "reset": "", "skip": "Shift+3", "compact": "Shift+4"})
+check("a size or compact setting edited by hand can't break the window", cfg["ui_scale"] == 100 and cfg["compact"] is False)
+pressed = []
+hk = m.Hotkeys(pressed.append)
+hk.in_front = lambda: True                                   # as if the game were in front
+hk.set({"start": "Ctrl+Alt+Shift+F12"})
+import time as _time
+_time.sleep(0.8)                                             # it registers within a quarter second
+ctypes_ok = m._user32.PostThreadMessageW(hk.thread_id, 0x0312, 1, 0)   # as if the keys were pressed
+_time.sleep(0.3)
+check(f"a hotkey press reaches the overlay ({pressed}, problems: {hk.problems})", ctypes_ok and pressed == ["start"])
+hk.in_front = lambda: False                                  # another program in front: off
+_time.sleep(0.6)
+m._user32.PostThreadMessageW(hk.thread_id, 0x0312, 1, 0)
+_time.sleep(0.3)
+check("hotkeys are off while another program is in front", pressed == ["start"])
 check("release notes are shown as plain text, keeping names like exp_log.txt",
       m._plain_text("**New**\n- **Time** in `exp_log.txt`, see [README](https://x)") == "New\n• Time in exp_log.txt, see README")
 check("how long each line was measured over", [m.fmt_logged(s) for s in (300.4, 1500, 3900)] == ["5 min", "25 min", "1 h 05 min"]
@@ -154,6 +182,25 @@ check("a misread map name is matched to the known one", log.canonical("Ketning C
 check("Rocky Road I and II stay different maps", log.canonical("Rocky Road I") == "Rocky Road I")
 check("'Il' at the end is read as 'II'", m._clean_map_name("Rocky Road Il") == "Rocky Road II")
 check("the level comes from the EXP table", m.level_for_req(63666) == 27 and m.level_for_req(60000) is None)
+
+# ---- updating: logs and settings from every released version open with nothing lost
+import shutil
+real_config = m.CONFIG_PATH
+for old in sorted((Path(__file__).parent / "upgrade").iterdir()):
+    folder = Path(tempfile.mkdtemp())
+    shutil.copy2(old / "exp_log.json", folder / "log.json")
+    before = json.loads((old / "exp_log.json").read_text(encoding="utf-8"))
+    log = m.AutoLog(15, folder / "log.json", folder / "log.txt")
+    same = [all(a.get(k) == b.get(k) for k in ("date", "map", "level", "party", "exp", "seconds", "mesos", "class"))
+            for a, b in zip(before["entries"], log.entries)]
+    m.CONFIG_PATH = old / "config.json"
+    cfg = m.load_config()
+    m.CONFIG_PATH = real_config
+    check(f"updating from {old.name}: every log line, run, rename and setting is kept",
+          len(log.entries) == len(before["entries"]) and all(same) and not any(log.edited(e) for e in log.entries)
+          and len(log.runs) == len(before.get("runs", [])) and all(log.sealed(r, m._SEALED_RUN) for r in log.runs)
+          and log.aliases == before["aliases"] and not list(folder.glob("exp_log.damaged-*"))
+          and (cfg["pos"], cfg["transparency"], cfg["gap_seconds"], cfg["topmost"]) == ([5300, 800], 30, 20, False))
 
 # ---- damaged files
 folder = Path(tempfile.mkdtemp())

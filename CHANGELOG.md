@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.9.6-beta
+
+**New**
+- **Compact mode** (the Compact button at the top, or Shift+4): a much smaller window with just EXP/hr, when you'll level, the last 5 minutes, mesos/hr and Start/Pause. The button then says Full, to bring everything back.
+- **Hotkeys**, while MapleStory or the overlay is in front: Shift+1 Start / Pause, Shift+2 Reset, Shift+3 Don't log, Shift+4 Compact. You can change them, or turn them off, in Settings.
+- **Size** in Settings: makes the text and the window smaller or bigger, from 80% to 200%, and changes right away. It stops at 80%, so it can't get too small to read or use.
+
+**Fixed**
+- On a second screen with different Windows scaling (e.g. a 1440p screen at 125% next to a 5K one at 200%), the window was far too big. It's now sized for the screen it's on, and resizes when moved.
+- The Settings window could stay at its old size after the size changed, cutting its contents off. It now always fits, and opens over the overlay (on the same screen).
+
 ## 0.9.5-beta
 
 **Fixed**

@@ -61,6 +61,20 @@ Within a few seconds it shows your level and how much EXP you have. The per-hour
 | **Best maps** | Opens the [best-maps website](#best-maps-for-your-class), already showing maps for your level, party size and class |
 | **⚙** | Settings |
 | **>** | Opens the log |
+| **Compact** | A much smaller window with just EXP/hr, when you'll level, the last 5 minutes, mesos/hr and Start/Pause. The button then says **Full**, to bring everything back. Shift+4 or double-clicking the big number does the same. |
+
+## Hotkeys
+
+They work while MapleStory (or the overlay) is the window in front, so you don't have to click away from the game:
+
+| Keys | What they do |
+|---|---|
+| **Shift+1** | Start / Pause |
+| **Shift+2** | Reset |
+| **Shift+3** | Don't log |
+| **Shift+4** | Compact / Full |
+
+The status line says what happened, for example "Shift+1: paused." While the hotkeys are on, those keys go to the overlay only, so Shift+1 won't type **!** in the game's chat. If that gets in your way, change them (or turn them off) in ⚙: click one, then press the keys you want. Backspace turns one off.
 
 ## The log
 
@@ -86,6 +100,8 @@ Click **>** at the top right of the overlay to open the log. It's the table on t
 
 - **Pause tracking after no EXP for...** How long you can go without EXP before it pauses by itself. This also restarts the log's 5-minute timer. The default is 15 seconds.
 - **Window transparency.** Makes the overlay see-through.
+- **Size.** Makes the text and the whole window smaller or bigger, from 80% to 200%. It can't go any smaller, so it always stays readable. It's sized for each screen, so a window moved to a screen with different Windows scaling (like a 5K and a 1440p screen) looks the same size on both.
+- **Hotkeys.** Turn them on or off, and change them. See [Hotkeys](#hotkeys).
 - **Always on top of other windows.** Keeps the overlay above the game. It's on by default.
 - **Check for updates when it starts.** On by default. See [Updates](#updates).
 - **Share my 15-minute runs.** See [Best maps for your class](#best-maps-for-your-class).

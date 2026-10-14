@@ -56,7 +56,7 @@ except Exception:
     except Exception:
         pass
 
-VERSION = "0.9.5-beta"
+VERSION = "0.9.6-beta"
 WINDOW_TITLE = "Maple Classic Exp Overlay"    # the version is shown in Settings
 OLD_TITLES = ("Maple EXP/hr",)               # what versions before 0.9.3 were called
 
@@ -82,7 +82,9 @@ MESOS_START_PATH = ASSETS / "mesos_digits.npz"          # ...starting from these
 MESOS_BOX_PATH = ASSETS / "mesos_box.npz"
 SCAN_SECONDS = 4            # how often the whole window is checked for the inventory and party
 DEFAULTS = {"gap_seconds": 15, "transparency": 0, "topmost": True,
-            "check_updates": True, "skip_version": ""}
+            "check_updates": True, "skip_version": "", "ui_scale": 100, "compact": False, "hotkeys_on": True}
+# Settings > Size, in %: only these, so the window can't get too small to read or use.
+UI_SCALES = (80, 90, 100, 110, 125, 150, 175, 200)
 STATS_SITE = "https://maple-classic-exp-overlay.pages.dev"       # shared 15-minute runs (server/)
 GITHUB_REPO = "beanguri/Maple-Classic-Exp-Overlay"
 RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
@@ -148,12 +150,18 @@ def load_config():
         if type(value) is not type(default) or (key == "gap_seconds" and not 1 <= value <= 3600):
             cfg[key] = default
     cfg["transparency"] = min(90, max(0, cfg["transparency"]))
+    if cfg["ui_scale"] not in UI_SCALES:
+        cfg["ui_scale"] = 100
+    keys = cfg.get("hotkeys") if isinstance(cfg.get("hotkeys"), dict) else {}
+    cfg["hotkeys"] = {a: keys[a] if a in keys and (keys[a] == "" or parse_hotkey(keys[a])) else k
+                      for a, k in DEFAULT_HOTKEYS.items()}            # "" is a hotkey turned off
     ints = lambda v, n: isinstance(v, list) and len(v) == n and all(type(x) is int for x in v)
     checks = {"pos": lambda v: ints(v, 2), "log_size": lambda v: ints(v, 2) and min(v) >= 100,
               "mesos_box": lambda v: ints(v, 6), "mode": lambda v: v in ("window", "region"),
               "region": lambda v: isinstance(v, dict) and all(type(v.get(k)) is int and (
                   k in ("left", "top") or v[k] > 0) for k in ("left", "top", "width", "height")),
-              "log_columns": lambda v: isinstance(v, dict), "log_open": lambda v: type(v) is bool,
+              "log_columns": lambda v: isinstance(v, dict), "log_columns_pt": lambda v: isinstance(v, dict),
+              "log_open": lambda v: type(v) is bool,
               "share_runs": lambda v: type(v) is bool}       # missing: not asked yet
     for key, ok in checks.items():
         if key in cfg and cfg[key] is not None and not ok(cfg[key]):
@@ -252,6 +260,113 @@ def post_runs(install, runs, timeout=15):
     return [r.get("started") for r in data.get("results", []) if r.get("ok") or not r.get("retry")]
 
 
+# --------------------------------------------------------------------------- hotkeys
+#
+# Shift+1 to 4 by default (changeable in Settings). They're Windows hotkeys, as Discord and
+# OBS use: they work while you play even though the game runs as administrator, and they
+# never touch the game. They're only on while MapleStory or the overlay is the window in
+# front, so other programs can still use those keys (e.g. to type "!").
+
+HOTKEY_ACTIONS = {"start": "Start / Pause", "reset": "Reset", "skip": "Don't log", "compact": "Compact"}
+DEFAULT_HOTKEYS = {"start": "Shift+1", "reset": "Shift+2", "skip": "Shift+3", "compact": "Shift+4"}
+_HOTKEY_MODS = {"Ctrl": 0x2, "Alt": 0x1, "Shift": 0x4}          # MOD_CONTROL, MOD_ALT, MOD_SHIFT
+
+
+def _key_name(vk):
+    if 0x30 <= vk <= 0x39 or 0x41 <= vk <= 0x5A:
+        return chr(vk)
+    if 0x70 <= vk <= 0x7B:
+        return f"F{vk - 0x6F}"
+    return None
+
+
+def parse_hotkey(text):
+    """'Shift+1' -> (modifiers, virtual key), or None if it isn't a hotkey the overlay takes:
+    Ctrl, Alt and/or Shift with a number or letter, or an F key (with or without them)."""
+    if not isinstance(text, str) or not text:
+        return None
+    *mods, key = text.split("+")
+    if len(set(mods)) != len(mods) or any(m not in _HOTKEY_MODS for m in mods):
+        return None
+    vk = next((v for v in list(range(0x30, 0x3A)) + list(range(0x41, 0x5B)) + list(range(0x70, 0x7C))
+               if _key_name(v) == key), None)
+    if vk is None or (not mods and not key.startswith("F")):     # a plain letter would block typing
+        return None
+    return sum(_HOTKEY_MODS[m] for m in mods), vk
+
+
+def hotkey_text(ctrl, alt, shift, vk):
+    """The name of a key pressed with these modifiers (e.g. 'Shift+1'), or None if it can't be one."""
+    key = _key_name(vk)
+    text = "+".join([m for m, on in (("Ctrl", ctrl), ("Alt", alt), ("Shift", shift)) if on] + [key or "?"])
+    return text if key and parse_hotkey(text) else None
+
+
+class Hotkeys:
+    """Windows hotkeys on their own thread. They're registered only while MapleStory or the
+    overlay is the window in front; on_press(action) is called (from that thread) for each press."""
+
+    def __init__(self, on_press):
+        self.on_press = on_press
+        self.problems = {}                   # action -> why it couldn't be used (e.g. taken)
+        self._wanted, self._paused, self._changed = {}, False, True
+        self._lock = threading.Lock()
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def set(self, keys, on=True):
+        """keys: action -> 'Shift+1' (or '' for off)."""
+        with self._lock:
+            self._wanted = {a: parse_hotkey(k) for a, k in keys.items() if on and parse_hotkey(k)}
+            self._changed = True
+
+    def pause(self, paused):
+        """Off for a moment (e.g. while a new hotkey is being chosen), then back on."""
+        with self._lock:
+            self._paused, self._changed = paused, True
+
+    def in_front(self):
+        hwnd = _GetForegroundWindow()
+        if not hwnd:
+            return False
+        pid = wintypes.DWORD()
+        _GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value == os.getpid():
+            return True
+        cls = ctypes.create_unicode_buffer(64)
+        _GetClassName(hwnd, cls, 64)
+        return cls.value == "MapleStoryClass" or _process_name(hwnd) == "maplestory.exe"
+
+    def _run(self):
+        msg, active, was_on = wintypes.MSG(), {}, None    # active: hotkey id -> action
+        self.thread_id = _kernel32.GetCurrentThreadId()
+        _SetTimer(None, 0, 250, None)                     # a WM_TIMER every 250 ms, to check what's in front
+        while _GetMessage(ctypes.byref(msg), None, 0, 0) > 0:
+            if msg.message == 0x0312:                     # WM_HOTKEY
+                action = active.get(msg.wParam)
+                if action:
+                    self.on_press(action)
+            elif msg.message == 0x0113:                   # WM_TIMER
+                try:
+                    on = self.in_front()
+                except Exception:
+                    on = False
+                with self._lock:
+                    changed, wanted, paused, self._changed = self._changed, dict(self._wanted), self._paused, False
+                on = on and not paused
+                if not changed and on == was_on:
+                    continue
+                for hid in active:
+                    _UnregisterHotKey(None, hid)
+                active, was_on = {}, on
+                if on:
+                    for hid, (action, (mods, vk)) in enumerate(wanted.items(), start=1):
+                        if _RegisterHotKey(None, hid, mods | 0x4000, vk):     # MOD_NOREPEAT
+                            active[hid] = action
+                            self.problems.pop(action, None)
+                        else:
+                            self.problems[action] = "used by another program"
+
+
 # --------------------------------------------------------------------------- game window
 
 _user32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -283,6 +398,27 @@ _GetWindowRect = _api(_user32.GetWindowRect, wintypes.BOOL, wintypes.HWND, ctype
 _ShowWindow = _api(_user32.ShowWindow, wintypes.BOOL, wintypes.HWND, ctypes.c_int)
 _SetForegroundWindow = _api(_user32.SetForegroundWindow, wintypes.BOOL, wintypes.HWND)
 _CreateMutex = _api(_kernel32.CreateMutexW, wintypes.HANDLE, wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR)
+_MonitorFromPoint = _api(_user32.MonitorFromPoint, wintypes.HANDLE, wintypes.POINT, wintypes.DWORD)
+_GetForegroundWindow = _api(_user32.GetForegroundWindow, wintypes.HWND)
+_RegisterHotKey = _api(_user32.RegisterHotKey, wintypes.BOOL, wintypes.HWND, ctypes.c_int, wintypes.UINT,
+                       wintypes.UINT)
+_UnregisterHotKey = _api(_user32.UnregisterHotKey, wintypes.BOOL, wintypes.HWND, ctypes.c_int)
+_SetTimer = _api(_user32.SetTimer, ctypes.c_size_t, wintypes.HWND, ctypes.c_size_t, wintypes.UINT, ctypes.c_void_p)
+_GetMessage = _api(_user32.GetMessageW, wintypes.BOOL, ctypes.POINTER(wintypes.MSG), wintypes.HWND,
+                   wintypes.UINT, wintypes.UINT)
+
+
+def screen_dpi(x, y):
+    """The DPI of the screen at (x, y), or None. Screens can have different Windows scaling
+    (e.g. 200% on a 5K screen and 125% on a 1440p one), so text is sized for each."""
+    try:
+        dx, dy = ctypes.c_uint(), ctypes.c_uint()
+        monitor = _MonitorFromPoint(wintypes.POINT(int(x), int(y)), 2)      # MONITOR_DEFAULTTONEAREST
+        if ctypes.windll.shcore.GetDpiForMonitor(monitor, 0, ctypes.byref(dx), ctypes.byref(dy)) == 0:
+            return dx.value
+    except Exception:
+        pass
+    return None
 
 
 def _process_name(hwnd):
@@ -2463,6 +2599,12 @@ class RegionSelector:
 
 BG, FG, DIM, ACCENT, FIELD = "#1b1d23", "#e8e8e8", "#8a8f98", "#ffcc33", "#2c3038"
 ACCENT_SOFT = "#d9b04a"     # a quieter gold, for text that goes with the big number
+# The window's fonts: (family, size at 100%, weight, underline). Settings > Size scales them all.
+FONTS = {"small": ("Segoe UI", 8, "normal", False), "text": ("Segoe UI", 9, "normal", False),
+         "link": ("Segoe UI", 9, "normal", True), "row": ("Segoe UI", 10, "normal", False),
+         "icon": ("Segoe UI", 11, "normal", False), "value": ("Consolas", 11, "normal", False),
+         "next": ("Segoe UI Semibold", 11, "normal", False), "title": ("Segoe UI Semibold", 12, "normal", False),
+         "big": ("Segoe UI", 24, "bold", False)}
 LIST_BG, LIST_BG2 = "#23262d", "#282b33"
 LOG_HINT = "Right-click a line to copy, rename or delete it."
 
@@ -2500,6 +2642,16 @@ class App:
         self.stop_evt = threading.Event()
         self.last_capture = None
 
+        self.fonts = {name: tkfont.Font(root, family=family, weight=weight, underline=underline)
+                      for name, (family, _, weight, underline) in FONTS.items()}
+        pos = self.cfg.get("pos")
+        self._dpi = (screen_dpi(pos[0] + 40, pos[1] + 15) if pos else None) or root.winfo_fpixels("1i")
+        self._apply_ui_scale()
+        self.hotkey_note = None
+        self.hotkeys = Hotkeys(lambda action: self.q.put(("hotkey", action)))
+        self.hotkeys.set(self.cfg["hotkeys"], self.cfg["hotkeys_on"])
+        self.compact = False
+
         root.title(WINDOW_TITLE)
         try:
             root.iconbitmap(default=str(ICON_PATH))
@@ -2517,41 +2669,54 @@ class App:
         root.columnconfigure(1, weight=1)                 # the log gets any extra room
         root.rowconfigure(0, weight=1)
         self.vars = {}
-        tk.Label(main, text="EXP / hr", bg=BG, fg=DIM, font=("Segoe UI", 9)).grid(
+        tk.Label(main, text="EXP / hr", bg=BG, fg=DIM, font=self.fonts["text"]).grid(
             row=0, column=0, sticky="w", padx=12, pady=(10, 0))
         corner = tk.Frame(main, bg=BG)
         corner.grid(row=0, column=1, sticky="ne", padx=(0, 6), pady=(4, 0))
         small = dict(bg=BG, fg=DIM, activebackground=FIELD, activeforeground=FG, relief="flat",
-                     bd=0, padx=6, pady=0, font=("Segoe UI", 11), cursor="hand2")
-        tk.Button(corner, text="Best maps", command=self.open_best_maps,
+                     bd=0, padx=6, pady=0, font=self.fonts["icon"], cursor="hand2")
+        self.best_btn = tk.Button(corner, text="Best maps", command=self.open_best_maps,
                   **{**small, "fg": ACCENT_SOFT, "activebackground": BG, "activeforeground": ACCENT,
-                     "font": ("Segoe UI", 9, "underline")}).pack(side="left", padx=(0, 4))
+                     "font": self.fonts["link"]})
+        self.best_btn.pack(side="left", padx=(0, 4))
         tk.Button(corner, text="⚙", command=self.open_settings, **small).pack(side="left")
         self.log_btn = tk.Button(corner, text=">", command=self.toggle_log, **small)
         self.log_btn.pack(side="left")
-        self.big = tk.Label(main, text="—", bg=BG, fg=ACCENT, font=("Segoe UI", 24, "bold"))
+        self.compact_btn = tk.Button(corner, text="Compact", command=lambda: self.set_compact(not self.compact),
+                                     bg=FIELD, fg=FG, activebackground="#3a3f49", activeforeground=FG,
+                                     relief="flat", bd=0, padx=8, pady=1, font=self.fonts["small"], cursor="hand2")
+        self.compact_btn.pack(side="left", padx=(6, 0))
+        self.big = tk.Label(main, text="—", bg=BG, fg=ACCENT, font=self.fonts["big"])
         self.big.grid(row=1, column=0, columnspan=2, sticky="w", padx=12)
+        self.big.bind("<Double-Button-1>", lambda _: self.set_compact(not self.compact))
         # Under the big number, like a caption: when you'll reach the next level.
-        self.next_level = tk.Label(main, text="", bg=BG, fg=ACCENT_SOFT, font=("Segoe UI Semibold", 11))
+        self.next_level = tk.Label(main, text="", bg=BG, fg=ACCENT_SOFT, font=self.fonts["next"])
         self.next_level.grid(row=2, column=0, columnspan=2, sticky="nw", padx=(14, 12), pady=(0, 8))
 
         rows = ["Last 5 min", "% / hr", "Gained", "Current",
                 "Mesos", "Mesos / hr", "Mesos / 5 min", "Elapsed"]
+        self.detail = []                                  # the rows, hidden in compact mode
         for i, name in enumerate(rows, start=3):
-            tk.Label(main, text=name, bg=BG, fg=DIM, font=("Segoe UI", 10)).grid(
-                row=i, column=0, sticky="w", padx=(12, 8))
+            label = tk.Label(main, text=name, bg=BG, fg=DIM, font=self.fonts["row"])
+            label.grid(row=i, column=0, sticky="w", padx=(12, 8))
             v = tk.StringVar(value="—")
-            tk.Label(main, textvariable=v, bg=BG, fg=FG, font=("Consolas", 11)).grid(
-                row=i, column=1, sticky="e", padx=(8, 12))
+            value = tk.Label(main, textvariable=v, bg=BG, fg=FG, font=self.fonts["value"])
+            value.grid(row=i, column=1, sticky="e", padx=(8, 12))
             self.vars[name] = v
+            self.detail += [label, value]
+        # Compact mode's stand-in for the rows: the last 5 minutes and mesos/hr, on one line.
+        self.compact_line = tk.Label(main, text="", bg=BG, fg=DIM, font=self.fonts["text"])
+        self.compact_line.grid(row=3, column=0, columnspan=2, sticky="w", padx=12)
+        self.compact_line.grid_remove()
 
         bar = tk.Frame(main, bg=BG)
         bar.grid(row=len(rows) + 3, column=0, columnspan=2, pady=(10, 4), padx=8)
         btn = dict(bg=FIELD, fg=FG, activebackground="#3a3f49", activeforeground=FG,
-                   relief="flat", padx=8, pady=3, font=("Segoe UI", 9))
+                   relief="flat", padx=8, pady=3, font=self.fonts["text"])
         self.start_btn = tk.Button(bar, text="Start", command=self.toggle, **btn)
         self.start_btn.pack(side="left", padx=2)
-        tk.Button(bar, text="Reset", command=self.reset, **btn).pack(side="left", padx=2)
+        reset_btn = tk.Button(bar, text="Reset", command=self.reset, **btn)
+        reset_btn.pack(side="left", padx=2)
         # Keeps this run out of the log (everything is still shown). Turns itself off when
         # the run ends: when you leave the map or stop getting EXP.
         self._btn_style = btn
@@ -2562,18 +2727,21 @@ class App:
         # yourself (if it ever can't find it) and back.
         self.area_btn = tk.Button(bar, command=self.toggle_area, **btn)
         self.area_btn.pack(side="left", padx=2)
-        tk.Button(bar, text="View capture", command=self.view_capture, **btn).pack(side="left", padx=2)
+        capture_btn = tk.Button(bar, text="View capture", command=self.view_capture, **btn)
+        capture_btn.pack(side="left", padx=2)
         self._show_area_mode()
+        self.more_buttons = [reset_btn, self.skip_btn, self.area_btn, capture_btn]   # not in compact mode
 
         self.status = tk.StringVar()
-        status = tk.Label(main, textvariable=self.status, bg=BG, fg=DIM, font=("Segoe UI", 8),
-                          justify="left")
-        status.grid(row=len(rows) + 4, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 8))
-        main.update_idletasks()
-        status.config(wraplength=main.winfo_reqwidth() - 24)    # use the window's width
+        self.status_label = tk.Label(main, textvariable=self.status, bg=BG, fg=DIM, font=self.fonts["small"],
+                                     justify="left")
+        self.status_label.grid(row=len(rows) + 4, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 8))
+        self._fit_status()
 
         self._build_log_panel()
-        if self.cfg.get("log_open"):
+        if self.cfg["compact"]:
+            self.set_compact(True)
+        elif self.cfg.get("log_open"):
             self.toggle_log()
 
         if not templates:
@@ -2593,16 +2761,15 @@ class App:
     # ---- log panel
     def _build_log_panel(self):
         p = self.log_panel = tk.Frame(self.root, bg=BG)
-        tk.Label(p, text="EXP log", bg=BG, fg=DIM, font=("Segoe UI", 9)).grid(
+        tk.Label(p, text="EXP log", bg=BG, fg=DIM, font=self.fonts["text"]).grid(
             row=0, column=0, columnspan=2, sticky="w")
         self.log_status = tk.StringVar()
-        tk.Label(p, textvariable=self.log_status, bg=BG, fg=FG, font=("Segoe UI", 9),
+        tk.Label(p, textvariable=self.log_status, bg=BG, fg=FG, font=self.fonts["text"],
                  justify="left", anchor="w").grid(row=1, column=0, columnspan=2, sticky="we", pady=(2, 6))
 
         # A compact table: one row per day, map, level and party size. Drag the lines between
         # the column titles to resize a column; widths are remembered.
-        cell = tkfont.Font(family="Segoe UI", size=9)
-        head = tkfont.Font(family="Segoe UI", size=8)
+        cell, head = self.fonts["text"], self.fonts["small"]
         style = ttk.Style(self.root)
         style.theme_use("clam")
         style.layout("Log.Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
@@ -2619,7 +2786,10 @@ class App:
                    ("party", "Party", "6ppl", "center"),
                    ("time", "Time", "12h 30m", "center"),
                    ("exp", "EXP/hr", "888,888", "e"), ("mesos", "Mesos/hr", "888,888", "e"))
-        saved = self.cfg.get("log_columns") or {}
+        # Saved widths are in points, so they look the same on screens with different scaling
+        # (older versions saved pixels: those are used as they are, once).
+        saved = {k: round(v * self._px_per_pt) for k, v in (self.cfg.get("log_columns_pt") or {}).items()
+                 if type(v) in (int, float)} or self.cfg.get("log_columns") or {}
         pad = cell.measure("00")
         tree = self.log_tree = ttk.Treeview(p, columns=[c[0] for c in columns], show="headings",
                                             style="Log.Treeview", height=11, selectmode="browse")
@@ -2646,7 +2816,7 @@ class App:
         self.shown = {}
         self._fill_log()
 
-    def toggle_log(self):
+    def toggle_log(self, remember=True):
         if self.log_open:
             self._remember_log_size()                   # before it closes
         self.log_open = not self.log_open
@@ -2665,8 +2835,79 @@ class App:
             root.minsize(1, 1)
             root.geometry("")                           # back to just the tracker's size
         self.log_btn.config(text="<" if self.log_open else ">")
-        self.cfg["log_open"] = self.log_open
+        if remember:
+            self.cfg["log_open"] = self.log_open
+            save_config(self.cfg)
+
+    # ---- compact mode and size
+    def set_compact(self, on):
+        """Compact mode: just EXP/hr, when you'll level, the last 5 minutes and mesos/hr on one
+        line, and Start/Pause, in a much smaller window. The Compact button (it says Full in
+        compact mode), Shift+4, or double-clicking the big number switches it."""
+        self.compact = self.cfg["compact"] = on
+        if on and self.log_open:
+            self.toggle_log(remember=False)                 # out of the way, but remembered
+        for w in self.detail:
+            w.grid_remove() if on else w.grid()
+        self.compact_line.grid() if on else self.compact_line.grid_remove()
+        for b in self.more_buttons:
+            b.pack_forget()
+            if not on:
+                b.pack(side="left", padx=2)
+        if on:
+            self.log_btn.pack_forget()
+        else:
+            self.log_btn.pack(side="left", before=self.compact_btn)
+        self.compact_btn.config(text="Full" if on else "Compact")
+        self._fit_status()
+        if not on and self.cfg.get("log_open"):
+            self.toggle_log(remember=False)
+        else:
+            self.root.geometry("")
         save_config(self.cfg)
+
+    def _apply_ui_scale(self):
+        """Sizes every font by Settings > Size and for the screen the window is on (screens can
+        have different Windows scaling), and the log's rows and columns with them."""
+        old, self._px_per_pt = getattr(self, "_px_per_pt", None), self.cfg["ui_scale"] / 100 * self._dpi / 72
+        for name, (_, size, _, _) in FONTS.items():
+            # In pixels (negative), never under 9 so the smallest text stays readable.
+            self.fonts[name].configure(size=-max(9, round(size * self._px_per_pt)))
+        if old is None or not hasattr(self, "log_tree"):    # at start, before the window is built
+            return
+        self._fit_settings()
+        ttk.Style(self.root).configure("Log.Treeview", rowheight=int(self.fonts["text"].metrics("linespace") * 1.45))
+        for c in self.log_tree["columns"]:
+            width = round(self.log_tree.column(c, "width") * self._px_per_pt / old)
+            self.log_tree.column(c, width=max(10, width))
+        self.cfg["log_size"] = None                         # a size from before may not fit any more
+        self._fit_status()
+        if self.log_open:
+            self.root.update_idletasks()
+            self.root.minsize(self.main.winfo_reqwidth() + 150, self.main.winfo_reqheight())
+        self.root.geometry("")
+
+    def _fit_settings(self):
+        """Keeps the Settings window as big as what's in it. (Moving a window to a screen with
+        different scaling can leave it at a fixed size, which would cut its contents off.)"""
+        w = self.settings_win
+        if w and w.winfo_exists() and (w.winfo_width() < w.winfo_reqwidth() or w.winfo_height() < w.winfo_reqheight()):
+            w.geometry("")
+
+    def _check_screen(self):
+        """Resizes the text when the window is moved to a screen with different Windows scaling
+        (judged by its title bar, which stays put when the window changes size)."""
+        r = self._window_rect()
+        dpi = screen_dpi(r[0] + 40, r[1] + 15) if r else None
+        if dpi and dpi != self._dpi:
+            self._dpi = dpi
+            self._apply_ui_scale()
+
+    def _fit_status(self):
+        """Wraps the status line at the width the rest of the window needs."""
+        self.status_label.config(wraplength=1)
+        self.main.update_idletasks()
+        self.status_label.config(wraplength=max(160, self.main.winfo_reqwidth() - 24))
 
     def _fill_log(self):
         tree = self.log_tree
@@ -2763,8 +3004,11 @@ class App:
         w.configure(bg=BG)
         w.resizable(False, False)
         w.transient(self.root)
+        r = self._window_rect()
+        if r:                                    # over the overlay, so on the same screen (and scaling)
+            w.geometry(f"+{r[0] + 40}+{r[1] + 40}")
         w.attributes("-topmost", bool(self.cfg["topmost"]))
-        text = dict(bg=BG, fg=FG, font=("Segoe UI", 9))
+        text = dict(bg=BG, fg=FG, font=self.fonts["text"])
 
         gap = tk.StringVar(value=str(self.cfg["gap_seconds"]))
         tk.Label(w, text="Pause tracking (and restart the 5-minute log timer)\nafter no EXP for",
@@ -2774,7 +3018,7 @@ class App:
         line.grid(row=1, column=0, sticky="w", padx=14)
         tk.Spinbox(line, from_=5, to=300, width=5, textvariable=gap, bg=FIELD, fg=FG,
                    buttonbackground=FIELD, insertbackground=FG, relief="flat",
-                   font=("Segoe UI", 9)).pack(side="left")
+                   font=self.fonts["text"]).pack(side="left")
         tk.Label(line, text="seconds", **text).pack(side="left", padx=(6, 0))
 
         transparency = tk.IntVar(value=int(self.cfg["transparency"]))
@@ -2782,25 +3026,45 @@ class App:
             row=2, column=0, sticky="w", padx=14, pady=(14, 0))
         tk.Scale(w, from_=0, to=90, orient="horizontal", variable=transparency, length=240,
                  bg=BG, fg=FG, troughcolor=FIELD, highlightthickness=0, bd=0,
-                 font=("Segoe UI", 8)).grid(row=3, column=0, sticky="w", padx=10)
+                 font=self.fonts["small"]).grid(row=3, column=0, sticky="w", padx=10)
 
+        size_line = tk.Frame(w, bg=BG)
+        size_line.grid(row=4, column=0, sticky="w", padx=14, pady=(10, 0))
+        tk.Label(size_line, text="Size", **text).pack(side="left")
+        # − 100% +: steps through UI_SCALES only, so it stops at the smallest and biggest sizes.
+        size = tk.StringVar(value=f"{self.cfg['ui_scale']}%")
+        step = dict(bg=FIELD, fg=FG, activebackground="#3a3f49", activeforeground=FG, relief="flat", bd=0,
+                    padx=8, pady=0, font=self.fonts["text"], cursor="hand2", disabledforeground="#555a63")
+
+        def nudge(by):
+            i = UI_SCALES.index(int(size.get().rstrip("%"))) + by
+            if 0 <= i < len(UI_SCALES):
+                size.set(f"{UI_SCALES[i]}%")
+            smaller.config(state="normal" if i > 0 else "disabled")
+            bigger.config(state="normal" if i < len(UI_SCALES) - 1 else "disabled")
+        smaller = tk.Button(size_line, text="−", command=lambda: nudge(-1), **step)
+        smaller.pack(side="left", padx=(8, 0))
+        tk.Label(size_line, textvariable=size, width=5, **text).pack(side="left")
+        bigger = tk.Button(size_line, text="+", command=lambda: nudge(1), **step)
+        bigger.pack(side="left")
+        nudge(0)
         topmost = tk.BooleanVar(value=bool(self.cfg["topmost"]))
         tk.Checkbutton(w, text="Always on top of other windows", variable=topmost, bg=BG, fg=FG,
                        selectcolor=FIELD, activebackground=BG, activeforeground=FG,
-                       font=("Segoe UI", 9)).grid(row=4, column=0, sticky="w", padx=10, pady=(10, 0))
+                       font=self.fonts["text"]).grid(row=5, column=0, sticky="w", padx=10, pady=(8, 0))
         updates = tk.BooleanVar(value=bool(self.cfg["check_updates"]))
         tk.Checkbutton(w, text="Check for updates when it starts", variable=updates, bg=BG, fg=FG,
                        selectcolor=FIELD, activebackground=BG, activeforeground=FG,
-                       font=("Segoe UI", 9)).grid(row=5, column=0, sticky="w", padx=10, pady=(2, 0))
+                       font=self.fonts["text"]).grid(row=6, column=0, sticky="w", padx=10, pady=(2, 0))
         sharing = tk.BooleanVar(value=bool(self.cfg.get("share_runs")))
         share_line = tk.Frame(w, bg=BG)
-        share_line.grid(row=6, column=0, sticky="w", padx=10, pady=(2, 0))
+        share_line.grid(row=7, column=0, sticky="w", padx=10, pady=(2, 0))
         tk.Checkbutton(share_line, text=f"Share my {RUN_SECONDS // 60}-minute runs (anonymously) on the best-maps site",
                        variable=sharing, bg=BG, fg=FG, selectcolor=FIELD, activebackground=BG,
-                       activeforeground=FG, font=("Segoe UI", 9)).pack(side="left")
+                       activeforeground=FG, font=self.fonts["text"]).pack(side="left")
         tk.Button(share_line, text="Open it", command=self.open_best_maps, bg=BG,
                   fg=ACCENT_SOFT, activebackground=BG, activeforeground=ACCENT, relief="flat", bd=0,
-                  cursor="hand2", font=("Segoe UI", 9, "underline")).pack(side="left", padx=(4, 0))
+                  cursor="hand2", font=self.fonts["link"]).pack(side="left", padx=(4, 0))
 
         def apply(*_):
             try:
@@ -2817,26 +3081,105 @@ class App:
                 self.share_runs()
             self._apply_window_settings()
             w.attributes("-topmost", self.cfg["topmost"])
+            scale = int(size.get().rstrip("%"))
+            if scale in UI_SCALES and scale != self.cfg["ui_scale"]:
+                self.cfg["ui_scale"] = scale
+                self._apply_ui_scale()
             save_config(self.cfg)
 
-        for var in (gap, transparency, topmost, updates, sharing):
+        for var in (gap, transparency, topmost, updates, sharing, size):
             var.trace_add("write", apply)
+        self._hotkey_settings(w, row=8)
         buttons = tk.Frame(w, bg=BG)
-        buttons.grid(row=7, column=0, sticky="we", padx=14, pady=(14, 6))
+        buttons.grid(row=9, column=0, sticky="we", padx=14, pady=(14, 6))
         style = dict(bg=FIELD, fg=FG, activebackground="#3a3f49", activeforeground=FG, relief="flat",
-                     padx=12, pady=3, font=("Segoe UI", 9))
+                     padx=12, pady=3, font=self.fonts["text"])
         tk.Button(buttons, text="Open data folder", command=self.open_data_folder, **style).pack(side="left")
         tk.Button(buttons, text="Check for updates", command=lambda: self.check_updates(manual=True),
                   **style).pack(side="left", padx=(6, 0))
         tk.Button(buttons, text="Report a bug", command=lambda: self.report_bug(w),
                   **style).pack(side="left", padx=(6, 0))
         tk.Button(buttons, text="Close", command=w.destroy, **style).pack(side="right", padx=(6, 0))
-        pt = float(self.root.tk.call("tk", "scaling"))         # screen pixels per point
         tk.Label(w, text=f"Your log and settings are saved in {DATA_DIR}", bg=BG, fg=DIM,
-                 font=("Segoe UI", 8), wraplength=int(250 * pt), justify="left").grid(
-            row=8, column=0, sticky="w", padx=14)
+                 font=self.fonts["small"], wraplength=int(250 * self._px_per_pt), justify="left").grid(
+            row=10, column=0, sticky="w", padx=14)
         tk.Label(w, text=f"{WINDOW_TITLE} v{VERSION}. This is a beta: it's still being improved.",
-                 bg=BG, fg=DIM, font=("Segoe UI", 8)).grid(row=9, column=0, sticky="w", padx=14, pady=(2, 12))
+                 bg=BG, fg=DIM, font=self.fonts["small"]).grid(row=11, column=0, sticky="w", padx=14, pady=(2, 12))
+
+    def _hotkey_settings(self, w, row):
+        """Settings' Hotkeys section: on or off, and each one changeable (click it, then press
+        the keys; Esc keeps it as it was, Backspace turns it off)."""
+        box = tk.Frame(w, bg=BG)
+        box.grid(row=row, column=0, sticky="w", padx=10, pady=(10, 0))
+        on = tk.BooleanVar(value=self.cfg["hotkeys_on"])
+        tk.Checkbutton(box, text="Hotkeys, while MapleStory or the overlay is in front:", variable=on, bg=BG,
+                       fg=FG, selectcolor=FIELD, activebackground=BG, activeforeground=FG,
+                       font=self.fonts["text"]).grid(row=0, column=0, columnspan=3, sticky="w")
+        key_style = dict(bg=FIELD, fg=FG, activebackground="#3a3f49", activeforeground=FG, relief="flat", bd=0,
+                         padx=8, pady=1, width=10, font=self.fonts["text"], cursor="hand2")
+        buttons, notes, choosing = {}, {}, {"action": None}
+        hint = tk.StringVar(value="Click one, then press the keys you want. Backspace turns it off.")
+
+        def show():
+            for action, b in buttons.items():
+                key = self.cfg["hotkeys"][action]
+                b.config(text=key or "Off", bg=FIELD, fg=FG if key else DIM)
+                notes[action].config(text=self.hotkeys.problems.get(action, ""))
+
+        def choose(action):
+            choosing["action"] = action
+            self.hotkeys.pause(True)                 # so the keys reach this window
+            buttons[action].config(text="Press keys...", bg=ACCENT_SOFT, fg=BG)
+            w.focus_force()
+
+        def done(action, key):
+            choosing["action"] = None
+            if key:
+                for other, k in self.cfg["hotkeys"].items():
+                    if k == key and other != action:
+                        self.cfg["hotkeys"][other] = ""      # one key, one job
+            self.cfg["hotkeys"][action] = key
+            save_config(self.cfg)
+            self.hotkeys.set(self.cfg["hotkeys"], self.cfg["hotkeys_on"])
+            self.hotkeys.pause(False)
+            show()
+
+        def pressed(e):
+            action = choosing["action"]
+            if not action or e.keysym in ("Shift_L", "Shift_R", "Control_L", "Control_R", "Alt_L", "Alt_R",
+                                          "Win_L", "Win_R", "Caps_Lock", "Num_Lock"):
+                return None
+            if e.keysym == "Escape":
+                done(action, self.cfg["hotkeys"][action])
+            elif e.keysym in ("BackSpace", "Delete"):
+                done(action, "")
+            else:
+                key = hotkey_text(bool(e.state & 0x4), bool(e.state & 0x20000), bool(e.state & 0x1), e.keycode)
+                if not key:
+                    hint.set("Use Ctrl, Alt or Shift with a number or letter, or an F key.")
+                    return "break"
+                hint.set("Click one, then press the keys you want. Backspace turns it off.")
+                done(action, key)
+            return "break"
+
+        for i, (action, name) in enumerate(HOTKEY_ACTIONS.items(), start=1):
+            tk.Label(box, text=name, bg=BG, fg=FG, font=self.fonts["text"]).grid(row=i, column=0, sticky="w",
+                                                                                  padx=(26, 10), pady=1)
+            buttons[action] = tk.Button(box, command=lambda a=action: choose(a), **key_style)
+            buttons[action].grid(row=i, column=1, sticky="w", pady=1)
+            notes[action] = tk.Label(box, bg=BG, fg="#d97a6c", font=self.fonts["small"])
+            notes[action].grid(row=i, column=2, sticky="w", padx=(8, 0))
+        tk.Label(box, textvariable=hint, bg=BG, fg=DIM, font=self.fonts["small"]).grid(
+            row=len(HOTKEY_ACTIONS) + 1, column=0, columnspan=3, sticky="w", padx=(26, 0), pady=(2, 0))
+        w.bind("<KeyPress>", pressed)
+        w.bind("<Destroy>", lambda e: e.widget is w and self.hotkeys.pause(False))
+
+        def switch(*_):
+            self.cfg["hotkeys_on"] = bool(on.get())
+            save_config(self.cfg)
+            self.hotkeys.set(self.cfg["hotkeys"], self.cfg["hotkeys_on"])
+        on.trace_add("write", switch)
+        show()
 
     def open_data_folder(self):
         try:
@@ -2950,14 +3293,14 @@ class App:
         w.transient(self.root)
         w.attributes("-topmost", bool(self.cfg["topmost"]))
         tk.Label(w, text=f"{WINDOW_TITLE} v{version} is out", bg=BG, fg=ACCENT,
-                 font=("Segoe UI Semibold", 12)).pack(anchor="w")
+                 font=self.fonts["title"]).pack(anchor="w")
         tk.Label(w, text=f"You have v{VERSION}. Your log and settings are kept when you update.",
-                 bg=BG, fg=DIM, font=("Segoe UI", 9)).pack(anchor="w", pady=(2, 10))
-        tk.Label(w, text="What's new:", bg=BG, fg=FG, font=("Segoe UI", 9)).pack(anchor="w")
+                 bg=BG, fg=DIM, font=self.fonts["text"]).pack(anchor="w", pady=(2, 10))
+        tk.Label(w, text="What's new:", bg=BG, fg=FG, font=self.fonts["text"]).pack(anchor="w")
         box = tk.Frame(w, bg=BG)
         box.pack(fill="both", expand=True, pady=(4, 12))
         text = tk.Text(box, width=64, height=12, wrap="word", bg=LIST_BG, fg=FG, relief="flat",
-                       font=("Segoe UI", 9), padx=8, pady=6, highlightthickness=0)
+                       font=self.fonts["text"], padx=8, pady=6, highlightthickness=0)
         scroll = tk.Scrollbar(box, command=text.yview)
         text.configure(yscrollcommand=scroll.set)
         text.insert("1.0", notes or "(No details were given for this version.)")
@@ -2967,7 +3310,7 @@ class App:
         buttons = tk.Frame(w, bg=BG)
         buttons.pack(fill="x")
         style = dict(bg=FIELD, fg=FG, activebackground="#3a3f49", activeforeground=FG, relief="flat",
-                     padx=12, pady=3, font=("Segoe UI", 9))
+                     padx=12, pady=3, font=self.fonts["text"])
 
         def get_it():
             webbrowser.open(RELEASES_PAGE)                # always your own releases page
@@ -2997,6 +3340,8 @@ class App:
                                     "(details are in errors.log: Settings > Open data folder)")
                 elif kind == "update":
                     self._show_update(*payload)
+                elif kind == "hotkey":
+                    self._hotkey(payload)
                 elif kind == "shared":
                     self._sharing = False
                     if payload:
@@ -3069,6 +3414,8 @@ class App:
         t = self.tracker
         if self.level_up_at and time.monotonic() - self.level_up_at < 6:
             return f"Level up! You're now Lv {self.level}." if self.level else "Level up!"
+        if self.hotkey_note and time.monotonic() - self.hotkey_note[1] < 4:
+            return self.hotkey_note[0]
         if self.died_at and time.monotonic() - self.died_at < 30 and t.last_loss:
             return f"You died and lost {t.last_loss:.1f}% EXP. That isn't taken off your EXP/hr."
         if self.rejected >= 5:
@@ -3106,6 +3453,8 @@ class App:
 
     def _refresh(self):
         try:
+            self._check_screen()
+            self._fit_settings()
             self._update_display()
         except Exception as e:
             self._oops("updating the window", e)
@@ -3141,6 +3490,9 @@ class App:
         self.vars["Mesos / hr"].set(fmt_num(m.per_hour(el)))
         self.vars["Mesos / 5 min"].set(fmt_num(m.per_5min(el)))
         self.vars["Elapsed"].set(fmt_dur(el))
+        if self.compact:
+            self.compact_line.config(text=f"Last 5 min  {self.vars['Last 5 min'].get()}    "
+                                          f"Mesos / hr  {self.vars['Mesos / hr'].get()}")
         waiting = self.session.waiting
         self.session.tick(now)
         if self.session.waiting != waiting:             # just paused by itself: say why now
@@ -3153,6 +3505,22 @@ class App:
             self.share_runs()
 
     # ---- buttons
+    def _hotkey(self, action):
+        if action == "start":
+            self.toggle()
+            done = "started" if self.session.on else "paused"
+        elif action == "reset":
+            self.reset()
+            done = "reset"
+        elif action == "skip":
+            self.toggle_skip_log()
+            done = "not logging this run" if self.skip_log else "logging this run again"
+        else:
+            self.set_compact(not self.compact)
+            return
+        self.hotkey_note = (f"{self.cfg['hotkeys'][action]}: {done}.", time.monotonic())
+        self.status.set(self.hotkey_note[0])
+
     def toggle(self):
         if self.session.on:                     # (also while it's paused by itself)
             self.session.pause()
@@ -3279,7 +3647,7 @@ class App:
         tk.Label(bottom, text="Boxes show where each digit was found.", bg=BG, fg=DIM).pack(side="left")
         tk.Button(bottom, text="Something's wrong? Report a bug", command=lambda: self.report_bug(win),
                   bg=FIELD, fg=FG, activebackground="#3a3f49", activeforeground=FG, relief="flat",
-                  padx=10, pady=2, font=("Segoe UI", 9)).pack(side="right")
+                  padx=10, pady=2, font=self.fonts["text"]).pack(side="right")
 
     # ---- bug reports
     def report_bug(self, parent=None):
@@ -3374,7 +3742,9 @@ class App:
     def _remember_log_size(self):
         """Keeps the log's column widths, and the window size if the user resized it."""
         tree, root = self.log_tree, self.root
-        self.cfg["log_columns"] = {c: int(tree.column(c, "width")) for c in tree["columns"]}
+        self.cfg["log_columns_pt"] = {c: round(int(tree.column(c, "width")) / self._px_per_pt, 1)
+                                      for c in tree["columns"]}
+        self.cfg.pop("log_columns", None)
         if self.log_open:
             size = [root.winfo_width(), root.winfo_height()]
             natural = [root.winfo_reqwidth(), root.winfo_reqheight()]
