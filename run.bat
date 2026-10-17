@@ -1,5 +1,5 @@
 @echo off
-rem Runs Maple EXP/hr from the source code. Most players should use the download instead
+rem Runs Maple Classic Exp Overlay from the source code. Most players should use the download instead
 rem (see the README). This needs Python with the packages from requirements.txt.
 cd /d "%~dp0"
 for %%P in (python "py -3") do (

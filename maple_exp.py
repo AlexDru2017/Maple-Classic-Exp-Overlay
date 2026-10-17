@@ -194,15 +194,20 @@ def move_old_data():
 
 
 def find_tesseract():
+    """The Tesseract that comes with the download, else an installed one. Never one in the
+    folder the overlay happens to be started from (Windows' usual search looks there first,
+    so a tesseract.exe someone left in, say, Downloads could be run)."""
+    on_path = [Path(d) / "tesseract.exe" for d in os.environ.get("PATH", "").split(os.pathsep)
+               if d.strip() and os.path.isabs(d.strip())]
     candidates = [
         HOME_DIR / "tesseract" / "tesseract.exe",            # comes with the download
         APP_DIR / "tesseract" / "tesseract.exe",
-        shutil.which("tesseract"),
-        r"C:\Program Files\Tesseract-OCR\tesseract.exe",
-        r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+        Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe"),
+        Path(r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe"),
+        *on_path,
     ]
     for path in candidates:
-        if path and os.path.exists(path):
+        if path.is_file():
             return str(path)
     return None
 
@@ -2137,8 +2142,9 @@ def format_entry(e):
     return " - ".join(parts)
 
 
-def log_row(e):
-    """The log table's cells for an entry: Date, Map, Lv, Class, Party, Time, EXP/hr, Mesos/hr."""
+def log_row(e, part=False):
+    """The log table's cells for an entry: Date, Map, Lv, Class, Party, Time, EXP/hr, Mesos/hr.
+    `part`: one party size under a merged party line, so just its own numbers."""
     d = date.fromisoformat(e["date"])
     day = f"{MONTHS[d.month - 1]} {d.day}" + ("" if d.year == date.today().year else f" '{d.year % 100:02d}")
     level = e["level"] if e["level"] is not None else "?"
@@ -2147,7 +2153,37 @@ def log_row(e):
     exp = f"{e['exp'] / e['seconds'] * 3600:,.0f}" if e["seconds"] else "—"
     ms = e.get("mesos_seconds", 0)
     mesos = f"{e['mesos'] / ms * 3600:,.0f}" if ms else ("?" if tracked else "")
+    if part:
+        return "", "", "", "", party, fmt_logged(e["seconds"], short=True), exp, mesos
     return day, e["map"], level, e.get("class") or "", party, fmt_logged(e["seconds"], short=True), exp, mesos
+
+
+def party_groups(entries):
+    """Log lines as the log shows them, newest first: the party sizes (2 to 6) of one map on
+    one day, at one level and class, together (smallest party first); everything else, solo
+    play included, on its own. (Party sizes come and go as people join and leave.)"""
+    groups = {}
+    for e in entries:
+        party = e.get("party")
+        key = (e["date"], e["map"], e["level"], e.get("class"), "party") if party and party >= 2 else id(e)
+        groups.setdefault(key, []).append(e)
+    return [(key, sorted(g, key=lambda e: e["party"]) if len(g) > 1 else g) for key, g in groups.items()]
+
+
+def merged(entries):
+    """Log lines added together, so EXP/hr and mesos/hr are over all of their time."""
+    m = dict(entries[0])
+    for k in ("exp", "seconds", "mesos", "mesos_seconds"):
+        m[k] = sum(e.get(k) or 0 for e in entries)
+    return m
+
+
+def group_row(entries, is_open=False):
+    """The log table's cells for a map's party sizes together, e.g. Party '4–5ppl ▸'."""
+    row = list(log_row(merged(entries)))
+    sizes = [e["party"] for e in entries]
+    row[4] = f"{sizes[0]}–{sizes[-1]}ppl {'▾' if is_open else '▸'}"
+    return tuple(row)
 
 
 def _numbers(name):
@@ -2607,7 +2643,7 @@ FONTS = {"small": ("Segoe UI", 8, "normal", False), "text": ("Segoe UI", 9, "nor
          "icon": ("Segoe UI", 11, "normal", False), "value": ("Consolas", 11, "normal", False),
          "next": ("Segoe UI Semibold", 11, "normal", False), "title": ("Segoe UI Semibold", 12, "normal", False),
          "big": ("Segoe UI", 24, "bold", False)}
-LIST_BG, LIST_BG2 = "#23262d", "#282b33"
+LIST_BG, LIST_BG2, LIST_PART = "#23262d", "#282b33", "#1c1e23"
 LOG_HINT = "Right-click a line to copy, rename or delete it."
 
 
@@ -2769,8 +2805,9 @@ class App:
         tk.Label(p, textvariable=self.log_status, bg=BG, fg=FG, font=self.fonts["text"],
                  justify="left", anchor="w").grid(row=1, column=0, columnspan=2, sticky="we", pady=(2, 6))
 
-        # A compact table: one row per day, map, level and party size. Drag the lines between
-        # the column titles to resize a column; widths are remembered.
+        # A compact table: one row per day, map, level and class, solo or in a party (click a
+        # party row for a row per party size). Drag the lines between the column titles to
+        # resize a column; widths are remembered.
         cell, head = self.fonts["text"], self.fonts["small"]
         style = ttk.Style(self.root)
         style.theme_use("clam")
@@ -2785,7 +2822,7 @@ class App:
         # real font, so nothing is cut off at any screen scaling.
         columns = (("date", "Date", "Sep 30", "w"), ("map", "Map", "The Swamp of Despair II", "w"),
                    ("lv", "Lv", "99", "center"), ("class", "Class", "Crossbowman", "w"),
-                   ("party", "Party", "6ppl", "center"),
+                   ("party", "Party", "2–6ppl ▸", "center"),
                    ("time", "Time", "12h 30m", "center"),
                    ("exp", "EXP/hr", "888,888", "e"), ("mesos", "Mesos/hr", "888,888", "e"))
         # Saved widths are in points, so they look the same on screens with different scaling
@@ -2798,10 +2835,13 @@ class App:
         for key, title, sample, anchor in columns:
             width = max(cell.measure(sample), head.measure(title)) + pad
             if isinstance(saved.get(key), int) and 10 <= saved[key] <= 2000:
-                width = saved[key]
+                # (Party is never narrower than a merged party row: older versions' Party
+                # column was sized for "6ppl".)
+                width = max(saved[key], width) if key == "party" else saved[key]
             tree.heading(key, text=title, anchor=anchor)
             tree.column(key, width=width, minwidth=pad, anchor=anchor, stretch=False)
         tree.tag_configure("odd", background=LIST_BG2)
+        tree.tag_configure("part", background=LIST_PART, foreground="#b3b8c0")   # one party size
         tree.tag_configure("edited", foreground="#6b7079")      # changed outside the tracker
         tree.grid(row=2, column=0, sticky="nsew")
         scroll = tk.Scrollbar(p, orient="vertical", command=tree.yview)
@@ -2815,7 +2855,10 @@ class App:
         p.rowconfigure(2, weight=1)
         tree.bind("<Button-3>", self._log_menu)
         tree.bind("<<TreeviewSelect>>", self._log_selected)
-        self.shown = {}
+        tree.bind("<Button-1>", self._log_click)
+        tree.bind("<<TreeviewOpen>>", lambda e: tree.after_idle(self._sync_group, tree.focus()))
+        tree.bind("<<TreeviewClose>>", lambda e: tree.after_idle(self._sync_group, tree.focus()))
+        self.shown, self.groups, self.open_groups = {}, {}, set()
         self._fill_log()
 
     def toggle_log(self, remember=True):
@@ -2912,17 +2955,59 @@ class App:
         self.status_label.config(wraplength=max(160, self.main.winfo_reqwidth() - 24))
 
     def _fill_log(self):
+        """The log, newest first. A map's party sizes on a day share a row (smallest to biggest
+        party, all their time together); clicking it shows a row for each party size."""
         tree = self.log_tree
         tree.delete(*tree.get_children())
-        self.shown = {}
-        for i, e in enumerate(self.autolog.newest_first()):
-            tags = (("odd",) if i % 2 else ()) + (("edited",) if self.autolog.edited(e) else ())
-            iid = tree.insert("", "end", values=log_row(e), tags=tags)
-            self.shown[iid] = e
+        self.shown, self.groups = {}, {}
+        edited = lambda e: ("edited",) if self.autolog.edited(e) else ()
+        for i, (key, entries) in enumerate(party_groups(self.autolog.newest_first())):
+            stripe = ("odd",) if i % 2 else ()
+            if len(entries) == 1:
+                iid = tree.insert("", "end", values=log_row(entries[0]), tags=stripe + edited(entries[0]))
+                self.shown[iid] = entries[0]
+                continue
+            is_open = key in self.open_groups
+            all_edited = all(self.autolog.edited(e) for e in entries)
+            iid = tree.insert("", "end", values=group_row(entries, is_open), open=is_open,
+                              tags=stripe + (("edited",) if all_edited else ()))
+            self.groups[iid] = (key, entries)
+            for e in entries:
+                self.shown[tree.insert(iid, "end", values=log_row(e, part=True), tags=("part",) + edited(e))] = e
         self.log_hint.set(LOG_HINT if self.shown else "No logs yet. Press Start and gain EXP for 5 minutes.")
+
+    def _log_click(self, event):
+        """Clicking a merged party row opens it (a row per party size) or closes it."""
+        iid = self.log_tree.identify_row(event.y)
+        if iid in self.groups and self.log_tree.identify_region(event.x, event.y) == "cell":
+            self.log_tree.item(iid, open=not self.log_tree.item(iid, "open"))
+            self._sync_group(iid)
+
+    def _sync_group(self, iid):
+        """After a party row opens or closes: its arrow, and remembering it for next time."""
+        if iid not in self.groups:
+            return
+        key, entries = self.groups[iid]
+        is_open = bool(self.log_tree.item(iid, "open"))
+        self.open_groups.add(key) if is_open else self.open_groups.discard(key)
+        self.log_tree.item(iid, values=group_row(entries, is_open))
+        if self.log_tree.selection() == (iid,):
+            self._log_selected(None)
 
     def _log_selected(self, _event):
         sel = self.log_tree.selection()
+        group = self.groups.get(sel[0]) if sel else None
+        if group:
+            entries = group[1]
+            sizes = ", ".join(str(e["party"]) for e in entries[:-1]) + f" and {entries[-1]['party']}"
+            runs = sum(self.autolog.runs_done(e["map"], e["party"], e.get("class"), e["date"]) for e in entries)
+            hours = (f" Includes {runs} full {RUN_SECONDS // 60}-minute run{'s' * (runs != 1)} of non-stop farming."
+                     if runs else "")
+            what = "hide" if self.log_tree.item(sel[0], "open") else "see"
+            self.log_hint.set(f"{entries[0]['map']}: parties of {sizes}, over {fmt_logged(sum(e['seconds'] for e in entries))} "
+                              f"of non-stop EXP gain in all.{hours} Click it to {what} each party size. "
+                              f"Right-click to copy, rename or delete.")
+            return
         e = self.shown.get(sel[0]) if sel else None
         if e:
             if self.autolog.edited(e):
@@ -2936,37 +3021,45 @@ class App:
                               f"{hours} Right-click to copy, rename or delete.")
 
     def _log_menu(self, event):
+        """Right-click: copy, rename or delete a line (a merged party row: all its party sizes)."""
         iid = self.log_tree.identify_row(event.y)
-        entry = self.shown.get(iid)
-        if not entry:
+        entries = self.groups[iid][1] if iid in self.groups else [self.shown[iid]] if iid in self.shown else None
+        if not entries:
             return
         self.log_tree.selection_set(iid)
+        many = len(entries) > 1
         menu = tk.Menu(self.root, tearoff=0)
-        menu.add_command(label="Copy line", command=lambda: self._copy(entry))
-        menu.add_command(label="Rename map...", command=lambda: self._rename(entry))
-        menu.add_command(label="Delete entry", command=lambda: self._delete(entry))
+        menu.add_command(label="Copy lines" if many else "Copy line", command=lambda: self._copy(entries))
+        menu.add_command(label="Rename map...", command=lambda: self._rename(entries))
+        menu.add_command(label=f"Delete all {len(entries)} party sizes" if many else "Delete entry",
+                         command=lambda: self._delete(entries))
         menu.tk_popup(event.x_root, event.y_root)
 
-    def _copy(self, entry):
+    def _copy(self, entries):
+        text = "\n".join(format_entry(e) for e in entries)
         self.root.clipboard_clear()
-        self.root.clipboard_append(format_entry(entry))
-        self.log_hint.set("Copied: " + format_entry(entry))
+        self.root.clipboard_append(text)
+        self.log_hint.set("Copied: " + text if len(entries) == 1 else f"Copied {len(entries)} lines, one per party size.")
 
-    def _rename(self, entry):
-        name = simpledialog.askstring("Rename map", "Map name:", initialvalue=entry["map"],
+    def _rename(self, entries):
+        name = simpledialog.askstring("Rename map", "Map name:", initialvalue=entries[0]["map"],
                                       parent=self.root)
         if name and name.strip():
-            self.autolog.rename(entry, name.strip())
+            for entry in entries:             # (one rename covers them all, unless it's "Unknown map")
+                if entry["map"] != name.strip():
+                    self.autolog.rename(entry, name.strip())
             if self.map_name:
                 self.map_name = self.autolog.canonical(self.map_name)
             s = self.session                    # so a renamed map isn't taken as a new one
             s.map, s.here = (self.autolog.canonical(n) if n else n for n in (s.map, s.here))
             self._fill_log()
 
-    def _delete(self, entry):
-        if messagebox.askyesno("Delete entry", f"Delete this log entry?\n\n{format_entry(entry)}",
-                               parent=self.root):
-            self.autolog.delete(entry)
+    def _delete(self, entries):
+        lines = "\n".join(format_entry(e) for e in entries)
+        question = f"Delete these {len(entries)} log entries?" if len(entries) > 1 else "Delete this log entry?"
+        if messagebox.askyesno("Delete entry", f"{question}\n\n{lines}", parent=self.root):
+            for entry in entries:
+                self.autolog.delete(entry)
             self._fill_log()
 
     def _log_status_text(self, now):

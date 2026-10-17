@@ -83,6 +83,24 @@ check("table row format", m.log_row(e)[1:] == ("The Land of Wild Boar II", 29, "
 check("the class is in the line", m.format_entry({**e, "class": "Bandit"}).startswith(
     "Oct 11th, 2026 - The Land of Wild Boar II - Lv 29 - Bandit - 4ppl party"))
 
+# ---- party sizes of one map share a row in the log
+five = {**e, "party": 5, "exp": 50000, "seconds": 1800, "mesos": 10000, "mesos_seconds": 1800}
+solo = {**e, "party": 1}
+other_level = {**e, "party": 3, "level": 30}
+other_day = {**e, "party": 3, "date": "2026-10-12"}
+old_line = {k: v for k, v in e.items() if k not in ("party", "mesos", "mesos_seconds")}  # from before party tracking
+groups = m.party_groups([five, solo, e, other_level, other_day, old_line])
+shape = [[x["party"] if "party" in x else "-" for x in g] for _, g in groups]
+check(f"a map's party sizes share a row, smallest first; solo, other levels and days don't ({shape})",
+      shape == [[4, 5], [1], [3], [3], ["-"]])
+row = m.group_row(groups[0][1])
+check(f"the shared row is over all their time ({row[5:]})",
+      row[4:] == ("4–5ppl ▸", "1h 30m", f"{(51862 + 50000) / 5400 * 3600:,.0f}", f"{(32713 + 10000) / 5400 * 3600:,.0f}"))
+check("open, its arrow points down", m.group_row(groups[0][1], True)[4] == "4–5ppl ▾")
+check("a party size under it shows just its own numbers",
+      m.log_row(five, part=True) == ("", "", "", "", "5ppl", "30m", "100,000", "20,000"))
+check("the lines themselves aren't changed", five["exp"] == 50000 and e["seconds"] == 3600)
+
 # ---- class, seals and 15-minute runs
 log, _ = new_log()
 t, _ = farm(log, 0, 310, job="Bandit")
