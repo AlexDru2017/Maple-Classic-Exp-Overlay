@@ -60,7 +60,13 @@ CREATE TABLE IF NOT EXISTS answers (
   at   INTEGER NOT NULL                     -- when, in milliseconds since 1970
 ) WITHOUT ROWID;
 
--- Bring the summary tables in line with the runs (does nothing on an empty database).
+-- Bring the summary tables exactly in line with the runs: rows with no run behind them are
+-- taken out, missing ones added, counts redone. (Never emptied first, so the site never sees
+-- an empty table while this runs.) Does nothing on an empty database.
+DELETE FROM map_players WHERE NOT EXISTS
+  (SELECT 1 FROM runs r WHERE r.map = map_players.map AND r.install = map_players.install);
+DELETE FROM job_players WHERE NOT EXISTS
+  (SELECT 1 FROM runs r WHERE r.job = job_players.job AND r.install = job_players.install);
 INSERT OR IGNORE INTO map_players (map, install) SELECT DISTINCT map, install FROM runs;
 INSERT OR REPLACE INTO job_players (job, install, runs) SELECT job, install, COUNT(*) FROM runs GROUP BY job, install;
 INSERT OR REPLACE INTO totals (id, runs, seconds) SELECT 1, COUNT(*), COALESCE(SUM(seconds), 0) FROM runs;

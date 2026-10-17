@@ -12,6 +12,7 @@
 - Downloads are now built by GitHub from this code, never on a PC, from exact package files checked against their SHA-256. Each one gets an attestation anyone can check (`gh attestation verify`), and its SHA-256 is on the release page and on the build's page (the same one in all three places). See "Where the download comes from" in the README.
 - Built with Pillow 12.3, which fixes the problems published since 11.3. (The overlay never opens image files from elsewhere, so it wasn't affected, but now nothing is flagged.)
 - It never runs a `tesseract.exe` from the folder it happens to be started from, only its own or an installed one.
+- Sharing is off whenever the overlay runs in test mode (`MAPLE_EXP_DATA` set), so made-up test runs can never reach the real site.
 
 **The best-maps website**
 - Security headers: browsers only run the site's own scripts, and other sites can't show it inside theirs.

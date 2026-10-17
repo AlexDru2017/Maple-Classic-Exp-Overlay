@@ -370,9 +370,11 @@ def capture(request, *a, **k):
     return _Reply({"results": [{"started": r.get("started"), "ok": True} for r in log.runs]})
 
 
+os.environ["MAPLE_EXP_ALLOW_SHARE"] = "1"                  # (the network is stubbed here)
 m.urllib.request.urlopen = capture
 done = m.post_runs("0" * 16, log.unshared_runs())
 m.urllib.request.urlopen = real_urlopen
+os.environ.pop("MAPLE_EXP_ALLOW_SHARE")
 body = sent[0][1].decode() if sent else ""
 fields = {k for r in json.loads(body)["runs"] for k in r} if body else set()
 check(f"what's sent to the stats site has the run and no note ({sorted(fields)})",
@@ -387,11 +389,26 @@ check("what's sent never reads the log's lines, and the bug report never include
       and "entries" not in inspect.getsource(m.check_for_update)
       and not any(w in inspect.getsource(m.App._report_text) for w in ("note_of", "notes_of", '"note"', "autolog.entries")))
 runs = [dict(r, note="SNEAKY") for r in log.runs]
+os.environ["MAPLE_EXP_ALLOW_SHARE"] = "1"
 m.urllib.request.urlopen = capture
 sent.clear()
 m.post_runs("0" * 16, runs)
 m.urllib.request.urlopen = real_urlopen
+os.environ.pop("MAPLE_EXP_ALLOW_SHARE")
 check("even a run that somehow had a note field wouldn't send it", "SNEAKY" not in sent[0][1].decode())
+
+# testing must never put made-up runs on the real site (it happened once, with a test launch)
+sent.clear()
+m.urllib.request.urlopen = capture
+try:
+    m.post_runs("0" * 16, log.runs)
+    blocked = False
+except RuntimeError:
+    blocked = True
+m.urllib.request.urlopen = real_urlopen
+check("while testing (MAPLE_EXP_DATA is set) nothing can be sent to the real site", blocked and not sent)
+check("no test fixture has sharing switched on (a launch on one would send its made-up runs)",
+      not any(json.loads(f.read_text(encoding="utf-8")).get("share_runs") for f in (Path(__file__).parent / "upgrade").glob("*/config.json")))
 
 # a copy of the log is kept for each day, so a recent one is always there
 folder = Path(tempfile.mkdtemp())
@@ -621,11 +638,13 @@ class FakeResponse:
 
 
 real_urlopen = m.urllib.request.urlopen
+os.environ["MAPLE_EXP_ALLOW_SHARE"] = "1"                  # (the network is stubbed here)
 m.urllib.request.urlopen = lambda *a, **k: FakeResponse({"results": [
     {"started": "a", "ok": True}, {"started": "b", "ok": False, "why": "overlaps another run"},
     {"started": "c", "ok": False, "why": "too many runs today", "retry": True}]})
 done = m.post_runs("0" * 16, [{"started": x} for x in "abc"])
 m.urllib.request.urlopen = real_urlopen
+os.environ.pop("MAPLE_EXP_ALLOW_SHARE")
 check(f"runs the site has, or turned down for good, aren't sent again; 'try tomorrow' ones are ({done})",
       done == ["a", "b"])
 

@@ -239,11 +239,14 @@ py -3 -m pip install -r requirements.txt pyinstaller
 py -3 build.py
 ```
 
+**Testing never shares anything:** with `MAPLE_EXP_DATA` set (it moves the data folder, which is how the tests keep away from your real log), the overlay refuses to send runs to the real site, so made-up test runs can't end up there. (Set `MAPLE_EXP_ALLOW_SHARE=1` only to test against a local copy of the server.)
+
 **Run the tests:**
 
 ```
 py -3 tests/test_logic.py
 py -3 tests/test_screen.py
+py -3 tests/test_ui.py     # opens the real window for a few seconds (the notes box)
 ```
 
 To build with exactly the packages the releases use: `py -3 -m pip install --require-hashes -r requirements-build.txt`.

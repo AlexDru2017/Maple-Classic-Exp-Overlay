@@ -239,6 +239,10 @@ def post_runs(install, runs, timeout=15):
     Returns the start times of the runs it's done with: the ones the site has (now or from
     before), and ones it turned down for good. Runs turned down only for today ("retry", too
     many sent today) are left to be sent again later."""
+    if os.environ.get("MAPLE_EXP_DATA") and not os.environ.get("MAPLE_EXP_ALLOW_SHARE"):
+        # MAPLE_EXP_DATA moves the data folder, which only tests do. What they have in their logs is
+        # made up, and made-up runs must never reach the real site: so not while testing.
+        raise RuntimeError("sharing is off while testing (MAPLE_EXP_DATA is set)")
     shared = ("date", "started", "map_read", "class", "level_start", "level_end", "party", "exp",
               "seconds", "mesos", "mesos_seconds", "version", "seal")
     body = json.dumps({"install": install, "runs": [{k: r.get(k) for k in shared} for r in runs]}).encode()
