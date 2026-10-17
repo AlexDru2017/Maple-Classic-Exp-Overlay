@@ -6,7 +6,7 @@
 - **One log line per party**: playing a map in a party, people join and leave, and each party size used to get its own line. Now a map's party sizes on a day share one line (e.g. "4–5ppl ▸"), with EXP/hr and mesos/hr over all of that time. Click it to see a line for each party size, to compare them. Solo play keeps its own line. Your log itself isn't changed, only how it's shown.
 
 **Safer**
-- Downloads are now built by GitHub from this code, never on a PC, from exact package files checked against their SHA-256. Each one gets an attestation anyone can check (`gh attestation verify`), and its SHA-256 is on the release page. See "Where the download comes from" in the README.
+- Downloads are now built by GitHub from this code, never on a PC, from exact package files checked against their SHA-256. Each one gets an attestation anyone can check (`gh attestation verify`), and its SHA-256 is on the release page and on the build's page (the same one in all three places). See "Where the download comes from" in the README.
 - Built with Pillow 12.3, which fixes the problems published since 11.3. (The overlay never opens image files from elsewhere, so it wasn't affected, but now nothing is flagged.)
 - It never runs a `tesseract.exe` from the folder it happens to be started from, only its own or an installed one.
 

@@ -186,9 +186,11 @@ Downloads on the [Releases page](../../releases) are built by GitHub from the co
 gh attestation verify "the zip you downloaded.zip" --repo beanguri/Maple-Classic-Exp-Overlay
 ```
 
-It tells you whether that exact file was built here, and from which commit. Or compare the file's SHA-256 with `SHA256SUMS.txt` on its release page (in PowerShell: `Get-FileHash` and the file name).
+It tells you whether that exact file was built here, and from which commit. Or compare the file's SHA-256 with `SHA256SUMS.txt` on its release page (in PowerShell: `Get-FileHash "the zip you downloaded.zip"`).
 
-v0.9.6 was built by GitHub from its tag before the package checks and attestations were added, so it has no attestation: its SHA-256 is on its release page, and the same file is on [its build's page](https://github.com/beanguri/Maple-Classic-Exp-Overlay/actions/runs/38631744258) until January 2027 (with a GitHub account). Versions before v0.9.6 were built on my PC.
+The same zip is also kept on the page of the build that made it (Actions, the run, the file at the bottom; you need a GitHub account to download it). Build runs since October 17 keep it exactly as it is, so the SHA-256 GitHub shows there is the zip's own, the same as on the release page.
+
+**About v0.9.6:** it was built by GitHub from its tag, before the package checks and attestations were added, so it has no attestation. Its SHA-256 is on its release page. [Its build's page](https://github.com/beanguri/Maple-Classic-Exp-Overlay/actions/runs/38631744258) keeps the zip inside an extra zip (GitHub does that unless told not to), so the SHA-256 shown *there* is for that outer zip and won't match: extract it once, and the zip inside has the release's SHA-256. That page keeps it until January 2027. Versions before v0.9.6 were built on my PC.
 
 ### Code signing policy
 
