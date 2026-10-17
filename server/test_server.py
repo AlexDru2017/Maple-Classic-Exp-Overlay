@@ -146,6 +146,15 @@ for size in (2, 4, 6):
     call("/api/runs", {"install": install(), "runs": [run(f"{day(6)}T10:00", 120000, map_name="Sleepywood Dungeon",
                                                           party=size)]})
 
+# made-up map names: web addresses are turned down; a name only one player has sent isn't shown
+r = call("/api/runs", {"install": install(), "runs": [run(f"{day(6)}T12:{m}", 50000, map_name=name, job="Hunter")
+                                                      for m, name in (("00", "free-mesos.com"), ("15", "www.mesos"),
+                                                                      ("30", "Ant Tunnel Park"))]})
+why = [x.get("why") for x in r["results"]]
+check(f"a map name that's a web address is turned down ({why})",
+      why[:2] == ["not a map name"] * 2 and r["results"][2].get("ok"))
+call("/api/runs", {"install": install(), "runs": [run(f"{day(6)}T13:00", 50000, map_name="Totally Real Map", job="Hunter")]})
+
 # what the site shows
 s = call("/api/stats?class=Thief&path=Shadower&level=32&party=1")
 maps = {m["map"]: m for m in s["maps"]}
@@ -163,7 +172,24 @@ if boar:
 if boar:
     check(f"how much farming it's from, in hours ({boar['hours']} h from {boar['runs']} runs)",
           abs(boar["hours"] - boar["runs"] * 900.4 / 3600) < 0.2)
-check("a map with only 2 players isn't shown yet", "Rocky Road II" not in maps and s["maps_waiting_for_players"] >= 1)
+    dots = boar.get("dots", [])
+    check(f"one dot per player, in order, inside the typical range's band ({len(dots)} dots)",
+          len(dots) == boar["players"] and dots == sorted(dots)
+          and all(0.5 * boar["exp_hr"] <= d <= 2 * boar["exp_hr"] for d in dots))
+    check(f"the faker and the AFK player are the left-out dots ({boar.get('unusual')})",
+          sorted(boar.get("unusual", [])) == [5000, 500000])
+    check("dots are rounded and carry no player IDs",
+          all(isinstance(d, (int, float)) and d == float(f"{d:.3g}") for d in dots + boar.get("unusual", [])))
+early = {m["map"]: m for m in s.get("early", [])}
+check("a map with only 2 players isn't ranked yet", "Rocky Road II" not in maps and s["maps_waiting_for_players"] >= 1)
+check(f"...but it's shown as early data ({early.get('Rocky Road II')})",
+      early.get("Rocky Road II", {}).get("players") == 2 and len(early["Rocky Road II"].get("dots", [])) == 2
+      and "ranked" not in early["Rocky Road II"])
+bow = call("/api/stats?class=Archer&path=Bowmaster&level=32&party=1")
+bow_early = [m["map"] for m in bow.get("early", [])]
+check(f"...but not a map name only one player has sent ({bow_early})",
+      "Totally Real Map" not in bow_early and "Ant Tunnel Park" not in bow_early
+      and bow["maps_waiting_for_players"] == len(bow_early))
 nl = call("/api/stats?class=Thief&path=Night%20Lord&level=32&party=1")
 nl_boar = {m["map"]: m for m in nl["maps"]}.get("The Land of Wild Boar II")
 check(f"Night Lord counts the Hermits and the Rogues, not the Bandits ({nl_boar and nl_boar['players']} players)",
@@ -187,6 +213,26 @@ check("an old-style job name isn't a class", call("/api/stats?class=Bandit&level
 check("a path from another class is refused", call("/api/stats?class=Thief&path=Bishop&level=32").get("status") == 400)
 check("odd names don't break it", call("/api/stats?class=constructor&level=32").get("status") == 400
       and call("/api/stats?class=Thief&path=__proto__&level=32").get("status") == 400)
+# the bar at the top of the site: the latest runs shared
+call("/api/runs", {"install": install(), "runs": [run(f"{day(29)}T10:00", 52000, map_name="Visit my-site.com", job="Hunter")]})
+call("/api/runs", {"install": install(), "runs": [run(f"{day(29)}T10:00", 400000, job="Hunter")]})        # a faker on Wild Boar
+call("/api/runs", {"install": install(), "runs": [run(f"{day(29)}T10:00", 50000, job="Beginner")]})
+fresh = install()
+call("/api/runs", {"install": fresh, "runs": [run(f"{day(29)}T09:00", 48000, job="Hunter"),
+                                     run(f"{day(29)}T09:15", 51000, level=32, job="Hunter")]})
+latest = call("/api/latest").get("runs", [])
+check(f"the bar shows the latest runs, newest first ({len(latest)} runs)",
+      0 < len(latest) <= 12 and [r["shared"] for r in latest] == sorted((r["shared"] for r in latest), reverse=True))
+check(f"...starting with the newest ordinary one ({latest[0] if latest else None})",
+      bool(latest) and latest[0]["map"] == "The Land of Wild Boar II" and latest[0]["exp_hr"] == 51000
+      and latest[0]["level"] == 32 and latest[0]["job"] == "Hunter")
+check("...once per player (not both of their runs)", sum(r["exp_hr"] in (48000, 51000) for r in latest[:3]) == 1)
+check("...not a map only one player has shared (made-up names stay off the front page)",
+      all(r["map"] != "Visit my-site.com" for r in latest))
+check("...not a run far from what others get there", all(r["exp_hr"] < 300000 for r in latest))
+check("...not jobs the site doesn't show (Beginners)", all(r["job"] != "Beginner" for r in latest))
+check("...and nothing about who it was", all(set(r) == {"map", "job", "level", "party", "exp_hr", "mesos_hr", "shared"}
+                                               for r in latest))
 o = call("/api/options?fresh=1")             # (answers are kept for a minute)
 check(f"the totals count hours, not runs ({o['hours']} h from {o['runs']} runs)",
       0 < o["hours"] < o["runs"] and abs(o["hours"] - (o["runs"] - 1) * 900.4 / 3600 - 1) < 1)

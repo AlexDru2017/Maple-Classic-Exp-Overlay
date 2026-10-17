@@ -3,6 +3,7 @@
 //   POST /api/runs    the overlay sends finished runs (only if the player agreed)
 //   GET  /api/stats   best maps for a class and path, level, solo or in a party
 //   GET  /api/options the classes and paths, how many players each has, and totals
+//   GET  /api/latest  the latest runs shared, for the bar at the top of the site
 //   everything else   the website, from public/ (served by Cloudflare without running this)
 //
 // Anyone can send anything to a public server, so nothing is taken on trust: every run is
@@ -12,7 +13,10 @@
 // with runs far from what other players get (same map, class, level, solo or party) left out.
 // Posts must be JSON, so other websites can't make their visitors' browsers send runs.
 
-const MIN_PLAYERS = 3;              // different players needed before a map is shown
+const MIN_PLAYERS = 3;              // different players needed before a map is ranked
+const MAX_EARLY = 8;                // maps with fewer players shown (greyed out) as early data
+const LATEST = 12;                  // runs in the bar at the top of the site
+const LATEST_DAYS = 14;             // how far back it looks
 const BAND = [0.5, 2.0];            // runs outside this share of the median are outliers
 const LEVEL_WINDOW = 5;             // "around your level": within this many levels
 const MAX_PER_REQUEST = 50;
@@ -22,7 +26,9 @@ const MAX_PER_IP_DAY = 400;
 const MAX_INSTALLS_PER_IP_DAY = 6;  // copies of the overlay sharing from one connection a day (a party)
 const MAX_BODY = 200_000;           // bytes in one post (50 runs are about 25,000)
 const DAYS_BACK = 60;               // how old a run can be when it's sent (and up to 2 days ahead)
-const CACHE_SECONDS = 60;         // new runs show up on the site within a minute
+// How long answers are kept (see cached()): new runs show up on the site within a few minutes.
+const EDGE_SECONDS = 60;            // in Cloudflare's cache, where the visitor is
+const KEEP = { stats: 120, latest: 120, options: 600 };   // in the database, for everyone
 
 // The four classes, each split into paths named after the job they end in (4th job). A run
 // counts for the path its job is on. 1st-job runs come before the path is picked, and play
@@ -102,7 +108,10 @@ export default {
       if (request.method === "POST" && url.pathname === "/api/runs") return await postRuns(request, env);
       if (request.method === "GET" && url.pathname === "/api/stats") return await getStats(url, env, ctx);
       if (request.method === "GET" && url.pathname === "/api/options") {
-        return await cached(url, ctx, "options", () => getOptions(env));
+        return await cached(url, env, ctx, "options", KEEP.options, () => getOptions(env));
+      }
+      if (request.method === "GET" && url.pathname === "/api/latest") {
+        return await cached(url, env, ctx, "latest", KEEP.latest, () => getLatest(env));
       }
       if (url.pathname.startsWith("/api/")) {
         return json({ error: "not found" }, ["GET", "POST"].includes(request.method) ? 404 : 405);
@@ -116,6 +125,10 @@ export default {
 };
 
 // ---------------------------------------------------------------- receiving runs
+
+// No map in the game looks like a web address, and the site shows map names, so a "map"
+// like "free-mesos.com" or "www.x" is turned down.
+const WEB_ADDRESS = /:\/\/|www\.|\.(com|net|org|gg|io|co|me|ly|tv|xyz|ru|cn|info|biz|link|site|shop|app|dev|to|cc|top)\b/i;
 
 function text(value, max) {
   if (typeof value !== "string") return null;
@@ -147,6 +160,7 @@ export function checkRun(r, now = Date.now()) {
   const mesos = inRange(r.mesos ?? 0, -1e10, 1e11);
   const mesosSeconds = inRange(r.mesos_seconds ?? 0, 0, RUN_SECONDS[1]);
   if (!map || !job || !started || !minutes(started)) return { why: "missing map, class or start time" };
+  if (WEB_ADDRESS.test(map) || WEB_ADDRESS.test(job)) return { why: "not a map name" };
   const ago = now / 60000 - minutes(started);       // (the overlay sends its local time)
   if (ago > DAYS_BACK * 1440 || ago < -2 * 1440) return { why: "start time out of range" };
   if (!levelStart || !levelEnd || !party) return { why: "bad level or party size" };
@@ -242,19 +256,32 @@ async function postRuns(request, env) {
         retry: true });
       continue;
     }
-    await env.DB.prepare(
+    const saved = await env.DB.prepare(
       `INSERT OR IGNORE INTO runs (received, received_day, install, ip_hash, started, map, job, level_start,
          level_end, party, exp, seconds, exp_hr, mesos, mesos_seconds, mesos_hr, version)
        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)`
     ).bind(now.toISOString(), day, install, ipHash, run.started, run.map, run.job, run.level_start,
       run.level_end, run.party, run.exp, run.seconds, run.exp_hr, run.mesos, run.mesos_seconds,
       run.mesos_hr, run.version).run();
+    if (saved.meta.changes) await addToSummaries(env, run, install);
     taken.push(at);
     mine++;
     fromIp++;
     results.push({ started, ok: true });
   }
   return json({ received: results.filter((r) => r.ok).length, results }, 200, false);
+}
+
+/** Adds a newly saved run to the small summary tables (see schema.sql), so the site can
+ * count players, maps and hours without reading every run. */
+function addToSummaries(env, run, install) {
+  return env.DB.batch([
+    env.DB.prepare("INSERT INTO map_players (map, install) VALUES (?1, ?2) ON CONFLICT DO NOTHING").bind(run.map, install),
+    env.DB.prepare(`INSERT INTO job_players (job, install, runs) VALUES (?1, ?2, 1)
+                    ON CONFLICT (job, install) DO UPDATE SET runs = runs + 1`).bind(run.job, install),
+    env.DB.prepare(`INSERT INTO totals (id, runs, seconds) VALUES (1, 1, ?1)
+                    ON CONFLICT (id) DO UPDATE SET runs = runs + 1, seconds = seconds + excluded.seconds`).bind(run.seconds),
+  ]);
 }
 
 // ---------------------------------------------------------------- the numbers
@@ -284,18 +311,25 @@ function perPlayer(runs, field) {
   return [...by.values()].map(median);
 }
 
+/** 3 significant figures (74,213 -> 74,200): plenty for a dot on a chart. */
+const roughly = (n) => Number(n.toPrecision(3));
+
 /**
  * For one map: drop runs far from what players typically get there (outliers), then the
- * typical EXP/hr and mesos/hr of what's left. Null if fewer than MIN_PLAYERS players remain.
+ * typical EXP/hr and mesos/hr of what's left. `ranked` once MIN_PLAYERS players remain.
+ * `dots` is each player's typical EXP/hr (no IDs), and `unusual` the same for the runs left
+ * out, so the site can show every player and what was dropped.
  */
 export function summarize(runs) {
   const typical = median(perPlayer(runs, "exp_hr"));
   if (typical === null) return null;
-  const kept = runs.filter((r) => r.exp_hr >= BAND[0] * typical && r.exp_hr <= BAND[1] * typical);
+  const usual = (r) => r.exp_hr >= BAND[0] * typical && r.exp_hr <= BAND[1] * typical;
+  const kept = runs.filter(usual), left = runs.filter((r) => !usual(r));
   const players = new Set(kept.map((r) => r.install)).size;
-  if (players < MIN_PLAYERS) return null;
   const exp = perPlayer(kept, "exp_hr"), mesos = perPlayer(kept, "mesos_hr");
+  const sorted = (values) => values.map(roughly).sort((a, b) => a - b);
   return {
+    ranked: players >= MIN_PLAYERS,
     exp_hr: Math.round(median(exp)),
     exp_hr_low: Math.round(quantile(exp, 0.25)),
     exp_hr_high: Math.round(quantile(exp, 0.75)),
@@ -303,7 +337,9 @@ export function summarize(runs) {
     players,
     runs: kept.length,
     hours: Math.round(kept.reduce((sum, r) => sum + r.seconds, 0) / 360) / 10,
-    outliers: runs.length - kept.length,
+    outliers: left.length,
+    dots: sorted(exp),
+    unusual: sorted(perPlayer(left, "exp_hr")),
   };
 }
 
@@ -317,7 +353,8 @@ async function getStats(url, env, ctx) {
   if (!jobs || !(level >= 1 && level <= 250) || !party) {
     return json({ error: "give class (and path), level (1-250) and party (solo or party)" }, 400);
   }
-  return cached(url, ctx, `stats/${name}/${path || ""}/${level}/${party}`, () => findMaps(env, name, path, jobs, level, party));
+  return cached(url, env, ctx, `stats/${name}/${path || ""}/${level}/${party}`, KEEP.stats,
+    () => findMaps(env, name, path, jobs, level, party));
 }
 
 async function findMaps(env, name, path, jobs, level, party) {
@@ -331,24 +368,92 @@ async function findMaps(env, name, path, jobs, level, party) {
     if (!byMap.has(r.map)) byMap.set(r.map, []);
     byMap.get(r.map).push(r);
   }
-  const maps = [];
-  let waiting = 0;
+  // Ranked maps, best first. Maps with fewer players are early data: shown, but not ranked,
+  // most players first (so one made-up player can't put a map at the top), and only maps at
+  // least 2 players have shared somewhere (so one person can't show a made-up map name).
+  const named = byMap.size ? await sharedByTwo(env, [...byMap.keys()]) : new Set();
+  const maps = [], early = [];
   for (const [map, list] of byMap) {
-    const s = summarize(list);
-    if (s) maps.push({ map, ...s });
-    else waiting++;
+    const { ranked, ...s } = summarize(list);
+    if (ranked) maps.push({ map, ...s });
+    else if (named.has(map)) early.push({ map, ...s });
   }
   maps.sort((a, b) => b.exp_hr - a.exp_hr);
+  early.sort((a, b) => b.players - a.players || b.runs - a.runs || b.exp_hr - a.exp_hr);
   return json({
     class: name, path, jobs, party, levels: [Math.max(1, level - LEVEL_WINDOW), level + LEVEL_WINDOW],
-    min_players: MIN_PLAYERS, maps, maps_waiting_for_players: waiting,
+    min_players: MIN_PLAYERS, maps, early: early.slice(0, MAX_EARLY), maps_waiting_for_players: early.length,
   });
 }
 
+/** Which of these maps at least 2 different players have shared (any class, level or party). */
+async function sharedByTwo(env, maps) {
+  const named = new Set();
+  for (let i = 0; i < maps.length; i += 90) {              // (a query takes at most 100 values)
+    const part = maps.slice(i, i + 90);
+    const { results } = await env.DB.prepare(
+      `SELECT map FROM map_players WHERE map IN (${part.map((_, j) => `?${j + 1}`).join(", ")})
+       GROUP BY map HAVING COUNT(*) >= 2`
+    ).bind(...part).all();
+    for (const r of results) named.add(r.map);
+  }
+  return named;
+}
+
+/**
+ * The latest runs shared, newest first, for the bar at the top of the site. It's the front
+ * page, so: one run per player (nobody fills it), only maps at least 2 players have shared
+ * (a made-up map name can't be put there), only the classes the site shows, and not runs far
+ * from what other players get on that map (solo or party, around that level). Rounded, and
+ * nothing about who it was.
+ */
+async function getLatest(env) {
+  const since = new Date(Date.now() - LATEST_DAYS * 864e5).toISOString().slice(0, 10);
+  const shown = new Set(Object.keys(CLASSES).flatMap((name) => jobsFor(name)));
+  const { results: recent } = await env.DB.prepare(
+    `SELECT install, received, map, job, level_start, party, exp_hr, mesos_hr FROM runs
+     WHERE received >= ?1 ORDER BY received DESC, started DESC LIMIT 200`
+  ).bind(since).all();                                       // (runs are sent a few at a time)
+  const named = await sharedByTwo(env, [...new Set(recent.map((r) => r.map))]);
+  const picked = [], players = new Set();
+  for (const r of recent) {
+    if (!shown.has(r.job) || !named.has(r.map) || players.has(r.install)) continue;
+    players.add(r.install);
+    picked.push(r);
+    if (picked.length >= LATEST * 2) break;
+  }
+  // What other players get on those maps, around those levels (to leave out unusual runs).
+  const maps = [...new Set(picked.map((r) => r.map))];
+  const levels = picked.map((r) => r.level_start);
+  const { results: others } = maps.length ? await env.DB.prepare(
+    `SELECT install, map, level_start, party, exp_hr FROM runs
+     WHERE map IN (${maps.map((_, i) => `?${i + 3}`).join(", ")}) AND level_start BETWEEN ?1 AND ?2`
+  ).bind(Math.min(...levels) - LEVEL_WINDOW, Math.max(...levels) + LEVEL_WINDOW, ...maps).all() : { results: [] };
+  const usual = (r) => {
+    const like = others.filter((o) => o.map === r.map && (o.party >= 2) === (r.party >= 2) &&
+      Math.abs(o.level_start - r.level_start) <= LEVEL_WINDOW);
+    const each = perPlayer(like, "exp_hr");
+    if (each.length < MIN_PLAYERS) return true;          // too few to tell (its EXP was checked when sent)
+    const typical = median(each);
+    return r.exp_hr >= BAND[0] * typical && r.exp_hr <= BAND[1] * typical;
+  };
+  const runs = picked.filter(usual).slice(0, LATEST).map((r) => ({
+    map: r.map, job: r.job, level: r.level_start, party: r.party,
+    exp_hr: roughly(r.exp_hr), mesos_hr: r.mesos_hr === null ? null : roughly(r.mesos_hr),
+    shared: `${r.received.slice(0, 16)}Z`,                 // to the minute
+  }));
+  return json({ runs });
+}
+
 async function getOptions(env) {
-  const { results } = await env.DB.prepare(
-    "SELECT job, install, COUNT(*) AS runs FROM runs GROUP BY job, install"
-  ).all();
+  const [{ results }, { results: [totals] }] = await env.DB.batch([
+    env.DB.prepare("SELECT job, install, runs FROM job_players"),
+    env.DB.prepare(
+      `SELECT COALESCE((SELECT runs FROM totals WHERE id = 1), 0) AS runs,
+              ROUND(COALESCE((SELECT seconds FROM totals WHERE id = 1), 0) / 3600.0, 1) AS hours,
+              (SELECT COUNT(DISTINCT install) FROM job_players) AS players,
+              (SELECT COUNT(DISTINCT map) FROM map_players) AS maps`),
+  ]);
   const count = (jobs) => {
     const want = new Set(jobs), players = new Set();
     let runs = 0;
@@ -366,33 +471,47 @@ async function getOptions(env) {
       name: path, steps: [c.first[0], ...jobs], ...count(jobsFor(name, path)),   // steps: 1st job to 4th
     })),
   }));
-  const totals = await env.DB.prepare(
-    `SELECT COUNT(*) AS runs, ROUND(COALESCE(SUM(seconds), 0) / 3600.0, 1) AS hours,
-            COUNT(DISTINCT install) AS players, COUNT(DISTINCT map) AS maps FROM runs`
-  ).first();
   return json({ classes, ...totals });
 }
 
 // ---------------------------------------------------------------- helpers
 
-function json(data, status = 200, anySite = true) {
-  const headers = { "content-type": "application/json; charset=utf-8" };
+function jsonHeaders(anySite = true) {
+  const headers = { "content-type": "application/json; charset=utf-8", "x-content-type-options": "nosniff" };
   if (anySite) headers["access-control-allow-origin"] = "*";      // the numbers are public
-  return new Response(JSON.stringify(data), { status, headers });
+  return headers;
 }
 
-/** An answer kept for a minute, under a key made from the question itself, so extra bits
- * in the address can't skip the cache and use up the database. (Not when testing locally.) */
-async function cached(url, ctx, key, make) {
-  if (url.hostname === "localhost" || url.hostname === "127.0.0.1") return make();
-  const cache = caches.default;
+function json(data, status = 200, anySite = true) {
+  return new Response(JSON.stringify(data), { status, headers: jsonHeaders(anySite) });
+}
+
+/**
+ * An answer kept for a while, so the database isn't asked again for every visitor: first in
+ * Cloudflare's cache where the visitor is (a minute at most), then in the database itself,
+ * shared by every Cloudflare location, so each answer is worked out at most once every
+ * `seconds` however many people visit, wherever they are. The key is made from the question
+ * itself, so extra bits in the address can't skip the cache. (Not when testing locally,
+ * unless CACHE_LOCALLY is set.)
+ */
+async function cached(url, env, ctx, key, seconds, make) {
+  if (!env.CACHE_LOCALLY && (url.hostname === "localhost" || url.hostname === "127.0.0.1")) return make();
+  const edge = caches.default;
   const id = new Request(`${url.origin}/__cache/${encodeURIComponent(key)}`);
-  const hit = await cache.match(id);
+  const hit = await edge.match(id);
   if (hit) return hit;
-  const response = await make();
-  if (response.status === 200) {
-    response.headers.set("cache-control", `public, max-age=${CACHE_SECONDS}`);
-    ctx.waitUntil(cache.put(id, response.clone()));
+  const now = Date.now();
+  const kept = await env.DB.prepare("SELECT body, at FROM answers WHERE key = ?1").bind(key).first();
+  let body = kept && now - kept.at < seconds * 1000 ? kept.body : null;
+  if (body === null) {
+    const fresh = await make();
+    if (fresh.status !== 200) return fresh;
+    body = await fresh.text();
+    ctx.waitUntil(env.DB.prepare("INSERT OR REPLACE INTO answers (key, body, at) VALUES (?1, ?2, ?3)")
+      .bind(key, body, now).run());
   }
+  const response = new Response(body, { headers: {
+    ...jsonHeaders(), "cache-control": `public, max-age=${Math.min(EDGE_SECONDS, seconds)}` } });
+  ctx.waitUntil(edge.put(id, response.clone()));
   return response;
 }

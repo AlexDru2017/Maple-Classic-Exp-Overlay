@@ -1,6 +1,10 @@
--- One row per shared 1-hour run. Nothing that identifies a player: "install" is a random
--- id made by the tracker, and ip_hash is a hash of the IP address that changes every day
--- (only used to limit how much one connection can send).
+-- The stats site's database. Safe to run again on the live database (wrangler d1 execute
+-- classicexp --remote --file schema.sql): it only adds what's missing, and brings the small
+-- summary tables at the end back in line with the runs.
+
+-- One row per shared 15-minute run (1-hour runs from 0.9.3). Nothing that identifies a
+-- player: "install" is a random id made by the overlay, and ip_hash is a code made from the
+-- internet address that changes every day (only used to limit how much one connection sends).
 CREATE TABLE IF NOT EXISTS runs (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   received      TEXT    NOT NULL,          -- when the server got it (UTC)
@@ -22,6 +26,42 @@ CREATE TABLE IF NOT EXISTS runs (
   version       TEXT,
   UNIQUE (install, started)
 );
-CREATE INDEX IF NOT EXISTS runs_by_group   ON runs (job, party, level_start);
-CREATE INDEX IF NOT EXISTS runs_by_install ON runs (install, started);
-CREATE INDEX IF NOT EXISTS runs_by_ip      ON runs (ip_hash, received_day);
+CREATE INDEX IF NOT EXISTS runs_by_group    ON runs (job, party, level_start);
+CREATE INDEX IF NOT EXISTS runs_by_install  ON runs (install, started);
+CREATE INDEX IF NOT EXISTS runs_by_ip       ON runs (ip_hash, received_day);
+CREATE INDEX IF NOT EXISTS runs_by_received ON runs (received, started);
+CREATE INDEX IF NOT EXISTS runs_by_map      ON runs (map, level_start);
+
+-- Small summary tables, kept up to date as runs come in, so the site never has to read
+-- every run (the free plan allows so many rows read a day): which players have shared each
+-- map, which players play each job and how many runs, and the totals.
+CREATE TABLE IF NOT EXISTS map_players (
+  map     TEXT NOT NULL,
+  install TEXT NOT NULL,
+  PRIMARY KEY (map, install)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS job_players (
+  job     TEXT    NOT NULL,
+  install TEXT    NOT NULL,
+  runs    INTEGER NOT NULL,
+  PRIMARY KEY (job, install)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS totals (
+  id      INTEGER PRIMARY KEY CHECK (id = 1),
+  runs    INTEGER NOT NULL,
+  seconds REAL    NOT NULL
+);
+
+-- Answers the site worked out recently, shared by every Cloudflare location, so each one is
+-- worked out at most once every few minutes however many people visit.
+CREATE TABLE IF NOT EXISTS answers (
+  key  TEXT    PRIMARY KEY,
+  body TEXT    NOT NULL,
+  at   INTEGER NOT NULL                     -- when, in milliseconds since 1970
+) WITHOUT ROWID;
+
+-- Bring the summary tables in line with the runs (does nothing on an empty database).
+INSERT OR IGNORE INTO map_players (map, install) SELECT DISTINCT map, install FROM runs;
+INSERT OR REPLACE INTO job_players (job, install, runs) SELECT job, install, COUNT(*) FROM runs GROUP BY job, install;
+INSERT OR REPLACE INTO totals (id, runs, seconds) SELECT 1, COUNT(*), COALESCE(SUM(seconds), 0) FROM runs;
+DELETE FROM answers;

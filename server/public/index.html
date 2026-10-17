@@ -18,6 +18,14 @@
 <meta name="theme-color" content="#ffcc33">
 <link rel="canonical" href="https://maple-classic-exp-overlay.pages.dev/">
 <link rel="icon" href="/favicon.png">
+<script>
+  // The hero fades in once the page's script runs (never if motion is turned down, and
+  // never left hidden: the class goes after 3 seconds whatever happens).
+  if (!matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    document.documentElement.classList.add("anim");
+    setTimeout(() => document.documentElement.classList.remove("anim"), 3000);
+  }
+</script>
 <script type="application/ld+json">
 {"@context": "https://schema.org", "@type": "SoftwareApplication",
  "name": "Maple Classic Exp Overlay", "alternateName": ["MapleStory Classic EXP tracker", "Maple Classic EXP overlay"],
@@ -45,6 +53,26 @@
   h1, h2, h3 { font-family: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif; line-height: 1.15; margin: 0;
     text-wrap: balance; }
   .wrap { max-width: 1100px; margin: 0 auto; padding: 0 20px; }
+
+  /* ---- the bar above it all: the latest runs shared, one at a time */
+  .news { background: #0d0e11; border-bottom: 1px solid var(--line); font-size: 13.5px; overflow: hidden; }
+  .news .wrap { display: flex; align-items: center; gap: 14px; height: 38px; }
+  .live { display: inline-flex; align-items: center; gap: 8px; flex: none; color: var(--gold-soft); font-size: 12.5px;
+    font-weight: 600; white-space: nowrap; }
+  .live i { width: 7px; height: 7px; border-radius: 50%; background: #5fd38a; animation: pulse 2.2s ease-out infinite; }
+  @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(95, 211, 138, 0.55); } 75%, 100% { box-shadow: 0 0 0 7px rgba(95, 211, 138, 0); } }
+  .ticker { position: relative; flex: 1; min-width: 0; height: 100%; }
+  .ticker button { position: absolute; inset: 0; display: block; width: 100%; padding: 0; border: 0; background: none;
+    font: inherit; line-height: 38px; color: var(--dim); text-align: left; white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis; cursor: pointer; }
+  .ticker button b { color: var(--text); font-weight: 600; transition: color 0.2s; }
+  .ticker button .x { color: var(--gold); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .ticker button .ago { color: var(--faint); }
+  .ticker button:hover b.m, .ticker button:focus-visible b.m { color: var(--gold); }
+  .ticker button:focus-visible { outline: 2px solid rgba(255, 204, 51, 0.5); outline-offset: -2px; border-radius: 6px; }
+  .news .more { flex: none; font-size: 12.5px; color: var(--faint); white-space: nowrap; }
+  .ticker .n-short { display: none; }
+  @media (prefers-reduced-motion: reduce) { .live i { animation: none; } }
 
   /* ---- top bar */
   header.bar { position: sticky; top: 0; z-index: 10; background: rgba(19, 21, 25, 0.86); backdrop-filter: blur(10px);
@@ -121,24 +149,85 @@
   .section-head { margin-bottom: 22px; }
   .section-head h2 { font-size: 30px; }
   .section-head p { color: var(--dim); margin: 8px 0 0; max-width: 640px; }
-  .maps { display: grid; gap: 12px; }
-  .map { display: grid; grid-template-columns: 46px 1fr auto; gap: 18px; align-items: center; background: var(--card);
-    border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 20px; }
-  .map.best { border-color: rgba(255, 204, 51, 0.45); background: linear-gradient(90deg, rgba(255, 204, 51, 0.07), var(--card) 45%); }
-  .rank { width: 40px; height: 40px; border-radius: 10px; display: grid; place-items: center; font-weight: 700;
-    background: var(--card2); color: var(--dim); }
-  .map.best .rank { background: var(--gold); color: #17181c; }
-  .map h3 { font-size: 18px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-  .tag { font-size: 12px; font-weight: 600; color: #17181c; background: var(--gold-soft); padding: 2px 9px; border-radius: 999px; }
-  .meta { font-size: 13px; color: var(--dim); margin-top: 2px; }
-  .range { position: relative; height: 8px; border-radius: 4px; background: var(--card2); margin-top: 10px; max-width: 460px; }
-  .range i { position: absolute; top: 0; bottom: 0; left: 0; border-radius: 4px; background: linear-gradient(90deg, #8c7230, var(--gold)); }
-  .range u { position: absolute; top: -2px; bottom: -2px; border-radius: 4px; background: rgba(255, 204, 51, 0.22); }
-  .nums { text-align: right; }
-  .nums .exp { font-size: 26px; font-weight: 700; color: var(--gold); font-variant-numeric: tabular-nums; line-height: 1.1; }
-  .nums .exp small { font-size: 13px; font-weight: 500; color: var(--dim); margin-left: 4px; }
-  .nums .mesos { font-size: 14px; color: var(--dim); margin-top: 4px; font-variant-numeric: tabular-nums; }
   .note { background: var(--card); border: 1px dashed var(--line); border-radius: var(--radius); padding: 28px; text-align: center; color: var(--dim); }
+
+  /* ---- the chart: a row per map, all on one scale, with a dot for every player */
+  .chart-wrap { position: relative; --band: rgba(255, 204, 51, 0.15); --band-line: rgba(255, 204, 51, 0.34);
+    --dot: #e9dcb8; --out: #ff7a5c; }
+  .chart { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+  .chart-top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 20px; padding: 16px 22px 2px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 12.5px; color: var(--dim); }
+  .legend span { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
+  .legend i { flex: none; display: block; }
+  .lg-band { width: 22px; height: 10px; border-radius: 5px; background: var(--band); box-shadow: inset 0 0 0 1px var(--band-line); }
+  .lg-med { width: 3px; height: 14px; border-radius: 2px; background: var(--gold); }
+  .lg-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dot); }
+  .lg-out { width: 8px; height: 8px; border-radius: 50%; box-shadow: inset 0 0 0 1.5px var(--out); }
+  .chart-top small { font-size: 12.5px; color: var(--faint); }
+  .row, .axis { display: grid; grid-template-columns: 32px minmax(150px, 230px) minmax(0, 1fr) 118px; gap: 0 22px;
+    align-items: center; padding: 0 22px; }
+  .axis { height: 38px; }
+  .axis .scale { grid-column: 3; position: relative; height: 100%; }
+  .axis b { position: absolute; bottom: 7px; transform: translateX(-50%); font-size: 11.5px; font-weight: 500;
+    color: var(--faint); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .row { position: relative; padding-top: 15px; padding-bottom: 15px; border-top: 1px solid var(--line); transition: background 0.25s; }
+  .row:hover { background: rgba(255, 255, 255, 0.018); }
+  .rank { width: 32px; height: 32px; border-radius: 9px; display: grid; place-items: center; font-weight: 700; font-size: 14px;
+    background: var(--card2); color: var(--dim); }
+  .row.best .rank { background: var(--gold); color: #17181c; }
+  .row h3 { font-size: 16.5px; font-weight: 600; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .tag { font-size: 11.5px; font-weight: 600; color: #17181c; background: var(--gold-soft); padding: 1px 8px; border-radius: 999px; }
+  .meta { font-size: 13px; color: var(--dim); margin-top: 2px; }
+  .chip { display: inline-block; font-size: 11.5px; font-weight: 600; padding: 1px 8px; border-radius: 999px; margin-top: 6px; }
+  .chip.steady { color: #93d9ab; background: rgba(110, 200, 140, 0.1); box-shadow: inset 0 0 0 1px rgba(110, 200, 140, 0.26); }
+  .chip.varies { color: #ffb27a; background: rgba(255, 138, 61, 0.1); box-shadow: inset 0 0 0 1px rgba(255, 138, 61, 0.28); }
+  .chip.wait { color: var(--dim); background: var(--card2); box-shadow: inset 0 0 0 1px var(--line); }
+  .track { position: relative; height: 46px; touch-action: pan-y; cursor: crosshair; }
+  .track::before { content: ""; position: absolute; inset: -6px -14px; }     /* easier to point at the edges */
+  .track .grid { position: absolute; top: 4px; bottom: 4px; width: 1px; background: rgba(255, 255, 255, 0.045); }
+  .track .base { position: absolute; left: 0; right: 0; top: calc(50% - 0.5px); height: 1px; background: var(--line); }
+  .band { position: absolute; top: calc(50% - 8px); height: 16px; border-radius: 8px; background: var(--band);
+    box-shadow: inset 0 0 0 1px var(--band-line); transition: background 0.2s; }
+  .band.on { background: rgba(255, 204, 51, 0.26); }
+  .med { position: absolute; top: calc(50% - 14px); width: 3px; height: 28px; margin-left: -1.5px; border-radius: 2px;
+    background: var(--gold); box-shadow: 0 0 14px rgba(255, 204, 51, 0.5); transition: box-shadow 0.2s; }
+  .med.on { box-shadow: 0 0 20px rgba(255, 204, 51, 0.95); }
+  .dot { position: absolute; z-index: 1; width: 8px; height: 8px; margin: -4px 0 0 -4px; top: calc(50% + var(--y, 0px));
+    border-radius: 50%; background: var(--dot); box-shadow: 0 0 0 1.5px var(--card); transition: transform 0.2s, background 0.2s; }
+  .dot.out { background: var(--card); box-shadow: inset 0 0 0 1.5px var(--out); }
+  .dot.on { z-index: 2; transform: scale(1.7); background: var(--gold); }
+  .dot.out.on { background: var(--card); }
+  .edge { position: absolute; top: calc(50% - 25px); font-size: 11px; color: var(--out); white-space: nowrap; }
+  .nums { text-align: right; }
+  .nums .exp { font-size: 24px; font-weight: 700; color: var(--gold); font-variant-numeric: tabular-nums; line-height: 1.1; white-space: nowrap; }
+  .nums .exp small { font-size: 12px; font-weight: 500; color: var(--dim); margin-left: 4px; }
+  .nums .mesos { font-size: 13px; color: var(--dim); margin-top: 4px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .early-head { padding: 20px 22px 12px; border-top: 1px solid var(--line); background: rgba(0, 0, 0, 0.12); }
+  .early-head b { display: block; font-size: 15px; color: var(--text); }
+  .early-head span { font-size: 13px; color: var(--dim); }
+  .row.early { background: rgba(0, 0, 0, 0.12); }
+  .row.early:hover { background: rgba(0, 0, 0, 0.06); }
+  .row.early .rank { visibility: hidden; }
+  .row.early h3 { color: #c9c6bf; }
+  .row.early .dot:not(.out) { background: #8d929b; }
+  .row.early .dot.on:not(.out) { background: var(--text); }
+  .row.early .med { width: 2px; margin-left: -1px; background: var(--dim); box-shadow: none; }
+  .row.early .nums .exp { color: #c9c6bf; font-size: 20px; }
+  .chart-foot { padding: 14px 22px; border-top: 1px solid var(--line); font-size: 13px; color: var(--faint); }
+  .tip { position: absolute; z-index: 5; left: 0; top: 0; transform: translate(-50%, -100%); pointer-events: none;
+    background: #0e0f12; border: 1px solid #3a3f49; border-radius: 10px; padding: 8px 12px; min-width: 150px; max-width: 260px;
+    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5); opacity: 0; transition: opacity 0.15s, left 0.18s ease-out, top 0.18s ease-out; }
+  .tip.show { opacity: 1; }
+  .tip.jump { transition: opacity 0.15s; }
+  .tip b { display: block; font-size: 14px; color: var(--text); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .tip span { display: block; font-size: 12.5px; color: var(--dim); line-height: 1.4; margin-top: 2px; }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0);
+    white-space: nowrap; border: 0; }
+
+  /* ---- a little motion (only when it runs: see the script at the end) */
+  .hero h1 .ln { display: block; overflow: hidden; padding-bottom: 0.06em; margin-bottom: -0.06em; }
+  .hero h1 .ln > span { display: block; }
+  .anim .hero .eyebrow, .anim .hero h1 .ln > span, .anim .hero p.sub, .anim .counts, .anim .finder { opacity: 0; }
   .note h3 { color: var(--text); font-size: 20px; margin-bottom: 6px; }
   .note .more { display: inline-block; margin-top: 12px; font-weight: 600; }
 
@@ -193,6 +282,20 @@
     .rules { grid-template-columns: 1fr 1fr; }
     .bar nav a:not(.get) { display: none; }
   }
+  @media (max-width: 720px) {
+    .row { grid-template-columns: 28px minmax(0, 1fr) auto; grid-template-areas: "rank info nums" "track track track";
+      gap: 8px 12px; padding: 14px 16px 8px; }
+    .row .rank { grid-area: rank; align-self: start; width: 28px; height: 28px; font-size: 13px; }
+    .row .info { grid-area: info; }
+    .row .nums { grid-area: nums; align-self: start; }
+    .row .track { grid-area: track; }
+    .axis { grid-template-columns: minmax(0, 1fr); padding: 0 16px; height: 32px; }
+    .axis .scale { grid-column: 1; }
+    .chart-top, .early-head, .chart-foot { padding-left: 16px; padding-right: 16px; }
+    .nums .exp { font-size: 20px; }
+    .row.early .nums .exp { font-size: 17px; }
+    .wide-only { display: none; }
+  }
   @media (max-width: 560px) {
     .hero { padding-top: 40px; }
     .wrap { padding: 0 16px; }
@@ -202,12 +305,13 @@
     .bar .get { padding: 6px 12px; font-size: 14px; }
     .bar .get .long { display: none; }
     .bar .get .short { display: inline; }
+    .news .more, .ticker .p, .ticker .says, .ticker .n-full, .live .word { display: none; }
+    .ticker .n-short { display: inline; }
+    .news { font-size: 13px; }
+    .news .wrap { gap: 10px; }
     .classes { grid-template-columns: 1fr 1fr; }
     .rules { grid-template-columns: 1fr; }
     .tracker .cta-row .btn { width: 100%; justify-content: center; }
-    .map { grid-template-columns: 34px 1fr; padding: 14px; gap: 12px; }
-    .rank { width: 32px; height: 32px; }
-    .nums { grid-column: 2; text-align: left; }
     section { padding: 48px 0; }
   }
   @media (max-width: 359px) {
@@ -216,6 +320,14 @@
 </style>
 </head>
 <body>
+
+<div class="news" id="news" role="region" aria-label="The latest runs players shared">
+  <div class="wrap">
+    <span class="live"><i aria-hidden="true"></i><span class="word">Latest runs</span></span>
+    <div class="ticker" id="ticker"><button type="button" tabindex="-1">Loading...</button></div>
+    <span class="more" id="news-more"></span>
+  </div>
+</div>
 
 <header class="bar">
   <div class="wrap">
@@ -233,7 +345,7 @@
   <div class="wrap">
     <div>
       <span class="eyebrow">A community project · MapleStory Classic World</span>
-      <h1>Find the best place<br>to <em>farm</em>.</h1>
+      <h1><span class="ln"><span>Find the best place</span></span><span class="ln"><span>to <em>farm</em>.</span></span></h1>
       <p class="sub">Real EXP/hr and mesos/hr for every map, for your class and level, solo or in a party. Every number is real farming, shared by players using the free <a href="#overlay">Maple Classic Exp Overlay</a>.</p>
       <div class="counts" id="counts">
         <div class="count"><b id="c-hours">–</b><span>hours shared</span></div>
@@ -274,7 +386,7 @@
 <section class="results" id="results-section">
   <div class="wrap">
     <div class="section-head"><h2 id="results-title">Best maps</h2><p id="results-sub"></p></div>
-    <div id="results" class="maps"></div>
+    <div id="results" class="chart-wrap"></div>
   </div>
 </section>
 
@@ -345,7 +457,7 @@
       <div class="rule"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>
         <h3>Outliers left out</h3><p>Runs under half or over double what others get on that map are dropped.</p></div>
       <div class="rule"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="9" r="3"/><circle cx="16" cy="9" r="3"/><path d="M2 20c0-3 2.7-5 6-5s6 2 6 5m0-5c3.3 0 8 2 8 5"/></svg>
-        <h3>3 players or more</h3><p>A map only shows once at least 3 different players have farmed it.</p></div>
+        <h3>3 players or more</h3><p>A map is only ranked once 3 different players have farmed it. Before that, it's shown greyed out as early data.</p></div>
     </div>
   </div>
 </section>
@@ -354,15 +466,17 @@
   <div class="wrap"><div style="max-width:820px">
     <div class="section-head"><h2>Questions</h2></div>
     <details><summary>What gets shared?</summary>
-      <p>Only 15-minute runs of non-stop farming, and only if you said yes in the overlay: the map, when you farmed it, your level, job and party size, the EXP and mesos you got, and a random ID for your copy of the overlay. Never your character's name. You can stop sharing any time in the overlay's settings.</p></details>
+      <p>Only 15-minute runs of non-stop farming, and only if you said yes in the overlay: the map, when you farmed it, your level, job and party size, the EXP and mesos you got, and a random ID for your copy of the overlay. Never your character's name. You can stop sharing any time in the overlay's settings. The newest runs also show in the bar at the very top (level, job, map, party and EXP/hr, rounded), with nothing about who shared them.</p></details>
     <details><summary>Why is Path greyed out?</summary>
       <p>Under Lv 30 you're still 1st job, and everyone plays the same until they pick their 2nd job, so you see what every player of your class gets around your level. Path opens at Lv 30. From then on, each path only counts its own jobs: Shadower is Bandits, Chief Bandits and Shadowers, for example.</p></details>
     <details><summary>Is the overlay safe?</summary>
       <p>It only looks at your screen, like a screen recorder. It never touches the game's files or memory and never presses keys or clicks for you. It's open source, so anyone can check. It isn't made by or affiliated with Nexon, so like any third-party tool, you use it at your own risk.</p></details>
     <details><summary>Does it cost anything?</summary>
       <p>No. The overlay and this site are free, made by a player for the community.</p></details>
+    <details><summary>How do I read the chart?</summary>
+      <p>Each row is a map, and every row uses the same scale, so further right means more EXP/hr. Each dot is one player: their typical run on that map, however much they've played it. The gold line is the typical EXP/hr there (half of players get more, half less), and the shaded bar is what the middle half of players get. A short bar means most players get about the same; a long one means gear, skills and how busy the map is make a big difference. Hollow red rings are runs left out of the numbers for being under half or over double what others get, like an AFK player or a leech. Point at anything (or tap it) for the exact numbers.</p></details>
     <details><summary>Why isn't my map or class here yet?</summary>
-      <p>A map shows up once 3 different players around your level (within 5 levels), on the same path, and solo or in a party like you, have shared a run there. The more people share, the faster it fills in. You can help by sharing yours!</p></details>
+      <p>A map is ranked once 3 different players around your level (within 5 levels), on the same path, and solo or in a party like you, have shared a run there. Until then, it's listed under Early data, greyed out, so you can see what's come in so far. The more people share, the faster it fills in. You can help by sharing yours!</p></details>
     <details><summary>Found a problem?</summary>
       <p>Use <b>Report a bug</b> in the overlay's settings, or open an issue on <a href="https://github.com/beanguri/Maple-Classic-Exp-Overlay/issues">GitHub</a>.</p></details>
   </div></div>
@@ -383,173 +497,9 @@
   </div>
 </footer>
 
-<script>
-  const $ = (id) => document.getElementById(id);
-  const fmt = (n) => (n === null || n === undefined) ? "?" : Math.round(n).toLocaleString("en-US");
-  const short = (n) => n >= 1e6 ? (n / 1e6).toFixed(2) + "M" : n >= 1e5 ? Math.round(n / 1e3) + "k"
-    : n >= 1e4 ? (n / 1e3).toFixed(1) + "k" : fmt(n);
-  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-  const LEVEL_WINDOW = 5;  // "around your level", as the server counts it
-  const partyName = (p) => p === "solo" ? "solo" : "in a party";
-  const soloOrParty = (p) => p === "solo" || p === "1" ? "solo"          // also party sizes, from the
-    : p === "party" || /^[2-6]$/.test(p ?? "") ? "party" : null;         // overlay's link or older visits
-  const plural = (n, word) => `${fmt(n)} ${word}${n === 1 ? "" : "s"}`;
-  const mostPlayers = (list) => [...list].sort((a, b) => b.players - a.players)[0];
-  const JOIN = `<a class="more" href="#overlay">Get the overlay and share your farming</a>`;
-  // Hours of farming: "45 min", "2.5 hours", "1,204 hours"
-  const hours = (h) => {
-    if (h < 1) return `${Math.max(1, Math.round(h * 60))} min`;
-    const n = h < 10 ? Math.round(h * 10) / 10 : Math.round(h);
-    return `${n.toLocaleString("en-US")} hour${n === 1 ? "" : "s"}`;
-  };
-  const SECOND_JOB = 30;   // the level paths start at (2nd job); before it, a class is one group
-  let classes = [];        // from the server: Warrior, Magician, Archer, Thief, each with its paths
-  let wantPath = null;     // the path last picked, kept while the level is under SECOND_JOB
-
-  function saved() {
-    try { return JSON.parse(localStorage.getItem("ask") || "null") || {}; } catch { return {}; }
-  }
-
-  /** What the overlay's "Best maps" link asks for, e.g. ?level=32&party=1&job=Bandit (party: its size). */
-  function fromLink() {
-    const q = new URLSearchParams(location.search), job = q.get("job"), out = {};
-    const level = parseInt(q.get("level"), 10);
-    if (level >= 1 && level <= 250) out.level = level;
-    if (soloOrParty(q.get("party"))) out.party = soloOrParty(q.get("party"));
-    for (const c of classes) {
-      if (c.name === job || (job === "Bowman" && c.name === "Archer")) out.job = c.name;
-      for (const p of c.paths) {
-        const at = p.steps.indexOf(job);
-        if (at >= 0) out.job = c.name;
-        if (at > 0) out.path = p.name;      // a 2nd to 4th job: that path (a 1st job is on all of them)
-      }
-    }
-    return out;
-  }
-
-  function chosenClass() {
-    const picked = document.querySelector('input[name="job"]:checked');
-    return classes.find((c) => c.name === picked?.value);
-  }
-
-  const firstJob = () => parseInt($("level").value, 10) < SECOND_JOB;
-
-  /** Picks a class (the one asked for, or the one most players are on) and fills in its paths. */
-  function pickClass(name) {
-    const c = classes.find((c) => c.name === name) || mostPlayers(classes);
-    document.querySelector(`input[name="job"][value="${esc(c.name)}"]`).checked = true;
-    fillPaths();
-  }
-
-  /** The class's paths, or, under Lv 30, its 1st job with Path greyed out. */
-  function fillPaths() {
-    const c = chosenClass();
-    if (!c) return;
-    const off = firstJob();
-    $("path").disabled = off;
-    $("path-field").classList.toggle("off", off);
-    if (off) {
-      $("path").innerHTML = `<option>${esc(c.paths[0].steps[0])} (1st job)</option>`;
-      $("path-hint").textContent = `Paths start at Lv ${SECOND_JOB}, with your 2nd job.`;
-      return;
-    }
-    $("path").innerHTML = c.paths.map((p) => `<option value="${esc(p.name)}">${esc(p.name)}${p.players
-      ? ` · ${plural(p.players, "player")}` : ""}</option>`).join("");
-    $("path").value = c.paths.some((p) => p.name === wantPath) ? wantPath : mostPlayers(c.paths).name;
-    showSteps();
-  }
-
-  function showSteps() {         // e.g. "Rogue → Bandit → Chief Bandit → Shadower"
-    const p = chosenClass()?.paths.find((p) => p.name === $("path").value);
-    $("path-hint").textContent = p ? p.steps.map((job) => job.replace(/ \(.*\)$/, "")).join(" → ") : "";
-  }
-
-  async function loadOptions() {
-    let data = null;
-    try { data = await (await fetch("/api/options", { cache: "no-store" })).json(); } catch {}
-    if (!data?.classes?.length) {
-      $("results").innerHTML = `<div class="note">Couldn't load the maps. Try again in a moment.</div>`;
-      return;
-    }
-    classes = data.classes;
-    $("counts").style.display = data.runs ? "" : "none";       // no big zeros on day one
-    $("c-hours").textContent = (data.hours || 0) < 10 ? String(Math.round((data.hours || 0) * 10) / 10) : fmt(data.hours);
-    $("c-players").textContent = fmt(data.players || 0);
-    $("c-maps").textContent = fmt(data.maps || 0);
-    $("classes").innerHTML = classes.map((c) => `<label><input type="radio" name="job" value="${esc(c.name)}">` +
-      `<span>${esc(c.name)}</span></label>`).join("");
-    const link = fromLink(), linked = Object.keys(link).length > 0;
-    const last = { ...saved(), ...link };
-    if (linked) history.replaceState(null, "", location.pathname);    // a reload shows the form as left
-    if (last.level) $("level").value = last.level;
-    if (soloOrParty(String(last.party))) $("party").value = soloOrParty(String(last.party));
-    wantPath = last.path || null;
-    pickClass(last.job);
-    if (!data.runs) {
-      $("results-title").textContent = "The community map is just getting started";
-      $("results-sub").textContent = "";
-      $("results").innerHTML = `<div class="note"><h3>Be one of the first to share!</h3>
-        Every 15 minutes farmed by a player using the overlay shows up here. As more players join in,
-        this fills with the best maps for every class, path and level.<br>${JOIN}</div>`;
-      if (linked) $("results-section").scrollIntoView({ block: "start" });
-      return;
-    }
-    ask(null, linked);
-  }
-
-  async function ask(event, scroll = !!event) {
-    if (event) event.preventDefault();
-    const c = chosenClass();
-    if (!c) return;
-    const level = Math.max(1, Math.min(250, parseInt($("level").value, 10) || 30)), party = $("party").value;
-    $("level").value = level;
-    fillPaths();
-    const job = c.name, path = level < SECOND_JOB ? null : $("path").value;
-    try { localStorage.setItem("ask", JSON.stringify({ job, path: path || wantPath, level, party })); } catch {}
-    const where = `${path ? `${esc(path)} (${esc(job)})` : esc(job)}, Lv ${Math.max(1, level - LEVEL_WINDOW)}–${level + LEVEL_WINDOW}, ${partyName(party)}`;
-    $("results-title").textContent = "Best maps";
-    $("results-sub").innerHTML = `For <b>${where}</b>.`;
-    $("results").innerHTML = `<div class="note">Looking...</div>`;
-    if (scroll) $("results-section").scrollIntoView({ behavior: "smooth", block: "start" });
-    let data;
-    try {
-      const query = new URLSearchParams({ class: job, ...(path ? { path } : {}), level, party });
-      data = await (await fetch(`/api/stats?${query}`, { cache: "no-store" })).json();
-      if (data.error) throw new Error(data.error);
-    } catch {
-      $("results").innerHTML = `<div class="note">Couldn't load the maps. Try again in a moment.</div>`;
-      return;
-    }
-    if (!data.maps.length) {
-      const close = data.maps_waiting_for_players;
-      $("results").innerHTML = `<div class="note"><h3>No maps here yet</h3>
-        A map shows up once ${data.min_players} players have shared a run there.
-        ${close ? `${plural(close, "map")} ${close === 1 ? "is" : "are"} almost there.` : ""}
-        Help fill it in by sharing your own farming.<br>${JOIN}</div>`;
-      return;
-    }
-    const top = Math.max(...data.maps.map((m) => m.exp_hr_high || m.exp_hr));
-    $("results").innerHTML = data.maps.map((m, i) => {
-      const pct = (n) => Math.max(0, Math.min(100, (n / top) * 100));
-      const lo = pct(m.exp_hr_low), hi = pct(m.exp_hr_high);
-      return `<div class="map${i === 0 ? " best" : ""}">
-        <div class="rank">${i + 1}</div>
-        <div><h3>${esc(m.map)}${i === 0 ? '<span class="tag">Best pick</span>' : ""}</h3>
-          <div class="meta">From ${plural(m.players, "player")} · ${hours(m.hours)} of farming ·
-            typically ${short(m.exp_hr_low)}–${short(m.exp_hr_high)} EXP/hr</div>
-          <div class="range" title="EXP/hr compared to the best map (the lighter band is the typical range)">
-            <u style="left:${lo}%;width:${Math.max(1, hi - lo)}%"></u><i style="width:${pct(m.exp_hr)}%"></i></div></div>
-        <div class="nums"><div class="exp">${fmt(m.exp_hr)}<small>EXP/hr</small></div>
-          <div class="mesos">${m.mesos_hr === null ? "mesos/hr not known" : `${fmt(m.mesos_hr)} mesos/hr`}</div></div>
-      </div>`;
-    }).join("");
-  }
-
-  $("classes").addEventListener("change", (e) => pickClass(e.target.value));
-  $("path").addEventListener("change", () => { wantPath = $("path").value; showSteps(); });
-  $("level").addEventListener("input", () => { if (!isNaN(parseInt($("level").value, 10))) fillPaths(); });
-  $("ask").addEventListener("submit", ask);
-  loadOptions();
-</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"
+  integrity="sha512-7eHRwcbYkK4d9g/6tD/mhkf++eoTHwpNM9woBxtPUBWm67zeAfFC+HrdoE2GanKeocly/VxeLvIqwvCdk7qScg=="
+  crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+<script src="/app.js"></script>
 </body>
 </html>
