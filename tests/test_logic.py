@@ -174,20 +174,32 @@ cfg = m.load_config()
 check(f"hotkeys from the settings file: kept if valid or off, else the default ({cfg['hotkeys']})",
       cfg["hotkeys"] == {"start": "Ctrl+Q", "reset": "", "skip": "Shift+3", "compact": "Shift+4"})
 check("a size or compact setting edited by hand can't break the window", cfg["ui_scale"] == 100 and cfg["compact"] is False)
-pressed = []
-hk = m.Hotkeys(pressed.append)
-hk.in_front = lambda: True                                   # as if the game were in front
-hk.set({"start": "Ctrl+Alt+Shift+F12"})
-import time as _time
-_time.sleep(0.8)                                             # it registers within a quarter second
-ctypes_ok = m._user32.PostThreadMessageW(hk.thread_id, 0x0312, 1, 0)   # as if the keys were pressed
-_time.sleep(0.3)
-check(f"a hotkey press reaches the overlay ({pressed}, problems: {hk.problems})", ctypes_ok and pressed == ["start"])
-hk.in_front = lambda: False                                  # another program in front: off
-_time.sleep(0.6)
-m._user32.PostThreadMessageW(hk.thread_id, 0x0312, 1, 0)
-_time.sleep(0.3)
-check("hotkeys are off while another program is in front", pressed == ["start"])
+check(f"the right OS backend is made for {sys.platform} ({type(m.PLATFORM).__name__})",
+      type(m.PLATFORM).__name__ == {"win32": "WindowsPlatform"}.get(sys.platform))
+try:
+    m.create_platform("plan9")
+    unsupported = False
+except RuntimeError:
+    unsupported = True
+check("an OS the overlay doesn't run on is turned down clearly", unsupported)
+check("the game isn't found when it isn't running (no crash looking)",
+      m.PLATFORM.find_game_window() is None or m.PLATFORM.client_rect(m.PLATFORM.find_game_window()) is not None)
+if sys.platform == "win32":
+    from platforms import windows
+    pressed = []
+    hk = m.PLATFORM.create_hotkeys(pressed.append)
+    hk.in_front = lambda: True                               # as if the game were in front
+    hk.set({"start": "Ctrl+Alt+Shift+F12"})
+    import time as _time
+    _time.sleep(0.8)                                         # it registers within a quarter second
+    ctypes_ok = windows._user32.PostThreadMessageW(hk.thread_id, 0x0312, 1, 0)   # as if the keys were pressed
+    _time.sleep(0.3)
+    check(f"a hotkey press reaches the overlay ({pressed}, problems: {hk.problems})", ctypes_ok and pressed == ["start"])
+    hk.in_front = lambda: False                              # another program in front: off
+    _time.sleep(0.6)
+    windows._user32.PostThreadMessageW(hk.thread_id, 0x0312, 1, 0)
+    _time.sleep(0.3)
+    check("hotkeys are off while another program is in front", pressed == ["start"])
 check("release notes are shown as plain text, keeping names like exp_log.txt",
       m._plain_text("**New**\n- **Time** in `exp_log.txt`, see [README](https://x)") == "New\n• Time in exp_log.txt, see README")
 check("how long each line was measured over", [m.fmt_logged(s) for s in (300.4, 1500, 3900)] == ["5 min", "25 min", "1 h 05 min"]
