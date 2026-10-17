@@ -201,6 +201,7 @@ Free code signing from [SignPath Foundation](https://signpath.org) is planned, s
 
 - Committers and reviewers: [beanguri](https://github.com/beanguri)
 - Approvers: [beanguri](https://github.com/beanguri)
+- Privacy policy: see [Privacy](#privacy) above. In short: your log and notes stay on your PC, and the overlay only sends anything to another system if you turn on sharing your finished 15-minute runs (off until you say yes, and you can turn it off any time in Settings), or to check GitHub for a newer version (can be turned off too).
 
 ## Updates
 
