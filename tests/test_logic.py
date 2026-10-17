@@ -175,7 +175,7 @@ check(f"hotkeys from the settings file: kept if valid or off, else the default (
       cfg["hotkeys"] == {"start": "Ctrl+Q", "reset": "", "skip": "Shift+3", "compact": "Shift+4"})
 check("a size or compact setting edited by hand can't break the window", cfg["ui_scale"] == 100 and cfg["compact"] is False)
 check(f"the right OS backend is made for {sys.platform} ({type(m.PLATFORM).__name__})",
-      type(m.PLATFORM).__name__ == {"win32": "WindowsPlatform"}.get(sys.platform))
+      type(m.PLATFORM).__name__ == {"win32": "WindowsPlatform", "darwin": "MacPlatform"}.get(sys.platform))
 try:
     m.create_platform("plan9")
     unsupported = False
@@ -200,6 +200,16 @@ if sys.platform == "win32":
     windows._user32.PostThreadMessageW(hk.thread_id, 0x0312, 1, 0)
     _time.sleep(0.3)
     check("hotkeys are off while another program is in front", pressed == ["start"])
+if sys.platform == "darwin":
+    from platforms import macos
+    W = macos.MacWindow
+    check("on macOS the game is told apart from browsers and the overlay itself",
+          macos.is_game(W(1, 10, "wine64-preloader", "MapleStory", 0, (0, 0, 800, 600), True), 99)
+          and macos.is_game(W(2, 11, "MapleStory.exe", "", 0, (0, 0, 800, 600), True), 99)
+          and not macos.is_game(W(3, 12, "Google Chrome", "MapleStory Classic guide", 0, (0, 0, 800, 600), True), 99)
+          and not macos.is_game(W(4, 99, "Python", "MapleStory", 0, (0, 0, 800, 600), True), 99)
+          and not macos.is_game(W(5, 13, "wine64-preloader", "MapleStory", 25, (0, 0, 800, 600), True), 99))
+    check("macOS windows can be listed", isinstance(macos.window_list(), list))
 check("release notes are shown as plain text, keeping names like exp_log.txt",
       m._plain_text("**New**\n- **Time** in `exp_log.txt`, see [README](https://x)") == "New\n• Time in exp_log.txt, see README")
 check("how long each line was measured over", [m.fmt_logged(s) for s in (300.4, 1500, 3900)] == ["5 min", "25 min", "1 h 05 min"]
