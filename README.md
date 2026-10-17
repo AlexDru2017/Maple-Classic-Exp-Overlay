@@ -94,6 +94,8 @@ Click **>** at the top right of the overlay to open the log. It's the table on t
   - **Copy line**, to paste it into Discord or anywhere else
   - **Rename map**, if it read the name wrong (it remembers the fix for next time)
   - **Delete entry**
+- **Playing in a party?** A map's party sizes on one day share one line (e.g. **4–5ppl ▸**), with the numbers over all that time. Click it to see a line for each party size.
+- **Notes:** click a line and write whatever you like about it in the box under the log: the party, the pots, the loot, why you left. A ✎ in the **Note** column marks the lines that have one. Notes save as you type, and **they only ever stay on your PC**, in your log file: they are never shared with the best-maps site (only the finished 15-minute runs are, and they have no notes). Renaming a map, updating the overlay, or farming more on a line keeps its note. Deleting a line deletes its note too, and asks you first.
 - **Can't see a whole column?** Drag the lines between the column titles to make columns narrower or wider. While the log is open, you can also make the window bigger by dragging its edge. It remembers both.
 
 ## Settings (⚙)
@@ -165,7 +167,8 @@ Every version is tested against thousands of misread numbers, and against real s
 
 ## Privacy
 
-- **Your log and settings stay on your PC**, in `%APPDATA%\MapleEXP`.
+- **Your log, your notes and your settings stay on your PC**, in `%APPDATA%\MapleEXP` (`~/Library/Application Support/MapleEXP` on a Mac). Notes are part of your log file: they are never sent anywhere, and the overlay's tests check that.
+- **A copy of your log is kept for each day** (the last 7 days), in the `backups` folder next to it, so if anything ever goes wrong there's a recent one. To go back to one, close the overlay and copy it over `exp_log.json`.
 - **The update check** (on by default, can be turned off in ⚙) asks GitHub for the newest version and what's new in it. Nothing about you is sent.
 - **15-minute runs are only shared if you said yes.** Each one is the map, when you farmed it, your level, class and party size, the EXP and mesos you got, the overlay's version, and a random ID made by your copy of the overlay. Never your character's name, your game account or your Windows user name.
 - **The website keeps** those runs. To limit spam it also keeps a scrambled code made from your internet address with a secret key, which changes every day and can't be turned back into the address. Your address itself isn't kept.
@@ -207,7 +210,7 @@ This is a beta, and I'm still adding features and fixing things.
 
 **When a new version is out,** the overlay tells you when you start it, and shows what's new. Click **Get the update** to open the download page, or **Not now** / **Skip this version** if you'd rather wait.
 
-**To update:** download the newest zip from the [download page](../../releases/latest) and use it instead of the old folder. Your log and settings stay, because they're saved separately (⚙ → **Open data folder** shows where).
+**To update:** download the newest zip from the [download page](../../releases/latest) and use it instead of the old folder. Your log, notes and settings stay, because they're saved separately (⚙ → **Open data folder** shows where).
 
 **To remove it:** delete its folder. To also delete your log and settings, delete the folder that **Open data folder** opens.
 

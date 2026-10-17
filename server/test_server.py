@@ -213,6 +213,15 @@ check("an old-style job name isn't a class", call("/api/stats?class=Bandit&level
 check("a path from another class is refused", call("/api/stats?class=Thief&path=Bishop&level=32").get("status") == 400)
 check("odd names don't break it", call("/api/stats?class=constructor&level=32").get("status") == 400
       and call("/api/stats?class=Thief&path=__proto__&level=32").get("status") == 400)
+# a note field that arrives anyway (the overlay never sends one) is ignored, and never shown anywhere
+sneaky = install()
+call("/api/runs", {"install": sneaky, "runs": [dict(run(f"{day(28)}T10:00", 52000, job="Hunter"), note="PRIVATE-NOTE-TEXT",
+                                                    notes=["PRIVATE-NOTE-TEXT"])]})
+seen = json.dumps([call("/api/latest"), call("/api/options?fresh=1"),
+                   call("/api/stats?class=Archer&path=Bowmaster&level=32&party=1"),
+                   call("/api/stats?class=Thief&path=Shadower&level=32&party=1")])
+check("a note sent with a run is dropped (not stored or shown anywhere)", "PRIVATE-NOTE-TEXT" not in seen)
+
 # the bar at the top of the site: the latest runs shared
 call("/api/runs", {"install": install(), "runs": [run(f"{day(29)}T10:00", 52000, map_name="Visit my-site.com", job="Hunter")]})
 call("/api/runs", {"install": install(), "runs": [run(f"{day(29)}T10:00", 400000, job="Hunter")]})        # a faker on Wild Boar

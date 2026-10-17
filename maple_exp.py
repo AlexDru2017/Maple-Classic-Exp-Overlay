@@ -51,7 +51,7 @@ from platforms import create_platform, hotkey_text, parse_hotkey
 PLATFORM = create_platform()
 PLATFORM.setup_process()
 
-VERSION = "0.9.6-beta"
+VERSION = "0.9.7-beta"
 WINDOW_TITLE = "Maple Classic Exp Overlay"    # the version is shown in Settings
 OLD_TITLES = ("Maple EXP/hr",)               # what versions before 0.9.3 were called
 
@@ -1931,9 +1931,30 @@ def format_entry(e):
     return " - ".join(parts)
 
 
+def clean_note(text):
+    """A note as it's kept: plain text with \\n line breaks, no control characters or lone
+    surrogates (neither can be shown or saved), without blanks at either end."""
+    if not isinstance(text, str):
+        return ""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = "".join(ch for ch in text if ch in "\n\t" or (ch >= " " and ch != "\x7f"))
+    return text.encode("utf-8", "ignore").decode("utf-8").strip()
+
+
+def note_of(e):
+    """The personal note on a log line, ready to show ('' if none, or if what's there isn't text)."""
+    n = e.get("note")
+    return clean_note(n) if isinstance(n, str) else ""
+
+
+def notes_of(entries):
+    """One note for log lines shown as one (a map's party sizes): each different note once."""
+    return "\n\n".join(dict.fromkeys(n for n in map(note_of, entries) if n))
+
+
 def log_row(e, part=False):
-    """The log table's cells for an entry: Date, Map, Lv, Class, Party, Time, EXP/hr, Mesos/hr.
-    `part`: one party size under a merged party line, so just its own numbers."""
+    """The log table's cells for an entry: Date, Map, Lv, Class, Party, Time, EXP/hr, Mesos/hr,
+    Note. `part`: one party size under a merged party line, so just its own numbers."""
     d = date.fromisoformat(e["date"])
     day = f"{MONTHS[d.month - 1]} {d.day}" + ("" if d.year == date.today().year else f" '{d.year % 100:02d}")
     level = e["level"] if e["level"] is not None else "?"
@@ -1942,9 +1963,10 @@ def log_row(e, part=False):
     exp = f"{e['exp'] / e['seconds'] * 3600:,.0f}" if e["seconds"] else "—"
     ms = e.get("mesos_seconds", 0)
     mesos = f"{e['mesos'] / ms * 3600:,.0f}" if ms else ("?" if tracked else "")
+    note = NOTE_MARK if note_of(e) else ""
     if part:
-        return "", "", "", "", party, fmt_logged(e["seconds"], short=True), exp, mesos
-    return day, e["map"], level, e.get("class") or "", party, fmt_logged(e["seconds"], short=True), exp, mesos
+        return "", "", "", "", party, fmt_logged(e["seconds"], short=True), exp, mesos, note
+    return day, e["map"], level, e.get("class") or "", party, fmt_logged(e["seconds"], short=True), exp, mesos, note
 
 
 def party_groups(entries):
@@ -1972,6 +1994,7 @@ def group_row(entries, is_open=False):
     row = list(log_row(merged(entries)))
     sizes = [e["party"] for e in entries]
     row[4] = f"{sizes[0]}–{sizes[-1]}ppl {'▾' if is_open else '▸'}"
+    row[8] = NOTE_MARK if notes_of(entries) else ""
     return tuple(row)
 
 
@@ -1981,6 +2004,11 @@ def _numbers(name):
 
 
 LOG_VERSION = 3     # 2: mesos/hr from the mesos tracker; 3: class, seals and runs
+                    # (a line's personal "note" needed no new version: it's one more optional field,
+                    # which older versions leave alone and keep)
+NOTE_MAX = 4000     # characters in a note on a log line
+NOTE_MARK = "\u270e"            # shown in the log's Note column for lines that have one
+BACKUPS_KEPT = 7    # days of log backups kept (backups/ in the data folder)
 RUN_SECONDS = 900   # a run: 15 minutes of non-stop farming on one map, one party size
                     # (until 0.9.4 a run was an hour; those are still shared as they are)
 
@@ -2305,6 +2333,9 @@ class AutoLog:
                     m["updated"] = max(m.get("updated", 0), e.get("updated", 0))
                     if "seal" in m or "seal" in e:
                         self._reseal(m, ok)
+                    both = notes_of([m, e])                   # a note on either line is kept
+                    if both and both != m.get("note"):
+                        m["note"] = both
                 else:
                     merged[self.key(e)] = e
             self.entries = list(merged.values())
@@ -2314,6 +2345,30 @@ class AutoLog:
             self.block_map = new_name
         if old != "Unknown map" and self.run and self.run.get("map") == old:
             self.run["map"] = new_name
+
+    def set_note(self, entries, text):
+        """Writes a personal note on these log lines (the same one on each: e.g. a map's party
+        sizes shown as one line). An empty note takes it off. Returns True if anything changed.
+
+        A note only ever lives in this log file, on this PC. It isn't one of the sealed fields,
+        so a line stays as trusted as it was, and it's never part of a run: what's shared with
+        the stats site is made from the runs alone (see post_runs)."""
+        keys = {self.key(e) for e in entries}
+        text = clean_note(text)[:NOTE_MAX]
+
+        def apply():
+            changed = False
+            for e in self.entries:
+                if self.key(e) not in keys:
+                    continue
+                if text and e.get("note") != text:
+                    e["note"], changed = text, True
+                elif not text and "note" in e:
+                    del e["note"]
+                    changed = True
+            return changed
+
+        return self._change(apply)
 
     def delete(self, entry):
         key = self.key(entry)
@@ -2326,7 +2381,30 @@ class AutoLog:
     def newest_first(self):
         return sorted(self.entries, key=lambda e: e.get("updated") or 0, reverse=True)
 
+    def _back_up(self):
+        """Before the first save of each day: a copy of the log as it was, in backups/ (the last
+        few days are kept), so that whatever goes wrong, a recent copy of it all, notes
+        included, is still there. To go back to one, close the overlay and copy it over
+        exp_log.json."""
+        try:
+            if not self.path.exists():
+                return
+            folder = self.path.parent / "backups"
+            copy = folder / f"exp_log-{date.today().isoformat()}.json"
+            if copy.exists():
+                return
+            data = json.loads(self.path.read_text(encoding="utf-8"))     # (a damaged file has its own copy)
+            if not (data.get("entries") or data.get("runs")):
+                return                                                  # nothing in it worth a backup
+            folder.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(self.path, copy)
+            for old in sorted(folder.glob("exp_log-*.json"))[:-BACKUPS_KEPT]:
+                old.unlink()
+        except Exception as e:
+            log_error("backing up the EXP log", e)
+
     def save(self):
+        self._back_up()
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_suffix(".tmp")
@@ -2433,7 +2511,7 @@ FONTS = {"small": ("Segoe UI", 8, "normal", False), "text": ("Segoe UI", 9, "nor
          "next": ("Segoe UI Semibold", 11, "normal", False), "title": ("Segoe UI Semibold", 12, "normal", False),
          "big": ("Segoe UI", 24, "bold", False)}
 LIST_BG, LIST_BG2, LIST_PART = "#23262d", "#282b33", "#1c1e23"
-LOG_HINT = "Right-click a line to copy, rename or delete it."
+LOG_HINT = "Click a line to write a note about it. Right-click to copy, rename or delete it."
 
 
 class App:
@@ -2614,7 +2692,8 @@ class App:
                    ("lv", "Lv", "99", "center"), ("class", "Class", "Crossbowman", "w"),
                    ("party", "Party", "2–6ppl ▸", "center"),
                    ("time", "Time", "12h 30m", "center"),
-                   ("exp", "EXP/hr", "888,888", "e"), ("mesos", "Mesos/hr", "888,888", "e"))
+                   ("exp", "EXP/hr", "888,888", "e"), ("mesos", "Mesos/hr", "888,888", "e"),
+                   ("note", "Note", NOTE_MARK, "center"))
         # Saved widths are in points, so they look the same on screens with different scaling
         # (older versions saved pixels: those are used as they are, once).
         saved = {k: round(v * self._px_per_pt) for k, v in (self.cfg.get("log_columns_pt") or {}).items()
@@ -2637,10 +2716,31 @@ class App:
         scroll = tk.Scrollbar(p, orient="vertical", command=tree.yview)
         scroll.grid(row=2, column=1, sticky="ns")
         tree.configure(yscrollcommand=scroll.set)
+        # Notes: a place for the player's own notes on the selected line. They're only ever kept
+        # in the log file on this PC (never shared), and saved as they're typed.
+        self._note_key = self._note_entries = self._note_job = None
+        self._note_dirty, self._note_label = False, ""
+        nb = tk.Frame(p, bg=BG)
+        nb.grid(row=3, column=0, columnspan=2, sticky="we", pady=(8, 0))
+        nb.columnconfigure(0, weight=1)
+        self.note_title = tk.Label(nb, text="", bg=BG, fg=DIM, font=head, anchor="w", justify="left")
+        self.note_title.grid(row=0, column=0, sticky="we")
+        self.note_text = tk.Text(nb, height=3, wrap="word", undo=True, maxundo=100, bg=LIST_BG, fg=FG,
+                                 insertbackground=FG, relief="flat", font=cell, padx=8, pady=6,
+                                 highlightthickness=1, highlightbackground="#3a3f49", highlightcolor=ACCENT)
+        self.note_text.grid(row=1, column=0, sticky="we", pady=(3, 0))
+        self.note_text.bind("<<Modified>>", self._note_modified)
+        self.note_text.bind("<FocusIn>", lambda e: self.hotkeys.pause(True))      # typing "!" isn't Shift+1
+        self.note_text.bind("<FocusOut>", lambda e: (self.hotkeys.pause(False), self._note_flush()))
+        self._note_show(None)
         self.log_hint = tk.StringVar(value=LOG_HINT)
         hint = tk.Label(p, textvariable=self.log_hint, bg=BG, fg=DIM, font=head, justify="left", anchor="w")
-        hint.grid(row=3, column=0, columnspan=2, sticky="we", pady=(4, 0))
-        p.bind("<Configure>", lambda e: hint.config(wraplength=max(120, e.width - 8)))
+        hint.grid(row=4, column=0, columnspan=2, sticky="we", pady=(4, 0))
+
+        def fit(e):
+            hint.config(wraplength=max(120, e.width - 8))
+            self.note_title.config(wraplength=max(120, e.width - 8))
+        p.bind("<Configure>", fit)
         p.columnconfigure(0, weight=1)
         p.rowconfigure(2, weight=1)
         tree.bind("<Button-3>", self._log_menu)
@@ -2653,6 +2753,7 @@ class App:
 
     def toggle_log(self, remember=True):
         if self.log_open:
+            self._note_flush()
             self._remember_log_size()                   # before it closes
         self.log_open = not self.log_open
         root = self.root
@@ -2748,6 +2849,8 @@ class App:
         """The log, newest first. A map's party sizes on a day share a row (smallest to biggest
         party, all their time together); clicking it shows a row for each party size."""
         tree = self.log_tree
+        self._note_flush()                                  # a note being typed is saved first,
+        keep, rows = self._selected_key(), {}               # and the same line stays selected
         tree.delete(*tree.get_children())
         self.shown, self.groups = {}, {}
         edited = lambda e: ("edited",) if self.autolog.edited(e) else ()
@@ -2756,15 +2859,114 @@ class App:
             if len(entries) == 1:
                 iid = tree.insert("", "end", values=log_row(entries[0]), tags=stripe + edited(entries[0]))
                 self.shown[iid] = entries[0]
+                rows[self._line_key(entries[0])] = iid
                 continue
             is_open = key in self.open_groups
             all_edited = all(self.autolog.edited(e) for e in entries)
             iid = tree.insert("", "end", values=group_row(entries, is_open), open=is_open,
                               tags=stripe + (("edited",) if all_edited else ()))
             self.groups[iid] = (key, entries)
+            rows[key] = iid
             for e in entries:
-                self.shown[tree.insert(iid, "end", values=log_row(e, part=True), tags=("part",) + edited(e))] = e
+                child = tree.insert(iid, "end", values=log_row(e, part=True), tags=("part",) + edited(e))
+                self.shown[child] = e
+                rows[self._line_key(e)] = child
+        if keep in rows:
+            tree.selection_set(rows[keep])
+        else:
+            self._note_show(None)                           # that line is gone (renamed, merged, deleted)
         self.log_hint.set(LOG_HINT if self.shown else "No logs yet. Press Start and gain EXP for 5 minutes.")
+
+    # ---- personal notes on log lines
+    @staticmethod
+    def _line_key(e):
+        return ("line",) + AutoLog.key(e)
+
+    def _selected_entries(self):
+        """(a key for the selected row, the log lines it stands for), or (None, None)."""
+        sel = self.log_tree.selection()
+        if not sel:
+            return None, None
+        if sel[0] in self.groups:
+            return self.groups[sel[0]]
+        e = self.shown.get(sel[0])
+        return (self._line_key(e), [e]) if e else (None, None)
+
+    def _selected_key(self):
+        return self._selected_entries()[0]
+
+    def _note_show(self, key, entries=None):
+        """Puts the selected line's note in the box (or empties it, with nothing selected)."""
+        t = self.note_text
+        if key is not None and key == self._note_key:
+            self._note_entries = entries                    # the same line (the log was refilled): leave
+            return                                          # the text, and whoever is typing in it, alone
+        self._note_key, self._note_entries, self._note_dirty = key, entries, False
+        t.config(state="normal")
+        t.delete("1.0", "end")
+        if key is None:
+            self._note_label = ""
+            self.note_title.config(text="Notes: click a line to write one (they stay on this PC).")
+            t.config(state="disabled", bg=LIST_PART)
+        else:
+            first, party = entries[0], entries[0].get("party")
+            where = f"{log_row(first)[0]} \u00b7 {first['map']}" + (f" \u00b7 {party}ppl" if len(entries) == 1 and party and party > 1 else "")
+            self._note_label = f"Note for {where} (kept on this PC only)"
+            self.note_title.config(text=self._note_label)
+            t.insert("1.0", notes_of(entries))
+            t.config(bg=LIST_BG)
+        t.edit_reset()
+        t.edit_modified(False)
+
+    def _note_modified(self, _event=None):
+        t = self.note_text
+        if not t.edit_modified():
+            return
+        t.edit_modified(False)
+        if self._note_key is None:
+            return
+        over = len(t.get("1.0", "end-1c")) - NOTE_MAX
+        if over > 0:                                        # too long: what doesn't fit isn't kept
+            t.delete(f"end-1c-{over}c", "end-1c")
+            self.note_title.config(text=f"A note can be {NOTE_MAX:,} characters at most.")
+        else:
+            self.note_title.config(text=self._note_label)
+        self._note_dirty = True
+        if self._note_job:
+            self.root.after_cancel(self._note_job)
+        self._note_job = self.root.after(900, self._note_flush)
+
+    def _note_flush(self):
+        """Saves the note being typed, if it was changed (as you type, when you click another
+        line or leave the box, and when the log or the overlay closes)."""
+        if self._note_job:
+            self.root.after_cancel(self._note_job)
+            self._note_job = None
+        if not self._note_dirty or self._note_key is None:
+            return
+        self._note_dirty = False
+        text = clean_note(self.note_text.get("1.0", "end-1c"))[:NOTE_MAX]
+        try:
+            self.autolog.set_note(self._note_entries, text)
+        except Exception as e:
+            log_error("saving a note", e)
+            self._note_dirty = True
+            self.note_title.config(text="Couldn't save the note (see errors.log).")
+            return
+        for e in self._note_entries:                        # the rows on screen
+            if text:
+                e["note"] = text
+            else:
+                e.pop("note", None)
+        self._note_marks()
+        self.note_title.config(text=f"{self._note_label} \u00b7 saved")
+
+    def _note_marks(self):
+        """The Note column: a mark on the lines that have a note."""
+        for iid, (_, entries) in self.groups.items():
+            self.log_tree.set(iid, "note", NOTE_MARK if notes_of(entries) else "")
+        for iid, e in self.shown.items():
+            self.log_tree.set(iid, "note", NOTE_MARK if note_of(e) else "")
 
     def _log_click(self, event):
         """Clicking a merged party row opens it (a row per party size) or closes it."""
@@ -2785,6 +2987,9 @@ class App:
             self._log_selected(None)
 
     def _log_selected(self, _event):
+        self._note_flush()                                  # the line left is saved first
+        key, entries = self._selected_entries()
+        self._note_show(key, entries)
         sel = self.log_tree.selection()
         group = self.groups.get(sel[0]) if sel else None
         if group:
@@ -2832,8 +3037,13 @@ class App:
         self.log_hint.set("Copied: " + text if len(entries) == 1 else f"Copied {len(entries)} lines, one per party size.")
 
     def _rename(self, entries):
-        name = simpledialog.askstring("Rename map", "Map name:", initialvalue=entries[0]["map"],
-                                      parent=self.root)
+        self._note_flush()
+        self.hotkeys.pause(True)                            # typing "!" in a name isn't Shift+1
+        try:
+            name = simpledialog.askstring("Rename map", "Map name:", initialvalue=entries[0]["map"],
+                                          parent=self.root)
+        finally:
+            self.hotkeys.pause(False)
         if name and name.strip():
             for entry in entries:             # (one rename covers them all, unless it's "Unknown map")
                 if entry["map"] != name.strip():
@@ -2845,8 +3055,11 @@ class App:
             self._fill_log()
 
     def _delete(self, entries):
+        self._note_flush()
         lines = "\n".join(format_entry(e) for e in entries)
         question = f"Delete these {len(entries)} log entries?" if len(entries) > 1 else "Delete this log entry?"
+        if any(note_of(e) for e in entries):
+            question += " The note" + ("s" if len(entries) > 1 else "") + " on " + ("them" if len(entries) > 1 else "it") + " will be deleted too."
         if messagebox.askyesno("Delete entry", f"{question}\n\n{lines}", parent=self.root):
             for entry in entries:
                 self.autolog.delete(entry)
@@ -3636,6 +3849,7 @@ class App:
             self.cfg["log_size"] = size if size != natural else None
 
     def close(self):
+        self._note_flush()
         self.stop_evt.set()
         try:
             self._remember_log_size()

@@ -79,7 +79,7 @@ e = {"date": "2026-10-11", "map": "The Land of Wild Boar II", "level": 29, "part
      "exp": 51862, "seconds": 3600, "mesos": 32713, "mesos_seconds": 3600}
 check("full line format", m.format_entry(e) ==
       "Oct 11th, 2026 - The Land of Wild Boar II - Lv 29 - 4ppl party - 51,862exp/hr - 32,713mesos/hr - 1 h 00 min")
-check("table row format", m.log_row(e)[1:] == ("The Land of Wild Boar II", 29, "", "4ppl", "1h 00m", "51,862", "32,713"))
+check("table row format", m.log_row(e)[1:] == ("The Land of Wild Boar II", 29, "", "4ppl", "1h 00m", "51,862", "32,713", ""))
 check("the class is in the line", m.format_entry({**e, "class": "Bandit"}).startswith(
     "Oct 11th, 2026 - The Land of Wild Boar II - Lv 29 - Bandit - 4ppl party"))
 
@@ -95,10 +95,10 @@ check(f"a map's party sizes share a row, smallest first; solo, other levels and 
       shape == [[4, 5], [1], [3], [3], ["-"]])
 row = m.group_row(groups[0][1])
 check(f"the shared row is over all their time ({row[5:]})",
-      row[4:] == ("4–5ppl ▸", "1h 30m", f"{(51862 + 50000) / 5400 * 3600:,.0f}", f"{(32713 + 10000) / 5400 * 3600:,.0f}"))
+      row[4:] == ("4–5ppl ▸", "1h 30m", f"{(51862 + 50000) / 5400 * 3600:,.0f}", f"{(32713 + 10000) / 5400 * 3600:,.0f}", ""))
 check("open, its arrow points down", m.group_row(groups[0][1], True)[4] == "4–5ppl ▾")
 check("a party size under it shows just its own numbers",
-      m.log_row(five, part=True) == ("", "", "", "", "5ppl", "30m", "100,000", "20,000"))
+      m.log_row(five, part=True) == ("", "", "", "", "5ppl", "30m", "100,000", "20,000", ""))
 check("the lines themselves aren't changed", five["exp"] == 50000 and e["seconds"] == 3600)
 
 # ---- class, seals and 15-minute runs
@@ -231,7 +231,7 @@ for old in sorted((Path(__file__).parent / "upgrade").iterdir()):
     shutil.copy2(old / "exp_log.json", folder / "log.json")
     before = json.loads((old / "exp_log.json").read_text(encoding="utf-8"))
     log = m.AutoLog(15, folder / "log.json", folder / "log.txt")
-    same = [all(a.get(k) == b.get(k) for k in ("date", "map", "level", "party", "exp", "seconds", "mesos", "class"))
+    same = [all(a.get(k) == b.get(k) for k in ("date", "map", "level", "party", "exp", "seconds", "mesos", "class", "note"))
             for a, b in zip(before["entries"], log.entries)]
     m.CONFIG_PATH = old / "config.json"
     cfg = m.load_config()
@@ -241,6 +241,183 @@ for old in sorted((Path(__file__).parent / "upgrade").iterdir()):
           and len(log.runs) == len(before.get("runs", [])) and all(log.sealed(r, m._SEALED_RUN) for r in log.runs)
           and log.aliases == before["aliases"] and not list(folder.glob("exp_log.damaged-*"))
           and (cfg["pos"], cfg["transparency"], cfg["gap_seconds"], cfg["topmost"]) == ([5300, 800], 30, 20, False))
+    # ...and carrying on farming afterwards, with the old lines (and any notes on them) left as they were
+    farm(log, 0, 310, map_name="Updated Map", level=41)
+    after = json.loads((folder / "log.json").read_text(encoding="utf-8"))["entries"]
+    old_notes = {(e["date"], e["map"], e["level"], e.get("party")): e.get("note") for e in before["entries"]}
+    now_notes = {(e["date"], e["map"], e["level"], e.get("party")): e.get("note") for e in after}
+    check(f"farming after updating from {old.name} keeps every old line and note",
+          all(k in now_notes and now_notes[k] == v for k, v in old_notes.items())
+          and len(after) == len(before["entries"]) + 1)
+check("the newest upgrade fixture has notes in it (so keeping them is really tested)",
+      sum("note" in e for e in json.loads((Path(__file__).parent / "upgrade" / "0.9.7-beta" / "exp_log.json")
+                                          .read_text(encoding="utf-8"))["entries"]) >= 3)
+
+
+# ---- personal notes on log lines: only on this PC, and never lost
+import inspect
+log, path = new_log()
+t, _ = farm(log, 0, 310, party=4)
+e1 = log.entries[0]
+updated = e1["updated"]
+check("a line starts with no note", m.note_of(e1) == "" and m.log_row(e1)[8] == "" and "note" not in e1)
+check("writing a note says it changed", log.set_note([e1], "  Great with a Priest.\r\nBring 200 pots \n") is True)
+on_disk = json.loads(path.read_text(encoding="utf-8"))["entries"][0]
+check(f"the note is in the log file, tidied up ({on_disk.get('note')!r})", on_disk.get("note") == "Great with a Priest.\nBring 200 pots")
+e1 = log.entries[0]
+check("the line is as trusted as before (a note isn't one of the sealed fields)", log.sealed(e1) and not log.edited(e1))
+check("a note doesn't move the line in the log (it isn't an update to it)", e1["updated"] == updated)
+check("the Note column shows a mark", m.log_row(e1)[8] == m.NOTE_MARK)
+check("notes aren't in the log's copy or in copied lines",
+      "Priest" not in path.with_suffix(".txt").read_text(encoding="utf-8") and "Priest" not in m.format_entry(e1)
+      and "Priest" not in log.text_path.read_text(encoding="utf-8"))
+log2 = m.AutoLog(15, path, path.with_suffix(".txt"))
+check("the note is there after closing and opening the overlay", m.note_of(log2.entries[0]) == "Great with a Priest.\nBring 200 pots")
+check("writing the same note again changes nothing", log2.set_note(log2.entries, "Great with a Priest.\nBring 200 pots") is False)
+t, _ = farm(log2, t + 60, 310, party=4)
+check("more farming on that line keeps its note (and adds to the line)",
+      len(log2.entries) == 1 and m.note_of(log2.entries[0]) == "Great with a Priest.\nBring 200 pots"
+      and log2.entries[0]["exp"] > e1["exp"] and log2.sealed(log2.entries[0]))
+check("an empty note takes it off", log2.set_note(log2.entries, "  \n ") is True and "note" not in log2.entries[0])
+check("a note can't be longer than the limit", (log2.set_note(log2.entries, "x" * 9000), len(log2.entries[0]["note"]))[1] == m.NOTE_MAX)
+check("control characters and lone surrogates are taken out of notes, new lines and tabs kept",
+      m.clean_note("a\x00b\x07c\ud800d\r\ne\tf\x7f") == "abcd\ne\tf" and m.clean_note(None) == "" and m.clean_note(5) == "")
+
+# a map's party sizes shown as one line share one note
+log, path = new_log()
+t, _ = farm(log, 0, 310, party=4)
+t, _ = farm(log, t + 60, 310, party=5)
+four, five_ = sorted(log.entries, key=lambda e: e["party"])
+check("two party sizes get one note together", log.set_note([four, five_], "Pots: 60 red") is True
+      and [m.note_of(e) for e in log.entries] == ["Pots: 60 red"] * 2)
+check("a line's party sizes with different notes show each once; the same note shows once",
+      m.notes_of([{"note": "A"}, {"note": "B"}, {"note": "A"}, {}]) == "A\n\nB" and m.notes_of([{}, {"note": ""}]) == "")
+check("a mark on the shared line if any of its party sizes has a note",
+      m.group_row([{**four, "note": ""}, {**five_, "note": "Only on this one"}])[8] == m.NOTE_MARK
+      and m.group_row([{**four, "note": "Only on this one"}, {**five_}])[8] == m.NOTE_MARK)
+log.set_note([log.entries[0]], "")
+log.set_note([log.entries[1]], "")
+check("...and none when none do", m.group_row(log.entries)[8] == "")
+
+# another copy of the overlay (or an older one) can't erase a note
+a, path = new_log()
+farm(a, 0, 310, party=2)
+b = m.AutoLog(15, path, path.with_suffix(".txt"))               # a second copy, which doesn't know about the note
+a.set_note(a.entries, "Written in the first copy")
+farm(b, 5000, 310, party=3, map_name="Ant Tunnel I")
+kept = {e["party"]: m.note_of(e) for e in json.loads(path.read_text(encoding="utf-8"))["entries"]}
+check(f"a note written while another copy had the log open is kept ({kept})",
+      kept == {2: "Written in the first copy", 3: ""})
+
+# renaming a map so two lines become one keeps both notes
+log, path = new_log()
+t, _ = farm(log, 0, 310, map_name="Ant Tunnel I")
+t, _ = farm(log, t + 60, 310, map_name="Ant Tunel I")             # the same map, misread
+log.set_note([x for x in log.entries if x["map"] == "Ant Tunnel I"], "Mobs drop etc")
+log.set_note([x for x in log.entries if x["map"] == "Ant Tunel I"], "Crowded at night")
+log.rename([x for x in log.entries if x["map"] == "Ant Tunel I"][0], "Ant Tunnel I")
+check(f"renaming two lines into one keeps both notes ({[m.note_of(x) for x in log.entries]})",
+      len(log.entries) == 1 and m.note_of(log.entries[0]) == "Mobs drop etc\n\nCrowded at night"
+      and log.sealed(log.entries[0]))
+before = log.entries[0]
+t, _ = farm(log, t + 60, 310, map_name="Other Map")
+log.rename(log.entries[0], "Renamed Map") if log.entries[0]["map"] == "Other Map" else log.rename(log.entries[1], "Renamed Map")
+check("renaming a map keeps its note", any(m.note_of(x) == "Mobs drop etc\n\nCrowded at night" for x in log.entries))
+log.delete([x for x in log.entries if x["map"] == "Renamed Map"][0])
+check("deleting a line deletes its note, and only its note",
+      [m.note_of(x) for x in log.entries] == ["Mobs drop etc\n\nCrowded at night"])
+
+# a log edited by hand, or written by a future version, with odd notes: nothing crashes, nothing is thrown away
+folder = Path(tempfile.mkdtemp())
+odd = [123, ["a", "b"], None, "x" * 50000, "a\x00b\ud800", {"text": "later versions might"}, ""]
+lines = [{"date": "2026-10-1%d" % i, "map": "Map %d" % i, "level": 30, "party": 1, "exp": 5000, "seconds": 300,
+          "note": n} for i, n in enumerate(odd)]
+(folder / "log.json").write_text(json.dumps({"version": 3, "entries": lines}), encoding="utf-8")
+log = m.AutoLog(15, folder / "log.json", folder / "log.txt")
+shown = [(m.note_of(x), m.log_row(x)[8]) for x in log.entries]
+check("odd notes load, and can be shown", len(log.entries) == len(odd) and all(isinstance(n, str) and len(n) < 60000 for n, _ in shown)
+      and not list(folder.glob("exp_log.damaged-*")))
+log._change(lambda: None)
+t, _ = farm(log, 0, 310, map_name="Another Map")
+after = {x["map"]: x for x in json.loads((folder / "log.json").read_text(encoding="utf-8"))["entries"]}
+check("odd notes are left exactly as they were when the log is saved for another reason",
+      all("note" in after[f"Map {i}"] and after[f"Map {i}"]["note"] == n for i, n in enumerate(odd)))
+
+# what's shared with the stats site is never made from notes
+log, path = new_log()
+farm(log, 0, 910, party=3)                                        # more than a 15-minute run
+log.set_note(log.entries, "MY-PRIVATE-NOTE do not share")
+sent = []
+real_urlopen = m.urllib.request.urlopen
+
+
+class _Reply:                                                     # what the stats site would answer
+    def __init__(self, data):
+        self.data = json.dumps(data).encode()
+
+    def read(self, _=None):
+        return self.data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return False
+
+
+def capture(request, *a, **k):
+    sent.append((request.full_url, request.data))
+    return _Reply({"results": [{"started": r.get("started"), "ok": True} for r in log.runs]})
+
+
+m.urllib.request.urlopen = capture
+done = m.post_runs("0" * 16, log.unshared_runs())
+m.urllib.request.urlopen = real_urlopen
+body = sent[0][1].decode() if sent else ""
+fields = {k for r in json.loads(body)["runs"] for k in r} if body else set()
+check(f"what's sent to the stats site has the run and no note ({sorted(fields)})",
+      len(sent) == 1 and "MY-PRIVATE-NOTE" not in body and "note" not in fields and len(json.loads(body)["runs"]) >= 1)
+check("runs never carry a note, even with notes on the log lines",
+      all("note" not in r for r in log.runs) and "MY-PRIVATE-NOTE" not in json.dumps(log.runs))
+src = inspect.getsource(m)
+check("privacy guard: the overlay reaches the internet in exactly these places (a new one needs a look at what it sends)",
+      src.count("urlopen(") == 2 and src.count("webbrowser.open(") == 3 and "requests." not in src and "socket." not in src)
+check("what's sent never reads the log's lines, and the bug report never includes notes",
+      "entries" not in inspect.getsource(m.post_runs) and "note" not in inspect.getsource(m.post_runs).lower()
+      and "entries" not in inspect.getsource(m.check_for_update)
+      and not any(w in inspect.getsource(m.App._report_text) for w in ("note_of", "notes_of", '"note"', "autolog.entries")))
+runs = [dict(r, note="SNEAKY") for r in log.runs]
+m.urllib.request.urlopen = capture
+sent.clear()
+m.post_runs("0" * 16, runs)
+m.urllib.request.urlopen = real_urlopen
+check("even a run that somehow had a note field wouldn't send it", "SNEAKY" not in sent[0][1].decode())
+
+# a copy of the log is kept for each day, so a recent one is always there
+folder = Path(tempfile.mkdtemp())
+log = m.AutoLog(15, folder / "log.json", folder / "log.txt")
+t, _ = farm(log, 0, 310)
+check("the first save has nothing to back up yet", not (folder / "backups").exists())
+log.set_note(log.entries, "kept in the backup too")
+today = folder / "backups" / f"exp_log-{m.date.today().isoformat()}.json"
+check("the first save of a day keeps a copy of the log as it was", today.exists()
+      and json.loads(today.read_text(encoding="utf-8"))["entries"][0].get("note") is None)
+size = today.stat().st_size
+log.set_note(log.entries, "changed again")
+check("...only once a day", len(list((folder / "backups").glob("*.json"))) == 1 and today.stat().st_size == size)
+for d in range(1, 10):                                            # nine older days
+    (folder / "backups" / f"exp_log-2026-01-{d:02d}.json").write_text(json.dumps({"entries": [{"x": d}]}), encoding="utf-8")
+today.unlink()
+log.set_note(log.entries, "and again")
+kept = sorted(x.name for x in (folder / "backups").glob("*.json"))
+check(f"only the latest {m.BACKUPS_KEPT} days are kept ({len(kept)} files)",
+      len(kept) == m.BACKUPS_KEPT and kept[-1] == today.name and "exp_log-2026-01-01.json" not in kept)
+folder = Path(tempfile.mkdtemp())
+(folder / "log.json").write_text('{"entries": [{"date": "2026', encoding="utf-8")        # damaged
+log = m.AutoLog(15, folder / "log.json", folder / "log.txt")
+farm(log, 0, 310)
+check("a damaged log isn't taken for a backup (it has its own copy)",
+      not (folder / "backups").exists() and len(list(folder.glob("exp_log.damaged-*.json"))) == 1)
 
 # ---- damaged files
 folder = Path(tempfile.mkdtemp())
