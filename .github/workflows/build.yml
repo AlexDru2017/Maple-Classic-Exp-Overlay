@@ -1,11 +1,19 @@
-# Builds the Windows download on GitHub from this code, so the .exe can be code-signed:
-# SignPath Foundation only signs builds made here. Run it from the Actions tab (Build, then
-# "Run workflow"), or push a version tag. It publishes nothing: the zip is left on the run's
-# page as "download".
+# Builds the Windows download on GitHub from this code. Release downloads only ever come from
+# here (never from someone's own PC), so anyone can check where a download came from.
+#
+# - Pushing a version tag (e.g. v0.9.7-beta) builds it, signs the .exe once SignPath is set
+#   up, records a signed attestation (this workflow built this zip from this commit), and
+#   makes a DRAFT release with the zip and its SHA-256. A person reads it over and publishes
+#   it. A release that's already published is never changed from here.
+# - "Run workflow" (Actions tab) just builds, and leaves the zip on the run's page.
+#
+# Check a download:   gh attestation verify <the zip> --repo beanguri/Maple-Classic-Exp-Overlay
 #
 # Signing switches on once SignPath has accepted the project: add the secret
 # SIGNPATH_API_TOKEN and the variable SIGNPATH_ORGANIZATION_ID (Settings > Secrets and
 # variables > Actions). Until then that step is skipped and the build is unsigned.
+#
+# Actions are pinned to exact commits (a version tag can be moved; a commit can't).
 name: Build
 
 on:
@@ -13,18 +21,28 @@ on:
   push:
     tags: ["v*"]
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: windows-latest
+    permissions:
+      contents: write             # the draft release (version tags only)
+      id-token: write             # signing the attestation
+      attestations: write
+      artifact-metadata: write
     env:
       SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
         with:
           python-version: "3.10"
-      - name: Install the packages (the versions the releases are built with)
-        run: pip install mss==10.1.0 numpy==2.2.6 opencv-python-headless==4.12.0.88 pillow==11.3.0 pytesseract==0.3.13 pyinstaller==6.17.0
+      - name: Install the packages (exact files, each checked by its SHA-256)
+        run: python -m pip install --require-hashes -r requirements-build.txt
       - name: Install Tesseract OCR
         run: choco install tesseract --version 5.5.0.20241111 -y --no-progress
       - name: Tests
@@ -35,13 +53,13 @@ jobs:
         run: python build.py
       - name: Keep the unsigned build
         id: unsigned
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: unsigned
           path: build/dist/Maple Classic Exp Overlay
       - name: Sign the .exe (SignPath)
         if: env.SIGNPATH_API_TOKEN != ''
-        uses: signpath/github-action-submit-signing-request@v2
+        uses: signpath/github-action-submit-signing-request@c92b958760219087e01f8d67a1669ed57afe2627  # v2
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
           organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
@@ -53,8 +71,36 @@ jobs:
       - name: Zip the signed build
         if: env.SIGNPATH_API_TOKEN != ''
         run: python build.py zip signed
+      - name: SHA-256 of the download
+        shell: bash
+        run: |
+          cd release
+          sha256sum *.zip | tee SHA256SUMS.txt
+          { echo "### The download"; echo; echo '```'; cat SHA256SUMS.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - name: Record where the download came from (attestation)
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6  # v4.2.2
+        with:
+          subject-path: release/*.zip
       - name: Keep the download
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: download
-          path: release/*.zip
+          path: |
+            release/*.zip
+            release/SHA256SUMS.txt
+      - name: Draft the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          state=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null || echo none)
+          if [ "$state" = "none" ]; then
+            gh release create "$TAG" release/*.zip release/SHA256SUMS.txt --repo "$GITHUB_REPOSITORY" \
+              --draft --verify-tag --title "$TAG" --notes "Built on GitHub from $TAG. (Notes to come.)"
+          elif [ "$state" = "true" ]; then
+            gh release upload "$TAG" release/*.zip release/SHA256SUMS.txt --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            echo "::warning::$TAG is already published, so it's left as it is. The build is on this run's page."
+          fi

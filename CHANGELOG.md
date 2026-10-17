@@ -1,5 +1,23 @@
 # Changelog
 
+## Not released yet
+
+**New**
+- **One log line per party**: playing a map in a party, people join and leave, and each party size used to get its own line. Now a map's party sizes on a day share one line (e.g. "4–5ppl ▸"), with EXP/hr and mesos/hr over all of that time. Click it to see a line for each party size, to compare them. Solo play keeps its own line. Your log itself isn't changed, only how it's shown.
+
+**Safer**
+- Downloads are now built by GitHub from this code, never on a PC, from exact package files checked against their SHA-256. Each one gets an attestation anyone can check (`gh attestation verify`), and its SHA-256 is on the release page. See "Where the download comes from" in the README.
+- Built with Pillow 12.3, which fixes the problems published since 11.3. (The overlay never opens image files from elsewhere, so it wasn't affected, but now nothing is flagged.)
+- It never runs a `tesseract.exe` from the folder it happens to be started from, only its own or an installed one.
+
+**The best-maps website**
+- Security headers: browsers only run the site's own scripts, and other sites can't show it inside theirs.
+- Map names that are web addresses are turned down, and early data only shows map names at least 2 players have shared, so one person can't put a made-up name on the site.
+- Much lighter on its database (small summary tables, and answers shared between Cloudflare's locations), so it keeps working as more people use it.
+- Every player is a dot on a chart: each map's row shows what every player gets there, the typical EXP/hr, what the middle half of players get, and the runs left out as unusual. Point at (or tap) anything for the numbers.
+- Maps with fewer than 3 players are shown greyed out as early data, instead of "No maps here yet".
+- A bar at the top shows the latest runs players shared, one at a time; click one to see the best maps for that level, class and party. One run per player, only maps at least 2 players have shared, and nothing unusual, so made-up runs stay off the front page.
+
 ## 0.9.6-beta
 
 **New**

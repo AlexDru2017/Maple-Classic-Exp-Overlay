@@ -119,7 +119,7 @@ Click **>** at the top right of the overlay to open the log. It's the table on t
 - **It's built from 15-minute runs:** 15 minutes of non-stop farming on one map with the same party size. The log shows your progress ("15-min run: 7 of 15 min").
 - **Sharing is your choice.** The first time you start the overlay, it asks whether to share your runs. You can change it any time in ⚙.
 - **What's shared:** the map, your level, class and party size, the EXP and mesos you got, and a random ID for your copy of the overlay. Never your character's name.
-- **Keeping it honest:** the site uses the typical (median) run, counts each player once, leaves out runs far from what other players get there, and only shows a map once 3 different players have farmed it.
+- **Keeping it honest:** the site uses the typical (median) run, counts each player once, leaves out runs far from what other players get there, and only ranks a map once 3 different players have farmed it (before that, it's shown greyed out as early data). Every player's typical run is a dot on the chart, so anything odd is easy to spot.
 
 ## How accurate is it?
 
@@ -171,9 +171,28 @@ Every version is tested against thousands of misread numbers, and against real s
 - **The website keeps** those runs. To limit spam it also keeps a scrambled code made from your internet address with a secret key, which changes every day and can't be turned back into the address. Your address itself isn't kept.
 - **Bug reports** only go to GitHub if you click Submit there yourself.
 
-## Code signing policy
+## Where the download comes from
 
-Windows downloads can be built on GitHub straight from this code ([Build workflow](.github/workflows/build.yml)), so anyone can check that a download matches it. Free code signing from [SignPath Foundation](https://signpath.org) is planned, so Windows stops warning about new downloads.
+Downloads on the [Releases page](../../releases) are built by GitHub from the code in this repository ([Build workflow](.github/workflows/build.yml)), not on anyone's own PC. Each build:
+
+- installs exact package files, each checked against its SHA-256 ([requirements-build.txt](requirements-build.txt)),
+- runs all the tests,
+- records a signed **attestation**: which workflow built which file, from which commit,
+- puts the zip's **SHA-256** on the release page (`SHA256SUMS.txt`).
+
+**Check your download** with the free [GitHub CLI](https://cli.github.com):
+
+```
+gh attestation verify "the zip you downloaded.zip" --repo beanguri/Maple-Classic-Exp-Overlay
+```
+
+It tells you whether that exact file was built here, and from which commit. Or compare the file's SHA-256 with `SHA256SUMS.txt` on its release page (in PowerShell: `Get-FileHash` and the file name).
+
+v0.9.6 was built by GitHub from its tag before the package checks and attestations were added, so it has no attestation: its SHA-256 is on its release page, and the same file is on [its build's page](https://github.com/beanguri/Maple-Classic-Exp-Overlay/actions/runs/38631744258) until January 2027 (with a GitHub account). Versions before v0.9.6 were built on my PC.
+
+### Code signing policy
+
+Free code signing from [SignPath Foundation](https://signpath.org) is planned, so Windows stops warning about new downloads. Only builds made by the Build workflow from this repository are signed.
 
 - Committers and reviewers: [beanguri](https://github.com/beanguri)
 - Approvers: [beanguri](https://github.com/beanguri)
@@ -218,7 +237,9 @@ py -3 tests/test_logic.py
 py -3 tests/test_screen.py
 ```
 
-GitHub runs the logic tests on every push ([Tests workflow](.github/workflows/tests.yml)). The [Build workflow](.github/workflows/build.yml) builds the download on GitHub (Actions tab, **Build**, **Run workflow**), runs all the tests first, and signs the .exe once code signing is set up.
+To build with exactly the packages the releases use: `py -3 -m pip install --require-hashes -r requirements-build.txt`.
+
+GitHub runs the logic tests on every push ([Tests workflow](.github/workflows/tests.yml)). The [Build workflow](.github/workflows/build.yml) builds the download on GitHub (Actions tab, **Build**, **Run workflow**), runs all the tests first, and signs the .exe once code signing is set up. Pushing a version tag also attests the zip and drafts the release with it; releases are only ever made that way.
 
 **The stats site** is in `server/`: a Cloudflare Pages site with a D1 database (free tier). The page is `server/public/`, the API is `server/src/index.js`. `npm --prefix server install`, then `npm --prefix server run dev` runs it locally, `py -3 server/test_server.py http://localhost:8787` tests it, and `npm --prefix server run deploy` puts it online.
 
