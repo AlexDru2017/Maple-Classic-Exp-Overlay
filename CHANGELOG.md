@@ -6,7 +6,11 @@
 - **Notes on your log lines:** click a line and write a note about it in the box under the log. A ✎ in the new **Note** column marks lines that have one. Notes save as you type and **stay on your PC only**: they live in your log file, are never shared with the best-maps site, and the overlay's tests check that nothing the overlay sends can include them. Renaming a map (even when it merges two lines), farming more on a line, and updating keep your notes. Deleting a line asks first, and says its note goes too. Typing in the box doesn't trigger the hotkeys.
 - **A backup of your log each day** (the last 7, in a `backups` folder next to it), so a recent copy of your log and notes is always there.
 - **One log line per party**: playing a map in a party, people join and leave, and each party size used to get its own line. Now a map's party sizes on a day share one line (e.g. "4–5ppl ▸"), with EXP/hr and mesos/hr over all of that time. Click it to see a line for each party size, to compare them. Solo play keeps its own line. Your log itself isn't changed, only how it's shown.
-- **macOS** (running from source): works on a Mac with the game in CrossOver, Whisky, Parallels or a game stream. It finds the game window by itself, as on Windows. See "For developers" in the README. Hotkeys aren't available on macOS yet.
+- **macOS** (running from source; thanks to thanhphamvan): works on a Mac with the game in CrossOver, Whisky, Parallels or a game stream. It finds the game window by itself, as on Windows. See "For developers" in the README. Hotkeys aren't available on macOS yet.
+
+**Fixed**
+- Mesos: a small change across a digit boundary, like 9,980 to 10,020, is now counted instead of dropped (thanks to TaylorAdamCA).
+- Typing "!" in a note or a map name no longer triggers the Shift+1 hotkey.
 
 **Safer**
 - Downloads are now built by GitHub from this code, never on a PC, from exact package files checked against their SHA-256. Each one gets an attestation anyone can check (`gh attestation verify`), and its SHA-256 is on the release page and on the build's page (the same one in all three places). See "Where the download comes from" in the README.
