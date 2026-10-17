@@ -225,6 +225,10 @@ py -3 -m pip install -r requirements.txt
 run.bat
 ```
 
+**On macOS** (from source only, with the game running through CrossOver, Whisky, Parallels or a game stream): `brew install tesseract`, then `python3 -m pip install -r requirements.txt` and `python3 maple_exp.py`. The first time, allow your Terminal (or Python) in **System Settings > Privacy & Security > Screen Recording**, then start it again. The window is found by "MapleStory" in its title; if it isn't, use **Select area**. Hotkeys aren't available on macOS yet.
+
+Everything that differs between Windows and macOS (finding the game window, screen scaling, hotkeys, the one-copy-at-a-time lock) is in `platforms/`: one `Platform` interface in `base.py`, one implementation per OS, and `create_platform()` picks the one for the OS it's on.
+
 **Build the download** (puts `Maple-Classic-Exp-Overlay-v<version>.zip` in `release/`, and a copy to use right away in the project folder: `Maple Classic Exp Overlay.exe` with its `_internal` folder):
 
 ```
@@ -252,7 +256,7 @@ GitHub runs the logic tests on every push ([Tests workflow](.github/workflows/te
 - Mesos are read the same way. The mesos box is found by its outline, which also works while the inventory is see-through.
 - The party size is the number of HP bars in the party list.
 - Map names are read with Tesseract.
-- Settings, the log and `errors.log` are saved in `%APPDATA%\MapleEXP` (from its old name, Maple EXP/hr, so updates keep them).
+- Settings, the log and `errors.log` are saved in `%APPDATA%\MapleEXP` (`~/Library/Application Support/MapleEXP` on macOS; from its old name, Maple EXP/hr, so updates keep them).
 
 </details>
 

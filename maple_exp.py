@@ -11,20 +11,19 @@ map, level and party size.
 
 It only looks at the screen: it never reads or changes the game's files or memory and
 never sends input to the game. Your settings and log are kept in the MapleEXP folder
-inside %APPDATA% (named after its old name, Maple EXP/hr, so updating keeps them).
+inside %APPDATA% on Windows, ~/Library/Application Support on macOS (named after its old
+name, Maple EXP/hr, so updating keeps them). It runs on Windows and macOS: what differs
+between them is in platforms/.
 """
-import ctypes
 import hashlib
 import hmac
 import json
 import math
 import os
-import platform
 import queue
 import re
 import secrets
 import shutil
-import subprocess
 import sys
 import threading
 import time
@@ -34,7 +33,6 @@ import urllib.parse
 import urllib.request
 import webbrowser
 from collections import Counter, deque, namedtuple
-from ctypes import wintypes
 from datetime import date
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -46,15 +44,12 @@ import numpy as np
 import pytesseract
 from PIL import Image, ImageDraw, ImageTk
 
-# Use physical pixels so window positions, tkinter and mss screenshots all agree on
-# scaled displays.
-try:
-    ctypes.windll.shcore.SetProcessDpiAwareness(2)
-except Exception:
-    try:
-        ctypes.windll.user32.SetProcessDPIAware()
-    except Exception:
-        pass
+from platforms import create_platform, hotkey_text, parse_hotkey
+
+# Everything that differs between Windows and macOS (finding the game window, screen scaling,
+# hotkeys...) is behind this one object: see platforms/.
+PLATFORM = create_platform()
+PLATFORM.setup_process()
 
 VERSION = "0.9.6-beta"
 WINDOW_TITLE = "Maple Classic Exp Overlay"    # the version is shown in Settings
@@ -65,7 +60,7 @@ OLD_TITLES = ("Maple EXP/hr",)               # what versions before 0.9.3 were c
 APP_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 ASSETS = APP_DIR / "assets"
 HOME_DIR = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
-DATA_DIR = Path(os.environ.get("MAPLE_EXP_DATA") or Path(os.environ.get("APPDATA") or Path.home()) / "MapleEXP")
+DATA_DIR = Path(os.environ.get("MAPLE_EXP_DATA") or PLATFORM.data_root() / "MapleEXP")
 
 CONFIG_PATH = DATA_DIR / "config.json"
 ERROR_LOG_PATH = DATA_DIR / "errors.log"
@@ -197,19 +192,8 @@ def find_tesseract():
     """The Tesseract that comes with the download, else an installed one. Never one in the
     folder the overlay happens to be started from (Windows' usual search looks there first,
     so a tesseract.exe someone left in, say, Downloads could be run)."""
-    on_path = [Path(d) / "tesseract.exe" for d in os.environ.get("PATH", "").split(os.pathsep)
-               if d.strip() and os.path.isabs(d.strip())]
-    candidates = [
-        HOME_DIR / "tesseract" / "tesseract.exe",            # comes with the download
-        APP_DIR / "tesseract" / "tesseract.exe",
-        Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe"),
-        Path(r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe"),
-        *on_path,
-    ]
-    for path in candidates:
-        if path.is_file():
-            return str(path)
-    return None
+    return next((str(p) for p in PLATFORM.tesseract_candidates(HOME_DIR, APP_DIR)
+                 if p.is_file() and os.access(p, os.X_OK)), None)
 
 
 # --------------------------------------------------------------------------- updates
@@ -267,211 +251,14 @@ def post_runs(install, runs, timeout=15):
 
 # --------------------------------------------------------------------------- hotkeys
 #
-# Shift+1 to 4 by default (changeable in Settings). They're Windows hotkeys, as Discord and
-# OBS use: they work while you play even though the game runs as administrator, and they
-# never touch the game. They're only on while MapleStory or the overlay is the window in
-# front, so other programs can still use those keys (e.g. to type "!").
+# Shift+1 to 4 by default (changeable in Settings). How they're caught is up to the OS
+# (PLATFORM.create_hotkeys); they're only on while MapleStory or the overlay is in front.
 
 HOTKEY_ACTIONS = {"start": "Start / Pause", "reset": "Reset", "skip": "Don't log", "compact": "Compact"}
 DEFAULT_HOTKEYS = {"start": "Shift+1", "reset": "Shift+2", "skip": "Shift+3", "compact": "Shift+4"}
-_HOTKEY_MODS = {"Ctrl": 0x2, "Alt": 0x1, "Shift": 0x4}          # MOD_CONTROL, MOD_ALT, MOD_SHIFT
 
 
-def _key_name(vk):
-    if 0x30 <= vk <= 0x39 or 0x41 <= vk <= 0x5A:
-        return chr(vk)
-    if 0x70 <= vk <= 0x7B:
-        return f"F{vk - 0x6F}"
-    return None
-
-
-def parse_hotkey(text):
-    """'Shift+1' -> (modifiers, virtual key), or None if it isn't a hotkey the overlay takes:
-    Ctrl, Alt and/or Shift with a number or letter, or an F key (with or without them)."""
-    if not isinstance(text, str) or not text:
-        return None
-    *mods, key = text.split("+")
-    if len(set(mods)) != len(mods) or any(m not in _HOTKEY_MODS for m in mods):
-        return None
-    vk = next((v for v in list(range(0x30, 0x3A)) + list(range(0x41, 0x5B)) + list(range(0x70, 0x7C))
-               if _key_name(v) == key), None)
-    if vk is None or (not mods and not key.startswith("F")):     # a plain letter would block typing
-        return None
-    return sum(_HOTKEY_MODS[m] for m in mods), vk
-
-
-def hotkey_text(ctrl, alt, shift, vk):
-    """The name of a key pressed with these modifiers (e.g. 'Shift+1'), or None if it can't be one."""
-    key = _key_name(vk)
-    text = "+".join([m for m, on in (("Ctrl", ctrl), ("Alt", alt), ("Shift", shift)) if on] + [key or "?"])
-    return text if key and parse_hotkey(text) else None
-
-
-class Hotkeys:
-    """Windows hotkeys on their own thread. They're registered only while MapleStory or the
-    overlay is the window in front; on_press(action) is called (from that thread) for each press."""
-
-    def __init__(self, on_press):
-        self.on_press = on_press
-        self.problems = {}                   # action -> why it couldn't be used (e.g. taken)
-        self._wanted, self._paused, self._changed = {}, False, True
-        self._lock = threading.Lock()
-        threading.Thread(target=self._run, daemon=True).start()
-
-    def set(self, keys, on=True):
-        """keys: action -> 'Shift+1' (or '' for off)."""
-        with self._lock:
-            self._wanted = {a: parse_hotkey(k) for a, k in keys.items() if on and parse_hotkey(k)}
-            self._changed = True
-
-    def pause(self, paused):
-        """Off for a moment (e.g. while a new hotkey is being chosen), then back on."""
-        with self._lock:
-            self._paused, self._changed = paused, True
-
-    def in_front(self):
-        hwnd = _GetForegroundWindow()
-        if not hwnd:
-            return False
-        pid = wintypes.DWORD()
-        _GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-        if pid.value == os.getpid():
-            return True
-        cls = ctypes.create_unicode_buffer(64)
-        _GetClassName(hwnd, cls, 64)
-        return cls.value == "MapleStoryClass" or _process_name(hwnd) == "maplestory.exe"
-
-    def _run(self):
-        msg, active, was_on = wintypes.MSG(), {}, None    # active: hotkey id -> action
-        self.thread_id = _kernel32.GetCurrentThreadId()
-        _SetTimer(None, 0, 250, None)                     # a WM_TIMER every 250 ms, to check what's in front
-        while _GetMessage(ctypes.byref(msg), None, 0, 0) > 0:
-            if msg.message == 0x0312:                     # WM_HOTKEY
-                action = active.get(msg.wParam)
-                if action:
-                    self.on_press(action)
-            elif msg.message == 0x0113:                   # WM_TIMER
-                try:
-                    on = self.in_front()
-                except Exception:
-                    on = False
-                with self._lock:
-                    changed, wanted, paused, self._changed = self._changed, dict(self._wanted), self._paused, False
-                on = on and not paused
-                if not changed and on == was_on:
-                    continue
-                for hid in active:
-                    _UnregisterHotKey(None, hid)
-                active, was_on = {}, on
-                if on:
-                    for hid, (action, (mods, vk)) in enumerate(wanted.items(), start=1):
-                        if _RegisterHotKey(None, hid, mods | 0x4000, vk):     # MOD_NOREPEAT
-                            active[hid] = action
-                            self.problems.pop(action, None)
-                        else:
-                            self.problems[action] = "used by another program"
-
-
-# --------------------------------------------------------------------------- game window
-
-_user32 = ctypes.WinDLL("user32", use_last_error=True)
-_kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-
-
-def _api(fn, restype, *argtypes):
-    fn.restype, fn.argtypes = restype, list(argtypes)
-    return fn
-
-
-_EnumWindowsProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-_EnumWindows = _api(_user32.EnumWindows, wintypes.BOOL, _EnumWindowsProc, wintypes.LPARAM)
-_IsWindow = _api(_user32.IsWindow, wintypes.BOOL, wintypes.HWND)
-_IsWindowVisible = _api(_user32.IsWindowVisible, wintypes.BOOL, wintypes.HWND)
-_IsIconic = _api(_user32.IsIconic, wintypes.BOOL, wintypes.HWND)
-_GetClassName = _api(_user32.GetClassNameW, ctypes.c_int, wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
-_GetWindowText = _api(_user32.GetWindowTextW, ctypes.c_int, wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
-_GetClientRect = _api(_user32.GetClientRect, wintypes.BOOL, wintypes.HWND, ctypes.POINTER(wintypes.RECT))
-_ClientToScreen = _api(_user32.ClientToScreen, wintypes.BOOL, wintypes.HWND, ctypes.POINTER(wintypes.POINT))
-_GetWindowThreadProcessId = _api(_user32.GetWindowThreadProcessId, wintypes.DWORD,
-                                 wintypes.HWND, ctypes.POINTER(wintypes.DWORD))
-_OpenProcess = _api(_kernel32.OpenProcess, wintypes.HANDLE, wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
-_QueryFullProcessImageName = _api(_kernel32.QueryFullProcessImageNameW, wintypes.BOOL, wintypes.HANDLE,
-                                  wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD))
-_CloseHandle = _api(_kernel32.CloseHandle, wintypes.BOOL, wintypes.HANDLE)
-_GetAncestor = _api(_user32.GetAncestor, wintypes.HWND, wintypes.HWND, wintypes.UINT)
-_GetWindowRect = _api(_user32.GetWindowRect, wintypes.BOOL, wintypes.HWND, ctypes.POINTER(wintypes.RECT))
-_ShowWindow = _api(_user32.ShowWindow, wintypes.BOOL, wintypes.HWND, ctypes.c_int)
-_SetForegroundWindow = _api(_user32.SetForegroundWindow, wintypes.BOOL, wintypes.HWND)
-_CreateMutex = _api(_kernel32.CreateMutexW, wintypes.HANDLE, wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR)
-_MonitorFromPoint = _api(_user32.MonitorFromPoint, wintypes.HANDLE, wintypes.POINT, wintypes.DWORD)
-_GetForegroundWindow = _api(_user32.GetForegroundWindow, wintypes.HWND)
-_RegisterHotKey = _api(_user32.RegisterHotKey, wintypes.BOOL, wintypes.HWND, ctypes.c_int, wintypes.UINT,
-                       wintypes.UINT)
-_UnregisterHotKey = _api(_user32.UnregisterHotKey, wintypes.BOOL, wintypes.HWND, ctypes.c_int)
-_SetTimer = _api(_user32.SetTimer, ctypes.c_size_t, wintypes.HWND, ctypes.c_size_t, wintypes.UINT, ctypes.c_void_p)
-_GetMessage = _api(_user32.GetMessageW, wintypes.BOOL, ctypes.POINTER(wintypes.MSG), wintypes.HWND,
-                   wintypes.UINT, wintypes.UINT)
-
-
-def screen_dpi(x, y):
-    """The DPI of the screen at (x, y), or None. Screens can have different Windows scaling
-    (e.g. 200% on a 5K screen and 125% on a 1440p one), so text is sized for each."""
-    try:
-        dx, dy = ctypes.c_uint(), ctypes.c_uint()
-        monitor = _MonitorFromPoint(wintypes.POINT(int(x), int(y)), 2)      # MONITOR_DEFAULTTONEAREST
-        if ctypes.windll.shcore.GetDpiForMonitor(monitor, 0, ctypes.byref(dx), ctypes.byref(dy)) == 0:
-            return dx.value
-    except Exception:
-        pass
-    return None
-
-
-def _process_name(hwnd):
-    pid = wintypes.DWORD()
-    _GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-    handle = _OpenProcess(0x1000, False, pid.value)       # PROCESS_QUERY_LIMITED_INFORMATION
-    if not handle:
-        return ""
-    try:
-        buf = ctypes.create_unicode_buffer(1024)
-        size = wintypes.DWORD(len(buf))
-        ok = _QueryFullProcessImageName(handle, 0, buf, ctypes.byref(size))
-        return os.path.basename(buf.value).lower() if ok else ""
-    finally:
-        _CloseHandle(handle)
-
-
-def client_rect(hwnd):
-    """(left, top, width, height) of the window's game area in screen pixels, or None."""
-    if not _IsWindow(hwnd) or _IsIconic(hwnd):
-        return None
-    r, pt = wintypes.RECT(), wintypes.POINT(0, 0)
-    if not _GetClientRect(hwnd, ctypes.byref(r)) or not _ClientToScreen(hwnd, ctypes.byref(pt)):
-        return None
-    if r.right < 100 or r.bottom < 100:
-        return None
-    return pt.x, pt.y, r.right, r.bottom
-
-
-def find_game_window():
-    """Handle of the MapleStory game window (the biggest, if there are several), or None."""
-    found = []
-
-    def check(hwnd, _):
-        if _IsWindowVisible(hwnd):
-            cls = ctypes.create_unicode_buffer(256)
-            title = ctypes.create_unicode_buffer(256)
-            _GetClassName(hwnd, cls, 256)
-            _GetWindowText(hwnd, title, 256)
-            if cls.value == "MapleStoryClass" or (
-                    "maple" in title.value.lower() and _process_name(hwnd) == "maplestory.exe"):
-                rect = client_rect(hwnd)
-                found.append((rect[2] * rect[3] if rect else 0, hwnd))
-        return True
-
-    _EnumWindows(_EnumWindowsProc(check), 0)
-    return max(found)[1] if found else None
-
+# --------------------------------------------------------------------------- screenshots
 
 def grab(sct, left, top, width, height):
     """Screenshot of a screen rectangle, clipped to the monitors: (bgr, left, top) or None."""
@@ -1327,6 +1114,8 @@ class ScreenReader:
         rect = self._game_rect()
         if self.mode == "region":
             reading = self._read_region(sct, rect)
+        elif not self.hwnd and PLATFORM.missing_permission():
+            return Reading(PLATFORM.missing_permission())
         elif not self.hwnd:
             return Reading("MapleStory window not found. Is the game running?")
         elif not rect:
@@ -1359,9 +1148,9 @@ class ScreenReader:
         self.next_job_read = now + (60 if job else 10)
 
     def _game_rect(self):
-        if not (self.hwnd and _IsWindow(self.hwnd)):
-            self.hwnd, self.box, self.map_box = find_game_window(), None, None
-        rect = client_rect(self.hwnd) if self.hwnd else None
+        if not (self.hwnd and PLATFORM.window_exists(self.hwnd)):
+            self.hwnd, self.box, self.map_box = PLATFORM.find_game_window(), None, None
+        rect = PLATFORM.client_rect(self.hwnd) if self.hwnd else None
         if rect and rect[2:] != self.size:                  # resized: find everything again
             self.size, self.box, self.map_box, self.gh = rect[2:], None, None, None
             self.exp_anchor, self.next_job_read = None, 0.0
@@ -2599,7 +2388,7 @@ class RegionSelector:
         self.win.attributes("-topmost", True)
         self.canvas = tk.Canvas(self.win, bg="black", cursor="cross", highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
-        self.canvas.create_text(v["width"] // 2, 60, fill="white", font=("Segoe UI", 20, "bold"),
+        self.canvas.create_text(v["width"] // 2, 60, fill="white", font=(*PLATFORM.font("Segoe UI", "bold"), 20),
                                 text="Drag a box around the EXP numbers  (Esc to cancel)")
         self.start = None
         self.rect = None
@@ -2680,13 +2469,14 @@ class App:
         self.stop_evt = threading.Event()
         self.last_capture = None
 
-        self.fonts = {name: tkfont.Font(root, family=family, weight=weight, underline=underline)
+        self.fonts = {name: tkfont.Font(root, underline=underline, **dict(zip(("family", "weight"),
+                                                                               PLATFORM.font(family, weight))))
                       for name, (family, _, weight, underline) in FONTS.items()}
         pos = self.cfg.get("pos")
-        self._dpi = (screen_dpi(pos[0] + 40, pos[1] + 15) if pos else None) or root.winfo_fpixels("1i")
+        self._dpi = (PLATFORM.screen_dpi(pos[0] + 40, pos[1] + 15) if pos else None) or root.winfo_fpixels("1i")
         self._apply_ui_scale()
         self.hotkey_note = None
-        self.hotkeys = Hotkeys(lambda action: self.q.put(("hotkey", action)))
+        self.hotkeys = PLATFORM.create_hotkeys(lambda action: self.q.put(("hotkey", action)))
         self.hotkeys.set(self.cfg["hotkeys"], self.cfg["hotkeys_on"])
         self.compact = False
 
@@ -2943,7 +2733,7 @@ class App:
         """Resizes the text when the window is moved to a screen with different Windows scaling
         (judged by its title bar, which stays put when the window changes size)."""
         r = self._window_rect()
-        dpi = screen_dpi(r[0] + 40, r[1] + 15) if r else None
+        dpi = PLATFORM.screen_dpi(r[0] + 40, r[1] + 15) if r else None
         if dpi and dpi != self._dpi:
             self._dpi = dpi
             self._apply_ui_scale()
@@ -3206,6 +2996,10 @@ class App:
         the keys; Esc keeps it as it was, Backspace turns it off)."""
         box = tk.Frame(w, bg=BG)
         box.grid(row=row, column=0, sticky="w", padx=10, pady=(10, 0))
+        if not self.hotkeys.supported:
+            tk.Label(box, text=f"Hotkeys aren't available on {PLATFORM.name} yet: use the buttons.",
+                     bg=BG, fg=DIM, font=self.fonts["text"]).grid(row=0, column=0, sticky="w")
+            return
         on = tk.BooleanVar(value=self.cfg["hotkeys_on"])
         tk.Checkbutton(box, text="Hotkeys, while MapleStory or the overlay is in front:", variable=on, bg=BG,
                        fg=FG, selectcolor=FIELD, activebackground=BG, activeforeground=FG,
@@ -3279,7 +3073,7 @@ class App:
     def open_data_folder(self):
         try:
             DATA_DIR.mkdir(parents=True, exist_ok=True)
-            os.startfile(DATA_DIR)
+            PLATFORM.open_folder(DATA_DIR)
         except Exception as e:
             self._oops("opening the data folder", e)
 
@@ -3298,13 +3092,9 @@ class App:
     def _window_rect(self):
         """This app's window on screen (physical pixels), or None."""
         try:
-            hwnd = _GetAncestor(self.root.winfo_id(), 2)       # GA_ROOT: the framed window
-            r = wintypes.RECT()
-            if _GetWindowRect(hwnd, ctypes.byref(r)):
-                return r.left, r.top, r.right - r.left, r.bottom - r.top
+            return PLATFORM.own_window_rect(self.root)
         except Exception:
-            pass
-        return None
+            return None
 
     # ---- background capture loop
     def _worker(self):
@@ -3765,7 +3555,7 @@ class App:
         webbrowser.open(f"https://github.com/{GITHUB_REPO}/issues/new?{query}")
         if picture:
             try:
-                subprocess.Popen(["explorer", f"/select,{picture}"])
+                PLATFORM.show_file(picture)
             except Exception as e:
                 log_error("opening the bug report picture's folder", e)
 
@@ -3813,7 +3603,7 @@ class App:
              if picture else "(If you can, add a screenshot of the game and the overlay.)"), "",
             "---", "<details><summary>Details (filled in by the overlay)</summary>", "",
             f"- Version: {VERSION} ({'download' if getattr(sys, 'frozen', False) else 'from source'})",
-            f"- Windows: {platform.version()}",
+            f"- System: {PLATFORM.version()}",
             f"- Game window: {'x'.join(map(str, self.reader.size)) if self.reader.size else 'not found'}"
             f" (EXP digits {fmt_num(self.reader.gh) if self.reader.gh else '?'} px)",
             f"- Last EXP read: {r.text if r else 'nothing'}",
@@ -3857,28 +3647,14 @@ class App:
 
 
 def main():
-    global tesseract_ok, _single_instance
+    global tesseract_ok
     # Only one copy at a time (per data folder): two copies would each keep their own log.
     # If it's already running, bring that window to the front instead. (The lock keeps the old
     # name, so an older version and this one can't run at the same time either.)
-    lock ="Local\\MapleEXP-" + hashlib.md5(str(DATA_DIR).lower().encode()).hexdigest()[:12]
-    _single_instance = _CreateMutex(None, False, lock)
-    if ctypes.get_last_error() == 183:                      # ERROR_ALREADY_EXISTS
-        found = []
-
-        def check(hwnd, _):                                 # any version's main window
-            title = ctypes.create_unicode_buffer(256)
-            _GetWindowText(hwnd, title, 256)
-            if title.value.startswith((WINDOW_TITLE, *OLD_TITLES)) and _IsWindowVisible(hwnd):
-                found.append(hwnd)
-            return True
-        _EnumWindows(_EnumWindowsProc(check), 0)
-        if found:
-            _ShowWindow(found[0], 9)                        # SW_RESTORE
-            _SetForegroundWindow(found[0])
-        else:
-            ctypes.windll.user32.MessageBoxW(None, f"{WINDOW_TITLE} is already running.", WINDOW_TITLE, 0x40)
+    key = hashlib.md5(str(DATA_DIR).lower().encode()).hexdigest()[:12]
+    if not PLATFORM.claim_single_instance(key, WINDOW_TITLE, OLD_TITLES):
         return
+    PLATFORM.ask_permissions()
     move_old_data()
     tess = find_tesseract()
     if tess:
