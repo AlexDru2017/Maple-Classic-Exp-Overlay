@@ -241,6 +241,29 @@ class WindowsPlatform(Platform):
     def create_hotkeys(self, on_press):
         return WindowsHotkeys(on_press)
 
+    def register_fonts(self, paths):
+        # Private to this program (FR_PRIVATE): nothing is installed, and they go when it closes.
+        try:
+            add = ctypes.windll.gdi32.AddFontResourceExW
+            add.argtypes, add.restype = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.c_void_p], ctypes.c_int
+            return all(add(str(p), 0x10, None) for p in paths)
+        except Exception:
+            return False
+
+    def style_window(self, root, background, text):
+        """A dark title bar in the overlay's own colours (Windows 10 2004+ for dark, 11 for the colours)."""
+        def bgr(hex_):
+            r, g, b = (int(hex_[i:i + 2], 16) for i in (1, 3, 5))
+            return b << 16 | g << 8 | r
+        try:
+            root.update_idletasks()
+            hwnd = _GetAncestor(root.winfo_id(), 2)
+            set_attr = ctypes.windll.dwmapi.DwmSetWindowAttribute
+            for attr, value in ((20, 1), (35, bgr(background)), (34, bgr(background)), (36, bgr(text))):
+                set_attr(hwnd, attr, ctypes.byref(ctypes.c_int(value)), 4)   # dark mode, caption, border, text
+        except Exception:
+            pass
+
     def open_folder(self, path):
         os.startfile(path)
 

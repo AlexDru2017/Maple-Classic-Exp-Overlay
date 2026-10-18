@@ -169,5 +169,57 @@ saved = json.loads((DATA / "exp_log.json").read_text(encoding="utf-8"))["entries
 check("every line is still as the overlay wrote it (notes don't break the seal)",
       all(not m.AutoLog(15, m.LOG_PATH, m.LOG_TEXT_PATH).edited(e) for e in saved))
 
+# ---- the design: every size, every state, and awkward values never break the window
+root = m.tk.Tk()
+m.save_config({**m.DEFAULTS, "hotkeys_on": False, "check_updates": False, "share_runs": False, "pos": [60, 60]})
+app = m.App(root, m.DigitTemplates.load())
+t, meso = app.tracker, app.meso
+sizes_ok, widths = True, {}
+for scale in m.UI_SCALES:
+    try:
+        app.cfg["ui_scale"] = scale
+        app._apply_ui_scale()
+        for case in ("idle", "tracking", "huge", "compact", "details"):
+            if case == "idle":
+                t.exp = t.pct = t.req = None
+                t.rate = lambda: None
+                t.rolling_rate = lambda: None
+            else:
+                t.exp, t.pct, t.req, t.gained, t.levels = 31204, 54.2, 57600, 412300, 2
+                huge = case == "huge"
+                t.rate = lambda huge=huge: 123456789.0 if huge else 72566.0
+                t.rolling_rate = lambda huge=huge: 99999999.0 if huge else 71900.0
+                t.elapsed = lambda: 5620.0
+                meso.value, meso.gained = 18449220, 41000
+                app.level = 35
+            app.set_compact(case == "compact")
+            if case == "details" and not app.view.details_open:
+                app.view._toggle_details()
+            app.session.on = case != "idle"
+            app._update_display()
+            root.update()
+            widths[scale] = app.view.winfo_width()
+    except Exception as e:                                   # (printed, so a failure says where)
+        print("   error at", scale, "%:", type(e).__name__, e)
+        sizes_ok = False
+check("the window draws at every size (80% to 200%) and in every state: idle, tracking, huge numbers, compact, details", sizes_ok)
+check(f"a bigger size makes the window wider, not clipped ({widths})",
+      all(widths[a] < widths[b] for a, b in zip(m.UI_SCALES, m.UI_SCALES[1:])))
+app.view.show(rate="123,456,789", state="alert", state_text="Can't read the EXP bar",
+              message="A very long message " * 12, tiles={"Last 5 min": "99,999,999", "Mesos / hr": "-", "Elapsed": "123:59:59"})
+root.update()
+check("long messages and big numbers still fit the window", app.view.winfo_reqwidth() <= app.theme.px(400) + 4)
+app.set_compact(False)
+app.set_compact(True)
+app._update_display()
+hero = app.view.hero
+check("compact mode shows mesos/hr under the number, and only there",
+      hero.itemcget(hero._mval, "state") == "normal" and hero.itemcget(hero._mval, "text") != "")
+app.set_compact(False)
+app._update_display()
+check("full mode doesn't show that line (it has the tile)", hero.itemcget(hero._mval, "state") == "hidden")
+check("the typeface is the bundled one, or it fell back cleanly", app._own_fonts in (True, False) and bool(app.theme.fam["extra"]))
+app.close()
+
 print("\nALL PASSED" if not failures else f"\n{failures} FAILED")
 sys.exit(1 if failures else 0)

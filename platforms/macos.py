@@ -185,6 +185,25 @@ class MacPlatform(Platform):
     def create_hotkeys(self, on_press):
         return MacHotkeys(on_press)
 
+    def register_fonts(self, paths):
+        # Available to this program only (process scope). If anything about it fails, the overlay
+        # just uses the system's own fonts.
+        try:
+            ct = ctypes.CDLL("/System/Library/Frameworks/CoreText.framework/CoreText")
+            _cf.CFURLCreateFromFileSystemRepresentation.restype = _vp
+            _cf.CFURLCreateFromFileSystemRepresentation.argtypes = [_vp, ctypes.c_char_p, ctypes.c_long, ctypes.c_bool]
+            ct.CTFontManagerRegisterFontsForURL.restype = ctypes.c_bool
+            ct.CTFontManagerRegisterFontsForURL.argtypes = [_vp, ctypes.c_int, _vp]
+            ok = True
+            for path in paths:
+                raw = str(path).encode()
+                url = _cf.CFURLCreateFromFileSystemRepresentation(None, raw, len(raw), False)
+                ok = bool(ct.CTFontManagerRegisterFontsForURL(url, 1, None)) and ok     # 1: this process only
+                _CFRelease(url)
+            return ok
+        except Exception:
+            return False
+
     def open_folder(self, path):
         subprocess.Popen(["open", str(path)])
 

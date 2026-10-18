@@ -88,6 +88,92 @@ for name, info in sorted(PARTS["inventory"].items()):
     ok, total = counts["found see-through"]
     print(f"     (mesos box found by its outline, {size}: {ok}/{total})")
 
+# ---- storage and trade windows show a second mesos box: never read the wrong one
+class FakeScreen:
+    """Stands in for mss: one monitor showing `image` (the game), grab() cuts out of it."""
+    def __init__(self, image):
+        self.image = image
+        self.monitors = [{"left": 0, "top": 0, "width": image.shape[1], "height": image.shape[0]}]
+
+    def grab(self, r):
+        part = self.image[r["top"]:r["top"] + r["height"], r["left"]:r["left"] + r["width"]]
+        return np.dstack([part, np.full(part.shape[:2], 255, np.uint8)])
+
+
+for name, info in sorted(PARTS["inventory"].items()):
+    inv, gh, (bx, by, bw, bh) = cv2.imread(str(FRAMES / name)), info["gh"], info["box"]
+    h, w = inv.shape[:2]
+    size = f"EXP digits {gh:.0f} px"
+    one_ok = two_ok = total = 0
+    for bg_name, bg in backgrounds(int(h * 1.3), int(w * 3.2)).items():
+        total += 1
+        alone, both = bg.copy(), bg.copy()
+        alone[:h, :w] = inv
+        both[:h, :w] = inv
+        both[:h, w + 10:2 * w + 10] = inv                         # storage's box beside yours
+        one_ok += len(m.find_mesos_fields(alone, gh)) == 1
+        two_ok += len(m.find_mesos_fields(both, gh)) == 2
+    check(f"one inventory shows one mesos box, {size}: {one_ok}/{total}", one_ok == total)
+    check(f"an inventory beside a storage / trade window shows two, {size}: {two_ok}/{total}", two_ok == total)
+
+    # the reader follows along: finds yours, lets go while a second box is there, finds it again
+    ww, wh = 3 * w + 20, int(h * 1.3)
+    scene = np.full((wh, ww, 3), 25, np.uint8)
+    scene[:h, :w] = inv
+    reader = m.ScreenReader(m.DigitTemplates.load())
+    reader.gh = gh
+    reader.mesos_digits = m.MesosDigits(path=Path(tempfile.mkdtemp()) / "x.npz")
+    blank = m.Reading(*([None] * len(m.Reading._fields)))
+    def look(image):
+        reader.next_scan = 0.0
+        return reader._read_extras(FakeScreen(image), (0, 0, ww, wh), blank)
+    look(scene)
+    check(f"finds the box with only the inventory open, {size}", reader.mesos_box == (bx, by, bw, bh))
+    crowded = scene.copy()
+    crowded[:h, w + 10:2 * w + 10] = inv
+    look(crowded)
+    r = look(crowded)
+    check(f"drops it and reads nothing while a second box is there, {size}",
+          reader.mesos_box is None and reader.two_boxes and r.mesos is None)
+    look(scene)
+    check(f"finds it again once the storage is closed, {size}", reader.mesos_box == (bx, by, bw, bh) and not reader.two_boxes)
+
+# ---- the costly outline search for a see-through mesos box doesn't run on every look
+name, info = sorted(PARTS["inventory"].items())[1]
+inv, gh, (bx, by, bw, bh) = cv2.imread(str(FRAMES / name)), info["gh"], info["box"]
+h, w = inv.shape[:2]
+empty = np.full((int(h * 1.3), int(w * 1.3), 3), 25, np.uint8)
+see_through = empty.copy()
+see_through[:h, :w] = (0.45 * inv + 0.55 * empty[:h, :w]).astype(np.uint8)
+reader = m.ScreenReader(m.DigitTemplates.load())
+reader.gh = gh
+reader.mesos_digits = m.MesosDigits(path=Path(tempfile.mkdtemp()) / "x.npz")
+blank = m.Reading(*([None] * len(m.Reading._fields)))
+searches, clock = [], [1000.0]
+real_find, real_monotonic = reader.box_finder.find, m.time.monotonic
+reader.box_finder.find = lambda *a: searches.append(clock[0]) or real_find(*a)
+m.time.monotonic = lambda: clock[0]
+try:
+    def look(image):
+        reader.next_scan = 0.0
+        return reader._read_extras(FakeScreen(image), (0, 0, image.shape[1], image.shape[0]), blank)
+    for _ in range(12):                                         # 24 s of nothing to find
+        look(empty)
+        clock[0] += 2
+    check(f"with no inventory open, the outline search runs about every {m.OUTLINE_SECONDS} s, not every look ({len(searches)} in 24 s)",
+          2 <= len(searches) <= 24 // m.OUTLINE_SECONDS + 1)
+    reader.next_outline = clock[0] + m.OUTLINE_SECONDS           # (just after a search that found nothing)
+    found_after = None
+    for i in range(1, 16):                                      # the inventory is opened
+        look(see_through)
+        clock[0] += 2
+        if reader.mesos_box and found_after is None:
+            found_after = 2 * i
+    check(f"a see-through inventory is still found, within {m.OUTLINE_SECONDS + 4} s of opening it (took {found_after} s)",
+          found_after is not None and found_after <= m.OUTLINE_SECONDS + 4)
+finally:
+    m.time.monotonic = real_monotonic
+
 # ---- party: the right number of HP bars, from 1 to 6 members, on every background
 for key, info in sorted(PARTS["party"].items(), key=lambda kv: kv[1]["gh"]):
     gh, pitch = info["gh"], info["pitch"]
@@ -114,8 +200,9 @@ for key, info in sorted(PARTS["party"].items(), key=lambda kv: kv[1]["gh"]):
     check(f"no party list on screen means solo, EXP digits {gh:.0f} px", clean)
 
 # ---- the class, from the status bar (the character name line is blanked in these)
-m.pytesseract.pytesseract.tesseract_cmd = m.find_tesseract()
-m.tesseract_ok = bool(m.pytesseract.pytesseract.tesseract_cmd)
+_tess = m.find_tesseract()
+m.TESS = m.ocr.Tesseract(_tess) if _tess else None
+m.tesseract_ok = bool(_tess)
 if m.tesseract_ok:
     for name, info in sorted(PARTS["status"].items()):
         got = m.read_job(cv2.imread(str(FRAMES / name)), info["x0"], info["cy"], info["gh"])

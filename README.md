@@ -203,6 +203,8 @@ Free code signing from [SignPath Foundation](https://signpath.org) is planned, s
 - Approvers: [beanguri](https://github.com/beanguri)
 - Privacy policy: see [Privacy](#privacy) above. In short: your log and notes stay on your PC, and the overlay only sends anything to another system if you turn on sharing your finished 15-minute runs (off until you say yes, and you can turn it off any time in Settings), or to check GitHub for a newer version (can be turned off too).
 
+**Credits:** the typeface is [Manrope](https://github.com/googlefonts/manrope) (SIL Open Font License, included as `assets/fonts/OFL.txt`).
+
 ## Updates
 
 This is a beta, and I'm still adding features and fixing things.

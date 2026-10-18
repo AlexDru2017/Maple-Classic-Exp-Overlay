@@ -20,6 +20,9 @@ import hmac
 import json
 import math
 import os
+
+for _name in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+    os.environ.setdefault(_name, "1")        # (before numpy is imported)
 import queue
 import re
 import secrets
@@ -41,17 +44,22 @@ from tkinter import font as tkfont, messagebox, simpledialog, ttk
 import cv2
 import mss
 import numpy as np
-import pytesseract
 from PIL import Image, ImageDraw, ImageTk
 
+import ocr
 from platforms import create_platform, hotkey_text, parse_hotkey
+from ui_gfx import INK, TEXT_DIM
+from ui_kit import (ACCENT, ACCENT_SOFT, BAD, BG, DIM, FAINT, FG, GOOD, LINE, LIST_BG, LIST_BG2, LIST_PART,  # noqa: F401
+                    ON_ACCENT, RAISED, RAISED_HI, SELECT, SURFACE, WARN, setup_ttk)
+from ui_main import Button, MainView, PopupMenu, Slider, Theme, Toggle
 
 # Everything that differs between Windows and macOS (finding the game window, screen scaling,
 # hotkeys...) is behind this one object: see platforms/.
 PLATFORM = create_platform()
 PLATFORM.setup_process()
+cv2.setNumThreads(1)
 
-VERSION = "0.9.7-beta"
+VERSION = "0.9.8-beta"
 WINDOW_TITLE = "Maple Classic Exp Overlay"    # the version is shown in Settings
 OLD_TITLES = ("Maple EXP/hr",)               # what versions before 0.9.3 were called
 
@@ -76,8 +84,10 @@ MESOS_PATH = DATA_DIR / "mesos_digits.npz"             # learned as you play...
 MESOS_START_PATH = ASSETS / "mesos_digits.npz"          # ...starting from these
 MESOS_BOX_PATH = ASSETS / "mesos_box.npz"
 SCAN_SECONDS = 4            # how often the whole window is checked for the inventory and party
+OUTLINE_SECONDS = 8         # how often the (costly) search for a see-through mesos box may run
 DEFAULTS = {"gap_seconds": 15, "transparency": 0, "topmost": True,
-            "check_updates": True, "skip_version": "", "ui_scale": 100, "compact": False, "hotkeys_on": True}
+            "check_updates": True, "skip_version": "", "ui_scale": 100, "compact": False, "hotkeys_on": True,
+            "details": False}
 # Settings > Size, in %: only these, so the window can't get too small to read or use.
 UI_SCALES = (80, 90, 100, 110, 125, 150, 175, 200)
 STATS_SITE = "https://maple-classic-exp-overlay.pages.dev"       # shared 15-minute runs (server/)
@@ -101,6 +111,7 @@ EXP_TABLE = [
 ]
 
 tesseract_ok = False        # set in main(); Tesseract is only a fallback
+TESS = None                 # the ocr.Tesseract to read text with, once main() has found one
 
 
 # --------------------------------------------------------------------------- files
@@ -468,12 +479,9 @@ def _ocr_cells(bgr, lay, cells):
     white = (((hsv[..., 1] < 70) & (hsv[..., 2] >= 140)) * 255).astype(np.uint8)
     white = cv2.dilate(white, np.ones((3, 3), np.uint8))
     _, bright = cv2.threshold(hsv[..., 2], 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    out = []
-    for mask in (white, bright):
-        img = cv2.copyMakeBorder(255 - mask, 12, 12, 12, 12, cv2.BORDER_CONSTANT, value=255)
-        text = pytesseract.image_to_string(img, config="--psm 7 -c tessedit_char_whitelist=0123456789,.")
-        out.append(re.sub(r"\D", "", text))
-    return out
+    images = [cv2.copyMakeBorder(255 - mask, 12, 12, 12, 12, cv2.BORDER_CONSTANT, value=255)
+              for mask in (white, bright)]
+    return [re.sub(r"\D", "", text) for text in TESS.read_lines(images, "0123456789,.")]
 
 
 def tesseract_candidates(bgr, lay):
@@ -597,7 +605,7 @@ def read_job(bgr, x0, cy, g):
     if glyph_h > 10:                                  # big screens: read at small-window size,
         k = 10.0 / glyph_h                            # where Tesseract reads this font best
         crop, glyph_h = cv2.resize(crop, None, fx=k, fy=k, interpolation=cv2.INTER_AREA), 10.0
-    votes = _ocr_votes(crop.astype(np.float32), glyph_h, "--psm 7", _clean_job)
+    votes = _ocr_votes(crop.astype(np.float32), glyph_h, None, _clean_job)
     text, n = votes.most_common(1)[0] if votes else ("", 0)
     if n < 2:
         return None
@@ -612,18 +620,21 @@ def _whiteness(bgr):
     return np.clip((hsv[..., 2] - 150) / 90, 0, 1) * np.clip((80 - hsv[..., 1]) / 50, 0, 1)
 
 
-def _ocr_votes(whiteness, glyph_h, config, clean):
-    """Tesseract on white text at a few sizes, with and without smoothing. Counts answers."""
-    votes = Counter()
+def _ocr_votes(whiteness, glyph_h, chars, clean):
+    """Tesseract on white text at a few sizes, with and without smoothing (all in one run).
+    Counts answers. chars: the only characters it may answer with, or None."""
+    images = []
     for target in (36, 48, 60):
         s = target / glyph_h
         big = cv2.resize(whiteness, None, fx=s, fy=s, interpolation=cv2.INTER_CUBIC)
         for img in ((big > 0.5) * 255.0, np.clip(big, 0, 1) * 255):
-            img = cv2.copyMakeBorder((255 - img).astype(np.uint8), 24, 24, 24, 24,
-                                     cv2.BORDER_CONSTANT, value=255)
-            text = clean(pytesseract.image_to_string(img, config=config))
-            if text:
-                votes[text] += 1
+            images.append(cv2.copyMakeBorder((255 - img).astype(np.uint8), 24, 24, 24, 24,
+                                             cv2.BORDER_CONSTANT, value=255))
+    votes = Counter()
+    for text in TESS.read_lines(images, chars):
+        text = clean(text)
+        if text:
+            votes[text] += 1
     return votes
 
 
@@ -670,7 +681,7 @@ def read_map_name(bgr, gh):
     ln = lines[-1]
     x0, x1 = max(0, min(b.x for b in ln) - 2), max(b.x + b.w for b in ln) + 2
     y0, y1 = max(0, min(b.y for b in ln) - 2), max(b.y + b.h for b in ln) + 2
-    votes = _ocr_votes(white[y0:y1, x0:x1], max(b.h for b in ln), "--psm 7", _clean_map_name)
+    votes = _ocr_votes(white[y0:y1, x0:x1], max(b.h for b in ln), None, _clean_map_name)
     name, n = votes.most_common(1)[0] if votes else (None, 0)
     return name if n >= 2 else None
 
@@ -685,16 +696,16 @@ def read_map_name(bgr, gh):
 # font's digits are used, which match these closely enough.
 # Party: the small party list shows one HP bar per member, in an evenly spaced column.
 
-def find_mesos_field(bgr, gh=None):
-    """(x, y, w, h) of the solid white mesos box (gold coin on its left), or None.
+def find_mesos_fields(bgr, gh=None, hsv=None):
+    """Every solid white mesos box (gold coin on its left) as (x, y, w, h), biggest first.
 
-    With gh (the EXP digit height), the box must also be the mesos box's size at that scale:
-    about 19.1 x 1.82 EXP digits."""
-    hue, sat, val = cv2.split(cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV))
+    With gh (the EXP digit height), a box must also be the mesos box's size at that scale:
+    about 19.1 x 1.82 EXP digits. hsv: the same picture as HSV, if it's at hand already."""
+    hue, sat, val = cv2.split(cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV) if hsv is None else hsv)
     n, _, stats, _ = cv2.connectedComponentsWithStats(((val > 225) & (sat < 30)).astype(np.uint8),
                                                       connectivity=8)
     coin = (hue >= 12) & (hue <= 35) & (sat >= 100) & (val >= 140)
-    best = None
+    found = []
     for i in range(1, n):
         x, y, w, h, area = map(int, stats[i])
         if h < 8 or not 7 * h <= w <= 16 * h or area < 0.6 * w * h:
@@ -704,9 +715,14 @@ def find_mesos_field(bgr, gh=None):
         left = coin[y:y + h, max(0, x - int(1.6 * h)):x]
         if left.size == 0 or left.mean() < 0.15:
             continue
-        if best is None or area > best[4]:
-            best = (x, y, w, h, area)
-    return best[:4] if best else None
+        found.append((area, (x, y, w, h)))
+    return [box for _, box in sorted(found, reverse=True)]
+
+
+def find_mesos_field(bgr, gh=None):
+    """The biggest solid mesos box (see find_mesos_fields), or None."""
+    fields = find_mesos_fields(bgr, gh)
+    return fields[0] if fields else None
 
 
 def mesos_layout(bgr, field):
@@ -865,8 +881,7 @@ def tesseract_mesos(lay):
     def clean(text):
         return re.sub(r"\D", "", text) if re.fullmatch(r"[\d,.\s]+", text.strip() or "x") else ""
 
-    votes = _ocr_votes(img.astype(np.float32), lay.gh,
-                       "--psm 7 -c tessedit_char_whitelist=0123456789,", clean)
+    votes = _ocr_votes(img.astype(np.float32), lay.gh, "0123456789,", clean)
     digits, n = votes.most_common(1)[0] if votes else ("", 0)
     return (int(digits), n) if n >= 4 else (None, n)
 
@@ -917,8 +932,8 @@ class MesosDigits:
                 log_error("saving the learned mesos digits", e)
 
 
-def _edges(bgr):
-    v = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)[..., 2].astype(np.float32)
+def _edges(bgr, hsv=None):
+    v = (cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV) if hsv is None else hsv)[..., 2].astype(np.float32)
     return cv2.magnitude(cv2.Sobel(v, cv2.CV_32F, 1, 0, ksize=3), cv2.Sobel(v, cv2.CV_32F, 0, 1, ksize=3))
 
 
@@ -954,7 +969,7 @@ class MesosBoxFinder:
              int((x - x0 + 0.12 * h) * s):int((x - x0 + w - 0.12 * h) * s)] = 0
         np.savez(path, edges=edges, mask=mask, box=np.float32([(x - x0) * s, (y - y0) * s, w * s, h * s]))
 
-    def find(self, bgr, gh):
+    def find(self, bgr, gh, hsv=None):
         """(x, y, w, h) of the best-matching mesos box in a screenshot, or None.
 
         Compared with the EXP digits the box is drawn bigger in small game windows (in real
@@ -964,7 +979,7 @@ class MesosBoxFinder:
         distances from the right edge."""
         if self.edges is None:
             return None
-        edges0 = _edges(bgr)
+        edges0 = _edges(bgr, hsv)
         expect = 0.961 + 1.092 / gh
         found = None
         for size in (expect, expect * 1.025, expect / 1.025):
@@ -987,7 +1002,7 @@ class MesosBoxFinder:
         x, y, w, h = found[1]
         # Line up the right edge (the digits are read from there) with the inside of the
         # box's border: leaving the box it gets darker, solid or see-through.
-        gx = cv2.Sobel(cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)[..., 2].astype(np.float32),
+        gx = cv2.Sobel((cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV) if hsv is None else hsv)[..., 2].astype(np.float32),
                        cv2.CV_32F, 1, 0, ksize=3)
         rows = gx[max(0, y + h // 4):y + 3 * h // 4 + 1].sum(axis=0)
         reach = max(2, int(0.25 * h))
@@ -1001,10 +1016,10 @@ def _agrees(value, last):
     return last is not None and len(str(value)) == len(str(last)) and abs(value - last) <= max(1000, 0.02 * last)
 
 
-def find_party_bars(bgr, gh):
+def find_party_bars(bgr, gh, hsv=None):
     """HP bars of the party list's members: the longest evenly spaced column of identical
     HP-bar outlines. A single bar (or none) means you're on your own."""
-    val = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)[..., 2]
+    val = (cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV) if hsv is None else hsv)[..., 2]
     n, _, stats, _ = cv2.connectedComponentsWithStats((val < 70).astype(np.uint8), connectivity=8)
     bars = sorted((tuple(map(int, stats[i][:4])) for i in range(1, n)
                    if 7.5 * gh <= stats[i][2] <= 10.5 * gh and 1.3 * gh <= stats[i][3] <= 1.85 * gh),
@@ -1079,6 +1094,8 @@ class ScreenReader:
         self.mesos_fails = 0
         self.next_mesos_check = 0.0
         self.mesos_covered = False  # this app's window is in the way of the mesos
+        self.two_boxes = False      # a storage / trade window shows a second mesos box
+        self.next_outline = 0.0     # the earliest time to search for a see-through mesos box again
         self.party_area = None      # where the party list was last seen, on screen
         self.next_scan = 0.0
         self.own_rect = None        # this app's window, which screenshots can't see through
@@ -1108,6 +1125,7 @@ class ScreenReader:
         self.mesos_box = self.saved_mesos = None
         self.mesos_fails, self.mesos_count, self.mesos_pending = 0, None, (None, 0)
         self.mesos_covered, self.party_area, self.next_scan = False, None, 0.0
+        self.two_boxes, self.next_outline = False, 0.0
         self.exp_anchor, self.next_job_read = None, 0.0
         self.request_map()
 
@@ -1276,13 +1294,23 @@ class ScreenReader:
             shot = self._hide_own(grab(sct, wx, wy, ww, wh))
             if shot:
                 img, sx, sy = shot
-                field = find_mesos_field(img, g)      # the solid box is easy to spot
+                hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)      # (made once for everything below)
+                fields = find_mesos_fields(img, g, hsv)         # the solid box is easy to spot
+                # Storage and trade windows show a second mesos box next to yours, and which
+                # is which can't be told from the picture: read neither until it's closed.
+                self.two_boxes = len(fields) > 1
+                field = None if self.two_boxes else (fields[0] if fields else None)
                 if field and not self._readable(img, field):
                     field = None                      # a white patch in the scene, not the box
                 # Look for it by its outline too if it's lost, or this window is in the way of
                 # where it was (it may have been moved from there).
-                if field is None and (self.mesos_box is None or self.mesos_fails >= 10 or self.mesos_covered):
-                    field = self._find_seethrough_box(img, g)
+                if (field is None and not self.two_boxes and now >= self.next_outline
+                        and (self.mesos_box is None or self.mesos_fails >= 10 or self.mesos_covered)):
+                    field = self._find_seethrough_box(img, g, hsv)
+                    if field is None:
+                        self.next_outline = now + OUTLINE_SECONDS   # (it costs a lot on a big screen)
+                if self.two_boxes:
+                    self.mesos_box = None
                 if field:
                     box = (sx - wx + field[0], sy - wy + field[1], field[2], field[3])
                     old = self.mesos_box
@@ -1293,7 +1321,7 @@ class ScreenReader:
                 if area and self._covered(*area):
                     notes.append("This window is covering the party list.")
                 else:
-                    bars = find_party_bars(img, g)
+                    bars = find_party_bars(img, g, hsv)
                     party = max(1, len(bars))
                     if len(bars) >= 2:
                         x0, y0 = min(b[0] for b in bars), min(b[1] for b in bars)
@@ -1321,12 +1349,12 @@ class ScreenReader:
         learned = self.mesos_digits
         return not learned.complete or read_mesos_positions(img, field, learned.templates()) is not None
 
-    def _find_seethrough_box(self, img, g):
+    def _find_seethrough_box(self, img, g, hsv=None):
         """The mesos box by its outline, checked by reading clear digits there.
 
         The digits are read at fixed spots from the box's right edge, so a box found a bit
         off could read a wrong number: it must also line up with the number."""
-        field = self.box_finder.find(img, g)
+        field = self.box_finder.find(img, g, hsv)
         if not field:
             return None
         learned = self.mesos_digits
@@ -2506,15 +2534,17 @@ class RegionSelector:
 
 # --------------------------------------------------------------------------- app
 
-BG, FG, DIM, ACCENT, FIELD = "#1b1d23", "#e8e8e8", "#8a8f98", "#ffcc33", "#2c3038"
-ACCENT_SOFT = "#d9b04a"     # a quieter gold, for text that goes with the big number
+FIELD = RAISED              # inputs and buttons
 # The window's fonts: (family, size at 100%, weight, underline). Settings > Size scales them all.
-FONTS = {"small": ("Segoe UI", 8, "normal", False), "text": ("Segoe UI", 9, "normal", False),
-         "link": ("Segoe UI", 9, "normal", True), "row": ("Segoe UI", 10, "normal", False),
-         "icon": ("Segoe UI", 11, "normal", False), "value": ("Consolas", 11, "normal", False),
-         "next": ("Segoe UI Semibold", 11, "normal", False), "title": ("Segoe UI Semibold", 12, "normal", False),
-         "big": ("Segoe UI", 24, "bold", False)}
-LIST_BG, LIST_BG2, LIST_PART = "#23262d", "#282b33", "#1c1e23"
+FONTS = {"small": ("Manrope", 9, "normal", False), "text": ("Manrope", 10, "normal", False),
+         "link": ("Manrope SemiBold", 10, "normal", False), "row": ("Manrope", 10, "normal", False),
+         "icon": ("Segoe UI", 12, "normal", False), "value": ("Manrope Bold", 11, "normal", False),
+         "next": ("Manrope SemiBold", 11, "normal", False), "title": ("Manrope Bold", 13, "normal", False),
+         "caps": ("Manrope SemiBold", 9, "normal", False), "strong": ("Manrope SemiBold", 10, "normal", False),
+         "big": ("Manrope ExtraBold", 32, "normal", False)}
+FONT_FILES = ("Manrope.ttf", "ManropeSemiBold.ttf", "ManropeBold.ttf", "ManropeExtraBold.ttf")
+FALLBACK_FONT = {"Manrope": "Segoe UI", "Manrope SemiBold": "Segoe UI Semibold", "Manrope Bold": "Segoe UI Semibold",
+                 "Manrope ExtraBold": "Segoe UI Semibold"}
 LOG_HINT = "Click a line to write a note about it. Right-click to copy, rename or delete it."
 
 
@@ -2551,8 +2581,11 @@ class App:
         self.stop_evt = threading.Event()
         self.last_capture = None
 
+        # The typeface is bundled with the overlay and made available to this program only.
+        self._own_fonts = PLATFORM.register_fonts([ASSETS / "fonts" / n for n in FONT_FILES])
+        family_of = lambda f: f if self._own_fonts else FALLBACK_FONT.get(f, f)
         self.fonts = {name: tkfont.Font(root, underline=underline, **dict(zip(("family", "weight"),
-                                                                               PLATFORM.font(family, weight))))
+                                                                               PLATFORM.font(family_of(family), weight))))
                       for name, (family, _, weight, underline) in FONTS.items()}
         pos = self.cfg.get("pos")
         self._dpi = (PLATFORM.screen_dpi(pos[0] + 40, pos[1] + 15) if pos else None) or root.winfo_fpixels("1i")
@@ -2574,79 +2607,17 @@ class App:
         self._apply_window_settings()
         self._restore_position()
 
-        main = self.main = tk.Frame(root, bg=BG)
-        main.grid(row=0, column=0, sticky="n")
+        setup_ttk(root)
+        PLATFORM.style_window(root, INK, TEXT_DIM)          # a title bar in the overlay's own colours
+        self._trend, self._trend_at, self._start_text = deque(maxlen=60), 0.0, "Start"
+        self.status = tk.StringVar()
+        self.status.trace_add("write", lambda *_: self.view.show(message=self.status.get()) if hasattr(self, "view") else None)
         root.columnconfigure(1, weight=1)                 # the log gets any extra room
         root.rowconfigure(0, weight=1)
-        self.vars = {}
-        tk.Label(main, text="EXP / hr", bg=BG, fg=DIM, font=self.fonts["text"]).grid(
-            row=0, column=0, sticky="w", padx=12, pady=(10, 0))
-        corner = tk.Frame(main, bg=BG)
-        corner.grid(row=0, column=1, sticky="ne", padx=(0, 6), pady=(4, 0))
-        small = dict(bg=BG, fg=DIM, activebackground=FIELD, activeforeground=FG, relief="flat",
-                     bd=0, padx=6, pady=0, font=self.fonts["icon"], cursor="hand2")
-        self.best_btn = tk.Button(corner, text="Best maps", command=self.open_best_maps,
-                  **{**small, "fg": ACCENT_SOFT, "activebackground": BG, "activeforeground": ACCENT,
-                     "font": self.fonts["link"]})
-        self.best_btn.pack(side="left", padx=(0, 4))
-        tk.Button(corner, text="⚙", command=self.open_settings, **small).pack(side="left")
-        self.log_btn = tk.Button(corner, text=">", command=self.toggle_log, **small)
-        self.log_btn.pack(side="left")
-        self.compact_btn = tk.Button(corner, text="Compact", command=lambda: self.set_compact(not self.compact),
-                                     bg=FIELD, fg=FG, activebackground="#3a3f49", activeforeground=FG,
-                                     relief="flat", bd=0, padx=8, pady=1, font=self.fonts["small"], cursor="hand2")
-        self.compact_btn.pack(side="left", padx=(6, 0))
-        self.big = tk.Label(main, text="—", bg=BG, fg=ACCENT, font=self.fonts["big"])
-        self.big.grid(row=1, column=0, columnspan=2, sticky="w", padx=12)
-        self.big.bind("<Double-Button-1>", lambda _: self.set_compact(not self.compact))
-        # Under the big number, like a caption: when you'll reach the next level.
-        self.next_level = tk.Label(main, text="", bg=BG, fg=ACCENT_SOFT, font=self.fonts["next"])
-        self.next_level.grid(row=2, column=0, columnspan=2, sticky="nw", padx=(14, 12), pady=(0, 8))
-
-        rows = ["Last 5 min", "% / hr", "Gained", "Current",
-                "Mesos", "Mesos / hr", "Mesos / 5 min", "Elapsed"]
-        self.detail = []                                  # the rows, hidden in compact mode
-        for i, name in enumerate(rows, start=3):
-            label = tk.Label(main, text=name, bg=BG, fg=DIM, font=self.fonts["row"])
-            label.grid(row=i, column=0, sticky="w", padx=(12, 8))
-            v = tk.StringVar(value="—")
-            value = tk.Label(main, textvariable=v, bg=BG, fg=FG, font=self.fonts["value"])
-            value.grid(row=i, column=1, sticky="e", padx=(8, 12))
-            self.vars[name] = v
-            self.detail += [label, value]
-        # Compact mode's stand-in for the rows: the last 5 minutes and mesos/hr, on one line.
-        self.compact_line = tk.Label(main, text="", bg=BG, fg=DIM, font=self.fonts["text"])
-        self.compact_line.grid(row=3, column=0, columnspan=2, sticky="w", padx=12)
-        self.compact_line.grid_remove()
-
-        bar = tk.Frame(main, bg=BG)
-        bar.grid(row=len(rows) + 3, column=0, columnspan=2, pady=(10, 4), padx=8)
-        btn = dict(bg=FIELD, fg=FG, activebackground="#3a3f49", activeforeground=FG,
-                   relief="flat", padx=8, pady=3, font=self.fonts["text"])
-        self.start_btn = tk.Button(bar, text="Start", command=self.toggle, **btn)
-        self.start_btn.pack(side="left", padx=2)
-        reset_btn = tk.Button(bar, text="Reset", command=self.reset, **btn)
-        reset_btn.pack(side="left", padx=2)
-        # Keeps this run out of the log (everything is still shown). Turns itself off when
-        # the run ends: when you leave the map or stop getting EXP.
-        self._btn_style = btn
-        self.skip_btn = tk.Button(bar, command=self.toggle_skip_log, **btn)
-        self.skip_btn.pack(side="left", padx=2)
+        self._build_view()
         self._show_skip_log()
-        # Normally the EXP bar is found by itself; this switches to an area you drag out
-        # yourself (if it ever can't find it) and back.
-        self.area_btn = tk.Button(bar, command=self.toggle_area, **btn)
-        self.area_btn.pack(side="left", padx=2)
-        capture_btn = tk.Button(bar, text="View capture", command=self.view_capture, **btn)
-        capture_btn.pack(side="left", padx=2)
-        self._show_area_mode()
-        self.more_buttons = [reset_btn, self.skip_btn, self.area_btn, capture_btn]   # not in compact mode
-
-        self.status = tk.StringVar()
-        self.status_label = tk.Label(main, textvariable=self.status, bg=BG, fg=DIM, font=self.fonts["small"],
-                                     justify="left")
-        self.status_label.grid(row=len(rows) + 4, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 8))
-        self._fit_status()
+        for delay in (0, 150, 800):                        # (Windows can reset it while the window is first shown)
+            root.after(delay, lambda: PLATFORM.style_window(root, INK, TEXT_DIM))
 
         self._build_log_panel()
         if self.cfg["compact"]:
@@ -2668,14 +2639,52 @@ class App:
             self.check_updates()                       # only now, when it starts
         root.after(1500, self._ask_to_share)           # (asked once, the first time)
 
+    # ---- the main window
+    def _build_view(self):
+        """(Re)builds the main window at the current size: it's drawn smoothly for each screen's scaling
+        and for Settings > Size, so a new size means new pictures."""
+        if getattr(self, "view", None):
+            self.view.destroy()
+        self.theme = Theme(self.root, self._px_per_pt * 0.75, ASSETS / "fonts", self._own_fonts, PLATFORM.font)
+        callbacks = dict(settings=self.open_settings, compact=lambda: self.set_compact(not self.compact),
+                         log=self.toggle_log, start=self.toggle, reset=self.reset, logging=self._logging_clicked,
+                         best=self.open_best_maps, menu=self._open_menu, details=self._details_changed)
+        self.view = self.main = MainView(self.root, self.theme, callbacks, details=bool(self.cfg.get("details")))
+        self.view.grid(row=0, column=0, sticky="n")
+        if self.compact:
+            self.view.set_compact(True)
+        self._set_start(self._start_text)
+        self.view.log_btn.set(kind="secondary" if self.log_open else "ghost")
+        self.view.show(message=self.status.get())
+        self._show_skip_log()
+
+    def _style_frame(self):
+        """The title bar in the overlay's colours. (Windows resets it when the frame changes, e.g. when the
+        log opens or it goes compact, so this runs again a moment after.)"""
+        for delay in (30, 300):
+            self.root.after(delay, lambda: PLATFORM.style_window(self.root, INK, TEXT_DIM))
+
+    def _details_changed(self, is_open):
+        self.cfg["details"] = is_open
+        save_config(self.cfg)
+
+    def _open_menu(self, anchor):
+        PopupMenu(self.theme, anchor, [
+            ("Follow the game" if self.reader.mode == "region" else "Select area", None, self.toggle_area),
+            ("View capture", None, self.view_capture)])
+
+    def _logging_clicked(self, on):
+        if self.skip_log == on:                           # the switch and the state disagree: flip
+            self.toggle_skip_log()
+
     # ---- log panel
     def _build_log_panel(self):
         p = self.log_panel = tk.Frame(self.root, bg=BG)
-        tk.Label(p, text="EXP log", bg=BG, fg=DIM, font=self.fonts["text"]).grid(
-            row=0, column=0, columnspan=2, sticky="w")
+        tk.Label(p, text="EXP log", bg=BG, fg=FG, font=self.fonts["title"]).grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(2, 0))
         self.log_status = tk.StringVar()
-        tk.Label(p, textvariable=self.log_status, bg=BG, fg=FG, font=self.fonts["text"],
-                 justify="left", anchor="w").grid(row=1, column=0, columnspan=2, sticky="we", pady=(2, 6))
+        tk.Label(p, textvariable=self.log_status, bg=BG, fg=DIM, font=self.fonts["text"],
+                 justify="left", anchor="w").grid(row=1, column=0, columnspan=2, sticky="we", pady=(2, 10))
 
         # A compact table: one row per day, map, level and class, solo or in a party (click a
         # party row for a row per party size). Drag the lines between the column titles to
@@ -2685,11 +2694,11 @@ class App:
         style.theme_use("clam")
         style.layout("Log.Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
         style.configure("Log.Treeview", background=LIST_BG, fieldbackground=LIST_BG, foreground=FG,
-                        font=cell, rowheight=int(cell.metrics("linespace") * 1.45), borderwidth=0)
-        style.configure("Log.Treeview.Heading", background=FIELD, foreground=DIM, relief="flat",
-                        borderwidth=0, font=head)
-        style.map("Log.Treeview", background=[("selected", "#3a3f49")], foreground=[("selected", FG)])
-        style.map("Log.Treeview.Heading", background=[("active", "#3a3f49")])
+                        font=cell, rowheight=int(cell.metrics("linespace") * 1.8), borderwidth=0)
+        style.configure("Log.Treeview.Heading", background=BG, foreground=DIM, relief="flat",
+                        borderwidth=0, font=self.fonts["caps"], padding=(0, 6))
+        style.map("Log.Treeview", background=[("selected", SELECT)], foreground=[("selected", ACCENT)])
+        style.map("Log.Treeview.Heading", background=[("active", BG)])
         # (key, title, widest usual value, alignment): starting widths are measured in the
         # real font, so nothing is cut off at any screen scaling.
         columns = (("date", "Date", "Sep 30", "w"), ("map", "Map", "The Swamp of Despair II", "w"),
@@ -2717,7 +2726,7 @@ class App:
         tree.tag_configure("part", background=LIST_PART, foreground="#b3b8c0")   # one party size
         tree.tag_configure("edited", foreground="#6b7079")      # changed outside the tracker
         tree.grid(row=2, column=0, sticky="nsew")
-        scroll = tk.Scrollbar(p, orient="vertical", command=tree.yview)
+        scroll = ttk.Scrollbar(p, orient="vertical", command=tree.yview, style="Dark.Vertical.TScrollbar")
         scroll.grid(row=2, column=1, sticky="ns")
         tree.configure(yscrollcommand=scroll.set)
         # Notes: a place for the player's own notes on the selected line. They're only ever kept
@@ -2731,7 +2740,7 @@ class App:
         self.note_title.grid(row=0, column=0, sticky="we")
         self.note_text = tk.Text(nb, height=3, wrap="word", undo=True, maxundo=100, bg=LIST_BG, fg=FG,
                                  insertbackground=FG, relief="flat", font=cell, padx=8, pady=6,
-                                 highlightthickness=1, highlightbackground="#3a3f49", highlightcolor=ACCENT)
+                                 highlightthickness=1, highlightbackground=LINE, highlightcolor=ACCENT)
         self.note_text.grid(row=1, column=0, sticky="we", pady=(3, 0))
         self.note_text.bind("<<Modified>>", self._note_modified)
         self.note_text.bind("<FocusIn>", lambda e: self.hotkeys.pause(True))      # typing "!" isn't Shift+1
@@ -2774,7 +2783,8 @@ class App:
             root.resizable(False, False)
             root.minsize(1, 1)
             root.geometry("")                           # back to just the tracker's size
-        self.log_btn.config(text="<" if self.log_open else ">")
+        self.view.log_btn.set(kind="secondary" if self.log_open else "ghost")
+        self._style_frame()
         if remember:
             self.cfg["log_open"] = self.log_open
             save_config(self.cfg)
@@ -2787,19 +2797,8 @@ class App:
         self.compact = self.cfg["compact"] = on
         if on and self.log_open:
             self.toggle_log(remember=False)                 # out of the way, but remembered
-        for w in self.detail:
-            w.grid_remove() if on else w.grid()
-        self.compact_line.grid() if on else self.compact_line.grid_remove()
-        for b in self.more_buttons:
-            b.pack_forget()
-            if not on:
-                b.pack(side="left", padx=2)
-        if on:
-            self.log_btn.pack_forget()
-        else:
-            self.log_btn.pack(side="left", before=self.compact_btn)
-        self.compact_btn.config(text="Full" if on else "Compact")
-        self._fit_status()
+        self.view.set_compact(on)
+        self._style_frame()
         if not on and self.cfg.get("log_open"):
             self.toggle_log(remember=False)
         else:
@@ -2813,15 +2812,16 @@ class App:
         for name, (_, size, _, _) in FONTS.items():
             # In pixels (negative), never under 9 so the smallest text stays readable.
             self.fonts[name].configure(size=-max(9, round(size * self._px_per_pt)))
+        if old is not None and getattr(self, "view", None):
+            self._build_view()
         if old is None or not hasattr(self, "log_tree"):    # at start, before the window is built
             return
         self._fit_settings()
-        ttk.Style(self.root).configure("Log.Treeview", rowheight=int(self.fonts["text"].metrics("linespace") * 1.45))
+        ttk.Style(self.root).configure("Log.Treeview", rowheight=int(self.fonts["text"].metrics("linespace") * 1.8))
         for c in self.log_tree["columns"]:
             width = round(self.log_tree.column(c, "width") * self._px_per_pt / old)
             self.log_tree.column(c, width=max(10, width))
         self.cfg["log_size"] = None                         # a size from before may not fit any more
-        self._fit_status()
         if self.log_open:
             self.root.update_idletasks()
             self.root.minsize(self.main.winfo_reqwidth() + 150, self.main.winfo_reqheight())
@@ -2842,12 +2842,6 @@ class App:
         if dpi and dpi != self._dpi:
             self._dpi = dpi
             self._apply_ui_scale()
-
-    def _fit_status(self):
-        """Wraps the status line at the width the rest of the window needs."""
-        self.status_label.config(wraplength=1)
-        self.main.update_idletasks()
-        self.status_label.config(wraplength=max(160, self.main.winfo_reqwidth() - 24))
 
     def _fill_log(self):
         """The log, newest first. A map's party sizes on a day share a row (smallest to biggest
@@ -3097,10 +3091,22 @@ class App:
         self.root.attributes("-topmost", bool(self.cfg["topmost"]))
         self.root.attributes("-alpha", 1 - min(90, max(0, int(self.cfg["transparency"]))) / 100)
 
+    def _switch(self, parent, text, var):
+        """An on/off switch tied to a BooleanVar."""
+        t = Toggle(parent, self.theme, text, bool(var.get()), lambda on: var.set(on), BG)
+        var.trace_add("write", lambda *_: t.set(bool(var.get())))
+        return t
+
+    def _section(self, parent, text, first=False):
+        tk.Label(parent, text=text.upper(), bg=BG, fg=DIM, font=self.theme.font("semibold", 10)).pack(
+            anchor="w", pady=(0 if first else self.theme.px(20), self.theme.px(8)))
+
     def open_settings(self):
         if self.settings_win and self.settings_win.winfo_exists():
             self.settings_win.lift()
             return
+        th = self.theme
+        px = th.px
         w = self.settings_win = tk.Toplevel(self.root)
         w.title("Settings")
         w.configure(bg=BG)
@@ -3110,63 +3116,77 @@ class App:
         if r:                                    # over the overlay, so on the same screen (and scaling)
             w.geometry(f"+{r[0] + 40}+{r[1] + 40}")
         w.attributes("-topmost", bool(self.cfg["topmost"]))
-        text = dict(bg=BG, fg=FG, font=self.fonts["text"])
+        for delay in (0, 150, 800):
+            w.after(delay, lambda: PLATFORM.style_window(w, INK, TEXT_DIM) if w.winfo_exists() else None)
+        body = tk.Frame(w, bg=BG)
+        body.pack(padx=px(26), pady=px(22))
+        text = dict(bg=BG, fg=FG, font=th.font("semibold", 12))
+        dim = dict(bg=BG, fg=DIM, font=th.font("regular", 11))
+        wrap = px(380)
 
+        self._section(body, "Tracking", first=True)
         gap = tk.StringVar(value=str(self.cfg["gap_seconds"]))
-        tk.Label(w, text="Pause tracking (and restart the 5-minute log timer)\nafter no EXP for",
-                 justify="left", **text).grid(
-            row=0, column=0, sticky="w", padx=14, pady=(14, 4))
-        line = tk.Frame(w, bg=BG)
-        line.grid(row=1, column=0, sticky="w", padx=14)
-        tk.Spinbox(line, from_=5, to=300, width=5, textvariable=gap, bg=FIELD, fg=FG,
-                   buttonbackground=FIELD, insertbackground=FG, relief="flat",
-                   font=self.fonts["text"]).pack(side="left")
-        tk.Label(line, text="seconds", **text).pack(side="left", padx=(6, 0))
+        line = tk.Frame(body, bg=BG)
+        line.pack(fill="x")
+        tk.Label(line, text="Pause after no EXP for", **text).pack(side="left")
+        gap_step = tk.Frame(line, bg=BG)
+        gap_step.pack(side="right")
 
+        def gap_by(by):
+            try:
+                now_ = int(gap.get())
+            except ValueError:
+                now_ = self.cfg["gap_seconds"]
+            gap.set(str(min(300, max(5, now_ + by))))
+        Button(gap_step, th, text="−", kind="secondary", width=38, height=34, radius=10, size=15,
+               command=lambda: gap_by(-5), bg=BG).pack(side="left")
+        tk.Label(gap_step, textvariable=gap, width=4, bg=BG, fg=FG, font=th.font("bold", 12)).pack(side="left")
+        Button(gap_step, th, text="+", kind="secondary", width=38, height=34, radius=10, size=15,
+               command=lambda: gap_by(5), bg=BG).pack(side="left")
+        tk.Label(gap_step, text="s", bg=BG, fg=DIM, font=th.font("regular", 11)).pack(side="left", padx=(px(6), 0))
+        tk.Label(body, text="Pausing also restarts the 5-minute log timer.", **dim).pack(anchor="w", pady=(px(5), 0))
+
+        self._section(body, "Window")
         transparency = tk.IntVar(value=int(self.cfg["transparency"]))
-        tk.Label(w, text="Window transparency (%)", **text).grid(
-            row=2, column=0, sticky="w", padx=14, pady=(14, 0))
-        tk.Scale(w, from_=0, to=90, orient="horizontal", variable=transparency, length=240,
-                 bg=BG, fg=FG, troughcolor=FIELD, highlightthickness=0, bd=0,
-                 font=self.fonts["small"]).grid(row=3, column=0, sticky="w", padx=10)
-
-        size_line = tk.Frame(w, bg=BG)
-        size_line.grid(row=4, column=0, sticky="w", padx=14, pady=(10, 0))
+        line = tk.Frame(body, bg=BG)
+        line.pack(fill="x")
+        tk.Label(line, text="Transparency", **text).pack(side="left")
+        percent = tk.Label(line, text=f"{transparency.get()}%", **dim)
+        percent.pack(side="right")
+        transparency.trace_add("write", lambda *_: percent.config(text=f"{int(float(transparency.get()))}%"))
+        Slider(body, th, transparency, 0, 90, 330, BG).pack(anchor="w", pady=(px(6), px(12)))
+        size_line = tk.Frame(body, bg=BG)
+        size_line.pack(fill="x")
         tk.Label(size_line, text="Size", **text).pack(side="left")
-        # − 100% +: steps through UI_SCALES only, so it stops at the smallest and biggest sizes.
+        # \u2212 100% +: steps through UI_SCALES only, so it stops at the smallest and biggest sizes.
         size = tk.StringVar(value=f"{self.cfg['ui_scale']}%")
-        step = dict(bg=FIELD, fg=FG, activebackground="#3a3f49", activeforeground=FG, relief="flat", bd=0,
-                    padx=8, pady=0, font=self.fonts["text"], cursor="hand2", disabledforeground="#555a63")
+        stepper = tk.Frame(size_line, bg=BG)
+        stepper.pack(side="right")
 
         def nudge(by):
             i = UI_SCALES.index(int(size.get().rstrip("%"))) + by
             if 0 <= i < len(UI_SCALES):
                 size.set(f"{UI_SCALES[i]}%")
-            smaller.config(state="normal" if i > 0 else "disabled")
-            bigger.config(state="normal" if i < len(UI_SCALES) - 1 else "disabled")
-        smaller = tk.Button(size_line, text="−", command=lambda: nudge(-1), **step)
-        smaller.pack(side="left", padx=(8, 0))
-        tk.Label(size_line, textvariable=size, width=5, **text).pack(side="left")
-        bigger = tk.Button(size_line, text="+", command=lambda: nudge(1), **step)
+            smaller.set(enabled=i > 0)
+            bigger.set(enabled=i < len(UI_SCALES) - 1)
+        smaller = Button(stepper, th, text="\u2212", kind="secondary", width=38, height=34, radius=10, size=15,
+                         command=lambda: nudge(-1), bg=BG)
+        smaller.pack(side="left")
+        tk.Label(stepper, textvariable=size, width=5, bg=BG, fg=FG, font=th.font("bold", 12)).pack(side="left")
+        bigger = Button(stepper, th, text="+", kind="secondary", width=38, height=34, radius=10, size=15,
+                        command=lambda: nudge(1), bg=BG)
         bigger.pack(side="left")
         nudge(0)
         topmost = tk.BooleanVar(value=bool(self.cfg["topmost"]))
-        tk.Checkbutton(w, text="Always on top of other windows", variable=topmost, bg=BG, fg=FG,
-                       selectcolor=FIELD, activebackground=BG, activeforeground=FG,
-                       font=self.fonts["text"]).grid(row=5, column=0, sticky="w", padx=10, pady=(8, 0))
+        self._switch(body, "Always on top of other windows", topmost).pack(anchor="w", pady=(px(14), 0))
+
+        self._section(body, "Updates and sharing")
         updates = tk.BooleanVar(value=bool(self.cfg["check_updates"]))
-        tk.Checkbutton(w, text="Check for updates when it starts", variable=updates, bg=BG, fg=FG,
-                       selectcolor=FIELD, activebackground=BG, activeforeground=FG,
-                       font=self.fonts["text"]).grid(row=6, column=0, sticky="w", padx=10, pady=(2, 0))
+        self._switch(body, "Check for updates when it starts", updates).pack(anchor="w")
         sharing = tk.BooleanVar(value=bool(self.cfg.get("share_runs")))
-        share_line = tk.Frame(w, bg=BG)
-        share_line.grid(row=7, column=0, sticky="w", padx=10, pady=(2, 0))
-        tk.Checkbutton(share_line, text=f"Share my {RUN_SECONDS // 60}-minute runs (anonymously) on the best-maps site",
-                       variable=sharing, bg=BG, fg=FG, selectcolor=FIELD, activebackground=BG,
-                       activeforeground=FG, font=self.fonts["text"]).pack(side="left")
-        tk.Button(share_line, text="Open it", command=self.open_best_maps, bg=BG,
-                  fg=ACCENT_SOFT, activebackground=BG, activeforeground=ACCENT, relief="flat", bd=0,
-                  cursor="hand2", font=self.fonts["link"]).pack(side="left", padx=(4, 0))
+        self._switch(body, f"Share my {RUN_SECONDS // 60}-minute runs, anonymously", sharing).pack(anchor="w", pady=(px(6), 0))
+        tk.Label(body, text="They feed the best-maps site. Your notes and log never leave this PC.", wraplength=wrap,
+                 justify="left", **dim).pack(anchor="w", pady=(px(4), 0))
 
         def apply(*_):
             try:
@@ -3175,7 +3195,7 @@ class App:
                 seconds = 0
             if 1 <= seconds <= 3600:
                 self.cfg["gap_seconds"] = self.autolog.gap = self.session.gap = seconds
-            self.cfg["transparency"] = int(transparency.get())
+            self.cfg["transparency"] = int(float(transparency.get()))
             self.cfg["topmost"] = bool(topmost.get())
             self.cfg["check_updates"] = bool(updates.get())
             if bool(sharing.get()) != bool(self.cfg.get("share_runs")):
@@ -3187,55 +3207,65 @@ class App:
             if scale in UI_SCALES and scale != self.cfg["ui_scale"]:
                 self.cfg["ui_scale"] = scale
                 self._apply_ui_scale()
+                self.root.after(60, self._reopen_settings)        # (drawn again at the new size)
             save_config(self.cfg)
 
         for var in (gap, transparency, topmost, updates, sharing, size):
             var.trace_add("write", apply)
-        self._hotkey_settings(w, row=8)
-        buttons = tk.Frame(w, bg=BG)
-        buttons.grid(row=9, column=0, sticky="we", padx=14, pady=(14, 6))
-        style = dict(bg=FIELD, fg=FG, activebackground="#3a3f49", activeforeground=FG, relief="flat",
-                     padx=12, pady=3, font=self.fonts["text"])
-        tk.Button(buttons, text="Open data folder", command=self.open_data_folder, **style).pack(side="left")
-        tk.Button(buttons, text="Check for updates", command=lambda: self.check_updates(manual=True),
-                  **style).pack(side="left", padx=(6, 0))
-        tk.Button(buttons, text="Report a bug", command=lambda: self.report_bug(w),
-                  **style).pack(side="left", padx=(6, 0))
-        tk.Button(buttons, text="Close", command=w.destroy, **style).pack(side="right", padx=(6, 0))
-        tk.Label(w, text=f"Your log and settings are saved in {DATA_DIR}", bg=BG, fg=DIM,
-                 font=self.fonts["small"], wraplength=int(250 * self._px_per_pt), justify="left").grid(
-            row=10, column=0, sticky="w", padx=14)
-        tk.Label(w, text=f"{WINDOW_TITLE} v{VERSION}. This is a beta: it's still being improved.",
-                 bg=BG, fg=DIM, font=self.fonts["small"]).grid(row=11, column=0, sticky="w", padx=14, pady=(2, 12))
+        self._hotkey_settings(body)
+        buttons = tk.Frame(body, bg=BG)
+        buttons.pack(fill="x", pady=(px(22), px(4)))
+        Button(buttons, th, text="Close", kind="primary", width=96, height=38, radius=11, size=12,
+               command=w.destroy, bg=BG).pack(side="right")
+        Button(buttons, th, text="Data folder", kind="secondary", width=104, height=38, radius=11, size=12,
+               command=self.open_data_folder, bg=BG).pack(side="left")
+        Button(buttons, th, text="Check for updates", kind="secondary", width=146, height=38, radius=11, size=12,
+               command=lambda: self.check_updates(manual=True), bg=BG).pack(side="left", padx=(px(8), 0))
+        Button(buttons, th, text="Report a bug", kind="secondary", width=116, height=38, radius=11, size=12,
+               command=lambda: self.report_bug(w), bg=BG).pack(side="left", padx=(px(8), 0))
+        tk.Label(body, text=f"Your log, notes and settings are saved in {DATA_DIR}", wraplength=wrap, justify="left",
+                 bg=BG, fg=FAINT, font=th.font("regular", 10)).pack(anchor="w", pady=(px(8), 0))
+        tk.Label(body, text=f"{WINDOW_TITLE} v{VERSION}. This is a beta: it's still being improved.", bg=BG, fg=FAINT,
+                 font=th.font("regular", 10)).pack(anchor="w", pady=(px(2), 0))
 
-    def _hotkey_settings(self, w, row):
+    def _reopen_settings(self):
+        """After a size change: Settings again, in the same place, drawn for the new size."""
+        old = self.settings_win
+        if old and old.winfo_exists():
+            where = f"+{old.winfo_x()}+{old.winfo_y()}"
+            old.destroy()
+            self.open_settings()
+            self.settings_win.geometry(where)
+
+    def _hotkey_settings(self, body):
         """Settings' Hotkeys section: on or off, and each one changeable (click it, then press
         the keys; Esc keeps it as it was, Backspace turns it off)."""
-        box = tk.Frame(w, bg=BG)
-        box.grid(row=row, column=0, sticky="w", padx=10, pady=(10, 0))
+        th, w = self.theme, body.winfo_toplevel()
+        px = th.px
+        self._section(body, "Hotkeys")
+        box = tk.Frame(body, bg=BG)
+        box.pack(anchor="w", fill="x")
         if not self.hotkeys.supported:
             tk.Label(box, text=f"Hotkeys aren't available on {PLATFORM.name} yet: use the buttons.",
-                     bg=BG, fg=DIM, font=self.fonts["text"]).grid(row=0, column=0, sticky="w")
+                     bg=BG, fg=DIM, font=th.font("regular", 11)).pack(anchor="w")
             return
         on = tk.BooleanVar(value=self.cfg["hotkeys_on"])
-        tk.Checkbutton(box, text="Hotkeys, while MapleStory or the overlay is in front:", variable=on, bg=BG,
-                       fg=FG, selectcolor=FIELD, activebackground=BG, activeforeground=FG,
-                       font=self.fonts["text"]).grid(row=0, column=0, columnspan=3, sticky="w")
-        key_style = dict(bg=FIELD, fg=FG, activebackground="#3a3f49", activeforeground=FG, relief="flat", bd=0,
-                         padx=8, pady=1, width=10, font=self.fonts["text"], cursor="hand2")
+        self._switch(box, "Hotkeys, while MapleStory or the overlay is in front", on).pack(anchor="w", pady=(0, px(8)))
+        grid = tk.Frame(box, bg=BG)
+        grid.pack(anchor="w", padx=(px(2), 0))
         buttons, notes, choosing = {}, {}, {"action": None}
         hint = tk.StringVar(value="Click one, then press the keys you want. Backspace turns it off.")
 
         def show():
             for action, b in buttons.items():
                 key = self.cfg["hotkeys"][action]
-                b.config(text=key or "Off", bg=FIELD, fg=FG if key else DIM)
+                b.set(text=key or "Off", kind="secondary" if key else "ghost")
                 notes[action].config(text=self.hotkeys.problems.get(action, ""))
 
         def choose(action):
             choosing["action"] = action
             self.hotkeys.pause(True)                 # so the keys reach this window
-            buttons[action].config(text="Press keys...", bg=ACCENT_SOFT, fg=BG)
+            buttons[action].set(text="Press keys...", kind="accent")
             w.focus_force()
 
         def done(action, key):
@@ -3268,15 +3298,15 @@ class App:
                 done(action, key)
             return "break"
 
-        for i, (action, name) in enumerate(HOTKEY_ACTIONS.items(), start=1):
-            tk.Label(box, text=name, bg=BG, fg=FG, font=self.fonts["text"]).grid(row=i, column=0, sticky="w",
-                                                                                  padx=(26, 10), pady=1)
-            buttons[action] = tk.Button(box, command=lambda a=action: choose(a), **key_style)
-            buttons[action].grid(row=i, column=1, sticky="w", pady=1)
-            notes[action] = tk.Label(box, bg=BG, fg="#d97a6c", font=self.fonts["small"])
-            notes[action].grid(row=i, column=2, sticky="w", padx=(8, 0))
-        tk.Label(box, textvariable=hint, bg=BG, fg=DIM, font=self.fonts["small"]).grid(
-            row=len(HOTKEY_ACTIONS) + 1, column=0, columnspan=3, sticky="w", padx=(26, 0), pady=(2, 0))
+        for i, (action, name) in enumerate(HOTKEY_ACTIONS.items()):
+            tk.Label(grid, text=name, bg=BG, fg=FG, font=th.font("regular", 12), width=14, anchor="w").grid(
+                row=i, column=0, sticky="w", pady=px(3))
+            buttons[action] = Button(grid, th, text="", kind="secondary", width=124, height=34, radius=10, size=12,
+                                     command=lambda a=action: choose(a), bg=BG)
+            buttons[action].grid(row=i, column=1, sticky="w", pady=px(3))
+            notes[action] = tk.Label(grid, bg=BG, fg="#ff8a7a", font=th.font("regular", 10))
+            notes[action].grid(row=i, column=2, sticky="w", padx=(px(8), 0))
+        tk.Label(box, textvariable=hint, bg=BG, fg=FAINT, font=th.font("regular", 10)).pack(anchor="w", pady=(px(6), 0))
         w.bind("<KeyPress>", pressed)
         w.bind("<Destroy>", lambda e: e.widget is w and self.hotkeys.pause(False))
 
@@ -3390,20 +3420,22 @@ class App:
             return
         w = tk.Toplevel(self.root)
         w.title("Update available")
-        w.configure(bg=BG, padx=16, pady=14)
+        w.configure(bg=BG, padx=self.theme.px(26), pady=self.theme.px(22))
         w.resizable(False, False)
         w.transient(self.root)
         w.attributes("-topmost", bool(self.cfg["topmost"]))
-        tk.Label(w, text=f"{WINDOW_TITLE} v{version} is out", bg=BG, fg=ACCENT,
-                 font=self.fonts["title"]).pack(anchor="w")
-        tk.Label(w, text=f"You have v{VERSION}. Your log and settings are kept when you update.",
-                 bg=BG, fg=DIM, font=self.fonts["text"]).pack(anchor="w", pady=(2, 10))
-        tk.Label(w, text="What's new:", bg=BG, fg=FG, font=self.fonts["text"]).pack(anchor="w")
-        box = tk.Frame(w, bg=BG)
-        box.pack(fill="both", expand=True, pady=(4, 12))
-        text = tk.Text(box, width=64, height=12, wrap="word", bg=LIST_BG, fg=FG, relief="flat",
-                       font=self.fonts["text"], padx=8, pady=6, highlightthickness=0)
-        scroll = tk.Scrollbar(box, command=text.yview)
+        for delay in (0, 150, 800):
+            w.after(delay, lambda: PLATFORM.style_window(w, INK, TEXT_DIM) if w.winfo_exists() else None)
+        th = self.theme
+        tk.Label(w, text=f"v{version} is out", bg=BG, fg=ACCENT, font=th.font("extra", 20)).pack(anchor="w")
+        tk.Label(w, text=f"You have v{VERSION}. Your log, notes and settings are kept when you update.",
+                 bg=BG, fg=DIM, font=th.font("regular", 12)).pack(anchor="w", pady=(2, th.px(14)))
+        tk.Label(w, text="WHAT'S NEW", bg=BG, fg=DIM, font=th.font("semibold", 10)).pack(anchor="w", pady=(0, th.px(6)))
+        box = tk.Frame(w, bg=LIST_BG, highlightthickness=1, highlightbackground=LINE)
+        box.pack(fill="both", expand=True, pady=(0, th.px(16)))
+        text = tk.Text(box, width=62, height=12, wrap="word", bg=LIST_BG, fg=FG, relief="flat",
+                       font=th.font("regular", 12), padx=th.px(12), pady=th.px(10), highlightthickness=0)
+        scroll = ttk.Scrollbar(box, command=text.yview, style="Dark.Vertical.TScrollbar")
         text.configure(yscrollcommand=scroll.set)
         text.insert("1.0", notes or "(No details were given for this version.)")
         text.configure(state="disabled")
@@ -3411,8 +3443,6 @@ class App:
         scroll.pack(side="right", fill="y")
         buttons = tk.Frame(w, bg=BG)
         buttons.pack(fill="x")
-        style = dict(bg=FIELD, fg=FG, activebackground="#3a3f49", activeforeground=FG, relief="flat",
-                     padx=12, pady=3, font=self.fonts["text"])
 
         def get_it():
             webbrowser.open(RELEASES_PAGE)                # always your own releases page
@@ -3422,10 +3452,12 @@ class App:
             self.cfg["skip_version"] = version
             save_config(self.cfg)
             w.destroy()
-        tk.Button(buttons, text="Get the update", command=get_it, **{**style, "bg": ACCENT_SOFT, "fg": BG,
-                  "activebackground": ACCENT, "activeforeground": BG}).pack(side="left")
-        tk.Button(buttons, text="Not now", command=w.destroy, **style).pack(side="left", padx=(6, 0))
-        tk.Button(buttons, text="Skip this version", command=skip, **style).pack(side="right")
+        Button(buttons, th, text="Get the update", kind="primary", width=140, height=40, radius=12, size=13,
+               command=get_it, bg=BG).pack(side="left")
+        Button(buttons, th, text="Not now", kind="secondary", width=96, height=40, radius=12, size=12,
+               command=w.destroy, bg=BG).pack(side="left", padx=(th.px(8), 0))
+        Button(buttons, th, text="Skip this version", kind="ghost", width=140, height=40, radius=12, size=12,
+               command=skip, bg=BG).pack(side="right")
 
     def _oops(self, what, exc):
         """Something unexpected went wrong: note it in errors.log and keep going."""
@@ -3564,37 +3596,52 @@ class App:
             if not self.stop_evt.is_set():
                 self.root.after(500, self._refresh)
 
+    def _state(self):
+        """A word for the status pill: where things stand."""
+        t, sess = self.tracker, self.session
+        if self.reader.mode == "window" and not self.reader.hwnd:
+            return "waiting", "Looking for the game"
+        if self.rejected >= 5:
+            return "alert", "Can't read the EXP bar"
+        if t.req is None:
+            return "waiting", "Reading your EXP bar"
+        if self.level_up_at and time.monotonic() - self.level_up_at < 6:
+            return "tracking", "Level up!"
+        if sess.waiting:
+            return "paused", "Paused"
+        if t.running:
+            return "tracking", f"Tracking \u00b7 Lv {self.level}" if self.level else "Tracking"
+        return ("paused", "Paused") if t.elapsed() > 0 else ("ready", "Ready")
+
     def _update_display(self):
         t, now = self.tracker, time.monotonic()
-        rate = t.rate()
-        self.big.config(text=fmt_num(rate) if rate is not None else "—",
-                        fg=ACCENT if rate is not None else DIM)
-        self.vars["Last 5 min"].set(fmt_num(t.rolling_rate()))
-        self.vars["% / hr"].set(f"{rate / t.req * 100:.2f}%" if rate and t.req else "—")
-        lvl = f"  (+{t.levels} lvl)" if t.levels else ""
-        self.vars["Gained"].set(f"{fmt_short(t.gained)}{lvl}")
+        rate, rolling = t.rate(), t.rolling_rate()
         shown = (t.exp, t.pct) if t.exp is not None else t.last_read
-        if shown:
-            self.vars["Current"].set(f"{fmt_num(shown[0])} [{shown[1]:.2f}%]")
-        best_rate = t.rolling_rate() or rate
+        best_rate = rolling or rate
         level = level_for_req(t.req) or self.level
         eta = fmt_eta((t.req - t.exp) / best_rate * 3600) if (
             t.req and t.exp is not None and best_rate and best_rate > 0) else None
-        if level and eta:
-            self.next_level.config(text=f"Lv {level + 1} in {eta}")
-        else:
-            self.next_level.config(text=f"Lv {level}" if level else "")
+        if t.running and rolling and now - self._trend_at >= 15:      # a point on the trend line every 15 s
+            self._trend.append(rolling)
+            self._trend_at = now
         m, el = self.meso, t.elapsed()
         if m.value is None:
-            self.vars["Mesos"].set("move this window" if self.reader.mesos_covered else "open inventory")
+            mesos = "move this window" if self.reader.mesos_covered else "open inventory"
         else:
-            self.vars["Mesos"].set(fmt_num(m.value) + (f"  (+{fmt_short(m.gained)})" if m.gained > 0 else ""))
-        self.vars["Mesos / hr"].set(fmt_num(m.per_hour(el)))
-        self.vars["Mesos / 5 min"].set(fmt_num(m.per_5min(el)))
-        self.vars["Elapsed"].set(fmt_dur(el))
-        if self.compact:
-            self.compact_line.config(text=f"Last 5 min  {self.vars['Last 5 min'].get()}    "
-                                          f"Mesos / hr  {self.vars['Mesos / hr'].get()}")
+            mesos = fmt_num(m.value) + (f"  (+{fmt_short(m.gained)})" if m.gained > 0 else "")
+        state, state_text = self._state()
+        self.view.show(
+            rate=fmt_num(rate) if rate is not None else None,
+            delta=(rolling / rate - 1) if rate and rolling else None,
+            spark=list(self._trend), pct=shown[1] if shown else None,
+            eta=f"Lv {level + 1} in {eta}" if level and eta else f"Lv {level}" if level else "",
+            mesos=fmt_num(m.per_hour(el)),
+            tiles={"Last 5 min": fmt_num(rolling), "Mesos / hr": fmt_num(m.per_hour(el)), "Elapsed": fmt_dur(el)},
+            details={"% / hr": f"{rate / t.req * 100:.2f}%" if rate and t.req else "\u2014",
+                     "Gained": f"{fmt_short(t.gained)}{f'  (+{t.levels} lvl)' if t.levels else ''}",
+                     "Current": f"{fmt_num(shown[0])} [{shown[1]:.2f}%]" if shown else "\u2014",
+                     "Mesos": mesos, "Mesos / 5 min": fmt_num(m.per_5min(el))},
+            state=state, state_text=state_text)
         waiting = self.session.waiting
         self.session.tick(now)
         if self.session.waiting != waiting:             # just paused by itself: say why now
@@ -3626,21 +3673,27 @@ class App:
     def toggle(self):
         if self.session.on:                     # (also while it's paused by itself)
             self.session.pause()
-            self.start_btn.config(text="Resume")
+            self._set_start("Resume")
         else:
             self.session.start(time.monotonic())
             self.reader.request_map()           # read the map name now
-            self.start_btn.config(text="Pause")
+            self._set_start("Pause")
         self.autolog.reset_clock()
         if self.tracker.exp is not None:
             self.status.set(self._status_for(""))   # right away, not at the next read
+
+    def _set_start(self, text):
+        """The Start button: gold when pressing it starts something, quiet while it's running."""
+        self._start_text = text
+        self.view.start_btn.set(text=text, icon="pause" if text == "Pause" else "play",
+                                kind="secondary" if text == "Pause" else "primary")
 
     def reset(self):
         self.session.reset()
         self.autolog.reset_clock()
         self.skip_log = False
         self._show_skip_log()
-        self.start_btn.config(text="Start")
+        self._set_start("Start")
         # Also look for the minimap, inventory and party list again (e.g. after moving them).
         self.reader.look_again()
         self.map_name, self.party, self._party_seen = None, 1, (None, 0)
@@ -3656,14 +3709,7 @@ class App:
                         "or stop getting EXP." if self.skip_log else "Logging this run again.")
 
     def _show_skip_log(self):
-        if self.skip_log:
-            self.skip_btn.config(text="Not logging", bg=ACCENT_SOFT, fg=BG, activebackground=ACCENT,
-                                 activeforeground=BG)
-        else:
-            style = self._btn_style
-            self.skip_btn.config(text="Don't log", bg=style["bg"], fg=style["fg"],
-                                 activebackground=style["activebackground"],
-                                 activeforeground=style["activeforeground"])
+        self.view.logging.set(not self.skip_log, "Not logging" if self.skip_log else "Log this run")
 
     def _after_pause_check(self, waiting_before):
         """When the run ends (tracking pauses by itself), "Don't log" turns off again, so
@@ -3680,7 +3726,7 @@ class App:
         save_config(self.cfg)
 
     def _show_area_mode(self):
-        self.area_btn.config(text="Follow game" if self.reader.mode == "region" else "Select area")
+        pass                                              # (the More menu reads the mode when it opens)
 
     def toggle_area(self):
         if self.reader.mode == "region":
@@ -3733,6 +3779,9 @@ class App:
         win.title("Last capture")
         win.configure(bg=BG)
         win.attributes("-topmost", bool(self.cfg["topmost"]))
+        for delay in (0, 150, 800):
+            win.after(delay, lambda: PLATFORM.style_window(win, INK, TEXT_DIM) if win.winfo_exists() else None)
+        th = self.theme
         shots = []
         if r:
             shots.append((r.image, r.boxes, f"EXP bar. Read: {r.text or 'nothing'}   ({r.where})"))
@@ -3742,14 +3791,14 @@ class App:
         win._imgs = []
         for shot, boxes, text in shots:
             win._imgs.append(self._boxed(shot, boxes))
-            tk.Label(win, image=win._imgs[-1], bg=BG).pack(padx=8, pady=(8, 2))
-            tk.Label(win, text=text, bg=BG, fg=FG).pack(anchor="w", padx=8)
+            tk.Label(win, image=win._imgs[-1], bg=BG).pack(padx=th.px(16), pady=(th.px(16), th.px(4)))
+            tk.Label(win, text=text, bg=BG, fg=FG, font=th.font("semibold", 12)).pack(anchor="w", padx=th.px(16))
         bottom = tk.Frame(win, bg=BG)
-        bottom.pack(fill="x", padx=8, pady=(4, 8))
-        tk.Label(bottom, text="Boxes show where each digit was found.", bg=BG, fg=DIM).pack(side="left")
-        tk.Button(bottom, text="Something's wrong? Report a bug", command=lambda: self.report_bug(win),
-                  bg=FIELD, fg=FG, activebackground="#3a3f49", activeforeground=FG, relief="flat",
-                  padx=10, pady=2, font=self.fonts["text"]).pack(side="right")
+        bottom.pack(fill="x", padx=th.px(16), pady=(th.px(12), th.px(16)))
+        tk.Label(bottom, text="Boxes show where each digit was found.", bg=BG, fg=DIM,
+                 font=th.font("regular", 11)).pack(side="left")
+        Button(bottom, th, text="Something's wrong? Report a bug", kind="secondary", width=240, height=36, radius=10,
+               size=12, command=lambda: self.report_bug(win), bg=BG).pack(side="right")
 
     # ---- bug reports
     def report_bug(self, parent=None):
@@ -3865,7 +3914,7 @@ class App:
 
 
 def main():
-    global tesseract_ok
+    global tesseract_ok, TESS
     # Only one copy at a time (per data folder): two copies would each keep their own log.
     # If it's already running, bring that window to the front instead. (The lock keeps the old
     # name, so an older version and this one can't run at the same time either.)
@@ -3876,7 +3925,7 @@ def main():
     move_old_data()
     tess = find_tesseract()
     if tess:
-        pytesseract.pytesseract.tesseract_cmd = tess
+        TESS = ocr.Tesseract(tess)
         tesseract_ok = True
     root = tk.Tk()
     App(root, DigitTemplates.load())

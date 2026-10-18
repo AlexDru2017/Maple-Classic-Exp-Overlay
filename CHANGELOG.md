@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.9.8-beta
+
+**Lighter and more reliable**
+- **Far less CPU:** the overlay used a thread per core for tiny pictures, and the threads mostly waited on each other. It now uses one. In a test on a 1080p game window that took a normal look from about 100 ms of CPU to 12 ms, and the look at the whole window (every 4 seconds) from about 350 ms to 60 ms. How much you gain depends on your core count; the more cores, the more.
+- Reading the map name and your class asks Tesseract once instead of six times (about 4.5 times faster), with the same answers.
+- **Storage and trade windows:** they show a second mesos box next to yours, and the overlay could read that one instead. It now sees there are two, reads neither, and picks yours up again once the window closes (thanks to Xoere, whose recording showed it).
+- Map names and classes now also work when your Windows user name has letters your PC's text code page can't hold (some non-Latin names): Tesseract couldn't open its pictures there, so they were never read.
+- `pytesseract` isn't used any more: one less package in the download.
+- Thanks to thanhphamvan, whose fork's measurements pointed at the extra threads and the six Tesseract runs.
+
+**A new look**
+- The whole overlay is redrawn: a big glowing EXP/hr, a live trend line (is your pace rising or falling vs the last 5 minutes?), a progress bar to your next level, a status pill (looking for the game / ready / tracking / paused), and one clear Start button. The title bar matches the window (Windows 10 and 11).
+- Less clutter: three key numbers up front (last 5 min, mesos/hr, elapsed); everything else is one click away under **Details**, and it remembers if you opened it.
+- "Don't log" is now a switch called **Log this run** (no more double negatives). Select area and View capture are under the **...** menu.
+- Log, notes, Settings and the update window match, with a bundled typeface (Manrope, SIL Open Font License), real switches, a gold slider and thin scrollbars.
+- **Compact mode shows mesos/hr** too, under the EXP/hr number, in the same window size.
+- Just as light as before: the numbers move pre-drawn pictures instead of redrawing, and nothing is redrawn while nothing changes.
+
 ## 0.9.7-beta
 
 **New**

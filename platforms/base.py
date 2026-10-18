@@ -135,3 +135,11 @@ class Platform(ABC):
     def font(self, family, weight):
         """(family, weight) to use for one of the overlay's fonts, named by its Windows font."""
         return family, weight
+
+    def register_fonts(self, paths):
+        """Makes the font files available to this program only (not installed). True if all worked."""
+        return False
+
+    def style_window(self, root, background, text):
+        """Makes the window's frame match the overlay's colours where the OS allows it
+        (the title bar), given as '#rrggbb'. Does nothing where it can't."""
