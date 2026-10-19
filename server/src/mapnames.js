@@ -23,10 +23,27 @@ export function fixOrdinals(name) {
     .replace(/(^|\s)[s5b]rd(?=\s|$)/gi, (_, a) => `${a}3rd`);
 }
 
-/** A last word made of I's that OCR read as l / 1 / | ("Boar Il" -> "Boar II"). A plain number
- * (Free Market 11) has no I or l in it, so it's left alone. */
+const ROMAN = /^(?:X{0,2})(?:IX|IV|V?I{0,3})$/;
+
+/** A last word that is a Roman numeral OCR misread ("Vil" -> VII, "Vill" -> VIII, "lV" -> IV, "il" -> II,
+ * "V1" -> VI). It must look like a numeral (only I, V, X or look-alikes, at least one letter among them), so a
+ * plain number ("Free Market 11") and ordinary words are left alone. */
 export function fixRomans(name) {
-  return name.replace(/(\s)(?=[Il1|!]*[Il|!])[Il1|!]{1,4}$/, (_, a) => a + "I".repeat(name.length - name.lastIndexOf(" ") - 1));
+  return name.replace(/(\s)([IVXivxl1|!]{1,6})$/, (m, space, token) => {
+    if (!/[IVXivxl|!]/.test(token)) return m;                        // only digits: a number
+    const numeral = token.replace(/[li1|!]/gi, "I").toUpperCase();
+    return numeral && ROMAN.test(numeral) ? space + numeral : m;
+  });
+}
+
+// Screens and menus the overlay's text reader can mistake for a map (the region line under the minimap,
+// the cash shop, settings).
+const NOT_MAPS = /\b(?:cash deco|set ?up|blacklist|keyboard|mouse|controller|citizens)\b|^(?:hidden street|world|victoria road)$/i;
+
+/** Not a map name at all: too little text to be a name (no word of 4 letters), or a menu. Only asked of names
+ * that aren't on the game's list. */
+export function junk(name) {
+  return !/[A-Za-z]{4,}/.test(name) || NOT_MAPS.test(name);
 }
 
 /** Roman numerals and numbers in a name: maps that differ in these are different maps. */
@@ -74,7 +91,7 @@ function lookup(read) {
   const fixed = tidy(fixRomans(fixOrdinals(read)));
   const key = keyOf(fixed);
   const exact = byKey.get(key);
-  if (exact) return { name: exact.name, town: exact.town, listed: true };
+  if (exact) return { name: exact.name, town: exact.town, listed: true, junk: false };
   const nums = numbers(fixed);
   let best = null, second = Infinity;
   for (const e of entries) {
@@ -86,8 +103,8 @@ function lookup(read) {
     } else if (d < second) second = d;
   }
   // one clear match: a letter misread. Two names about as close (or too far) are left alone.
-  if (best && best.d <= allowed(key) && second - best.d >= 1) return { name: best.e.name, town: best.e.town, listed: true };
-  return { name: fixed, town: false, listed: false };
+  if (best && best.d <= allowed(key) && second - best.d >= 1) return { name: best.e.name, town: best.e.town, listed: true, junk: false };
+  return { name: fixed, town: false, listed: false, junk: junk(fixed) };
 }
 
 export const LISTED = entries.length;

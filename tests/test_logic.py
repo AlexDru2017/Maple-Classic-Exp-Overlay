@@ -793,5 +793,13 @@ check("...a hunting map with a town's name in it isn't a town", not m.is_town("H
 check("...and an unknown name isn't", not m.is_town("Halloween Event Field") and not m.is_town(None))
 check("a short, unclear name isn't forced onto a map", m.snap_map_name("Perlon X") == "Perlon X")
 
+
+# ---- Roman numerals misread by OCR ("Vil" is VII), in the overlay's own cleaning
+for read, want in {"Tree Dungeon Forest Up North Vil": "Tree Dungeon Forest Up North VII", "Tree Dungeon Forest Up North Vill": "Tree Dungeon Forest Up North VIII",
+                   "Ant Tunnel lV": "Ant Tunnel IV", "Ant Tunnel il": "Ant Tunnel II", "Rocky Road iil": "Rocky Road III",
+                   "Free Market 11": "Free Market 11", "Maple Mill": "Maple Mill", "Cave VX": "Cave VX"}.items():
+    got = m._clean_map_name(read)
+    check(f"'{read}' reads as '{want}' ({got})", got == want)
+
 print("\nALL PASSED" if not failures else f"\n{failures} FAILED")
 sys.exit(1 if failures else 0)

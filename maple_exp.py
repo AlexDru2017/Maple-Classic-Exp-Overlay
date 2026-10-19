@@ -673,14 +673,27 @@ def find_map_box(bgr, gh):
     return (x, y, w, h) if w >= 10 * gh and h >= 4 * gh else None
 
 
+_ROMAN = re.compile(r"^(?:X{0,2})(?:IX|IV|V?I{0,3})$")
+
+
+def _fix_roman(name):
+    """A last word that is a Roman numeral misread ("Vil" -> VII, "lV" -> IV, "il" -> II, "V1" -> VI). Plain numbers
+    ("Free Market 11") and ordinary words are left alone. The site does the same (server/src/mapnames.js)."""
+    def fix(m):
+        token = m.group(2)
+        if not re.search(r"[IVXivxl|!]", token):
+            return m.group(0)                          # only digits: a number
+        numeral = re.sub(r"[li1|!]", "I", token, flags=re.I).upper()
+        return m.group(1) + numeral if numeral and _ROMAN.match(numeral) else m.group(0)
+    return re.sub(r"(\s)([IVXivxl1|!]{1,6})$", fix, name)
+
+
 def _clean_map_name(text):
     t = text.replace("|", "I")                         # a lone "I" (as in "... I") reads as "|"
     t = re.sub(r"(?<=\s)[!\[\]](?=\s*$)", "I", t)
     t = re.sub(r"[^A-Za-z0-9 '<>:.&()\-]", " ", t)
     t = re.sub(r"\s+", " ", t).strip(" .:-")
-    t = re.sub(r"(?<= )[Il1]{3}$", "III", t)         # Roman numerals read as l's and 1's
-    t = re.sub(r"(?<= )[Il1]{2}$", "II", t)
-    t = re.sub(r"(?<= )l$", "I", t)
+    t = _fix_roman(t)                                  # Roman numerals read as l's, 1's, i's ("Vil" is VII)
     t = re.sub(r"(^|\s)[IiLl]st(?=\s|$)", r"\g<1>1st", t)     # "ist Accompaniment" is "1st Accompaniment"
     t = re.sub(r"(^|\s)[Zz]nd(?=\s|$)", r"\g<1>2nd", t)
     t = re.sub(r"(^|\s)[SsBb5]rd(?=\s|$)", r"\g<1>3rd", t)

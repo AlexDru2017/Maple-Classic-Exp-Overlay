@@ -171,6 +171,7 @@ export function checkRun(r, now = Date.now()) {
   if (WEB_ADDRESS.test(map) || WEB_ADDRESS.test(job)) return { why: "not a map name" };
   const named = canonicalMap(map);                   // the game's spelling (fixes OCR slips like "ist" for "1st")
   if (named.town) return { why: "town" };            // nobody farms in a town: the overlay was on a stale name
+  if (named.junk) return { why: "not a map name" };    // a menu or a misread with no real word in it
   const ago = now / 60000 - minutes(started);       // (the overlay sends its local time)
   if (ago > DAYS_BACK * 1440 || ago < -2 * 1440) return { why: "start time out of range" };
   if (!levelStart || !levelEnd || !party) return { why: "bad level or party size" };

@@ -54,7 +54,24 @@ check("Free Market 11 isn't turned into Free Market II", canonicalMap("Free Mark
 check("towns are towns", ["Perion", "Henesys", "Ellinia", "Kerning City", "Free Market 3"].every((n) => canonicalMap(n).town));
 check("...hunting maps that share a town's name aren't", !canonicalMap("Henesys Hunting Ground II").town && !canonicalMap("Perion Street Corner").town);
 check("...and maps meowdb marks but may have monsters aren't refused", !canonicalMap("Florina Beach").town && !canonicalMap("Henesys Park").town);
-check("an unknown name is kept (an event map)", JSON.stringify(canonicalMap("Halloween Event Field")) === JSON.stringify({ name: "Halloween Event Field", town: false, listed: false }));
+check("an unknown name is kept (an event map)", JSON.stringify(canonicalMap("Halloween Event Field")) === JSON.stringify({ name: "Halloween Event Field", town: false, listed: false, junk: false }));
+
+// the Roman numerals seen misread in real data, and menus read as maps
+const romans = {
+  "Tree Dungeon Forest Up North Vil": "Tree Dungeon, Forest Up North VII", "Tree Dungeon Forest Up North Vill": "Tree Dungeon, Forest Up North VIII",
+  "Ant Tunnel lV": "Ant Tunnel IV", "Ant Tunnel il": "Ant Tunnel II", "Ant Tunnel ill": "Ant Tunnel III", "Rocky Road iil": "Rocky Road III",
+  "East Rocky Mountain Vil": "East Rocky Mountain VII", "East Rocky Mountain il": "East Rocky Mountain II",
+  "The Forest of Evil il": "The Forest of Evil II", "Tree Dungeon Forest Up North V1": "Tree Dungeon, Forest Up North VI",
+};
+for (const [read, want] of Object.entries(romans)) check(`"${read}" is "${want}"`, canonicalMap(read).name === want, canonicalMap(read).name);
+check("a plain number isn't a numeral", fixRomans("Free Market 11") === "Free Market 11" && fixRomans("Maps 5") === "Maps 5" && fixRomans("Hall 1") === "Hall 1");
+check("an ordinary last word isn't a numeral", fixRomans("Mill") === "Mill" && fixRomans("Big Ill Town") === "Big Ill Town" && fixRomans("Sky Vixen") === "Sky Vixen");
+check("an impossible numeral is left alone", fixRomans("Cave IIIII") === "Cave IIIII" && fixRomans("Cave VX") === "Cave VX");
+const junks = ["Se ee", "oe ee", "WORLD", "Hidden Street", "I Use I SetUp te Cash Deco", "Keyboard Mouse Controller", "I I", "e o", "Jee sce", "y I Party I Blacklist", "CITIZENS HIE ITEM"];
+check("menus and scraps of text are not maps", junks.every((n) => canonicalMap(tidy(n)).junk), junks.filter((n) => !canonicalMap(tidy(n)).junk).join("; "));
+const real = ["Ant Tunnel", "Deep Ant Tunnel", "The Burnt Land", "Halloween Event Field", "Rocky Road II", "Sleepywood Dungeon", "Free Market <3>"];
+check("real and plausible names are not junk", real.every((n) => !canonicalMap(tidy(n)).junk), real.filter((n) => canonicalMap(tidy(n)).junk).join("; "));
+check("every map on the list is not junk", MAPS.every(([n]) => !canonicalMap(n).junk));
 
 // odd input is harmless
 const odd = ["", " ", "   ", "<script>alert(1)</script>", "constructor", "__proto__", "toString", "x".repeat(300), "😀😀😀", "\u0000\u0001", "I".repeat(200), "ist ".repeat(50)];
