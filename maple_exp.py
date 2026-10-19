@@ -44,10 +44,12 @@ from tkinter import font as tkfont, messagebox, simpledialog, ttk
 import cv2
 import mss
 import numpy as np
-from PIL import Image, ImageDraw, ImageTk
+from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 import ocr
+import report
 from platforms import create_platform, hotkey_text, parse_hotkey
+from report import Health, Recent
 from ui_gfx import INK, TEXT_DIM
 from ui_kit import (ACCENT, ACCENT_SOFT, BAD, BG, DIM, FAINT, FG, GOOD, LINE, LIST_BG, LIST_BG2, LIST_PART,  # noqa: F401
                     ON_ACCENT, RAISED, RAISED_HI, SELECT, SURFACE, WARN, setup_ttk)
@@ -59,7 +61,7 @@ PLATFORM = create_platform()
 PLATFORM.setup_process()
 cv2.setNumThreads(1)
 
-VERSION = "0.9.8-beta"
+VERSION = "0.9.9-beta"
 WINDOW_TITLE = "Maple Classic Exp Overlay"    # the version is shown in Settings
 OLD_TITLES = ("Maple EXP/hr",)               # what versions before 0.9.3 were called
 
@@ -565,15 +567,26 @@ def _clean_job(text):
     return t if len(t) >= 3 else ""
 
 
-def read_job(bgr, x0, cy, g):
+def read_job(bgr, x0, cy, g, debug=None):
     """The job name in the status bar (e.g. 'Bandit'), from a shot where the EXP number's
     first digit is at x0 and its middle at cy, or None if it can't be read clearly.
+    debug: a dict to fill with what it looked at ("image", "boxes") and, if it gave up, "why".
 
     The job sits on the line of the HP bar's label ("HP"), right before it; the character
     name is on the line under it and is never read."""
-    reg = bgr[max(0, int(cy - 2.5 * g)):int(cy + 3 * g), max(0, int(x0 - 64 * g)):max(0, int(x0 - 20 * g))]
-    if reg.size == 0:
+    ry, rx = max(0, int(cy - 2.5 * g)), max(0, int(x0 - 64 * g))
+    reg = bgr[ry:int(cy + 3 * g), rx:max(0, int(x0 - 20 * g))]
+    if debug is not None:
+        debug.clear()
+        debug.update(image=reg, boxes=[], why="")
+
+    def give_up(why):
+        if debug is not None:
+            debug["why"] = why
         return None
+
+    if reg.size == 0:
+        return give_up("the status bar is off screen here")
     white = _whiteness(reg)
     _, blobs = _blobs(white > 0.3)                    # thin letters: a gentle white check
     # The HP bar: 13-16 EXP digits wide, its left end 31-35 of them before the EXP number
@@ -581,17 +594,19 @@ def read_job(bgr, x0, cy, g):
     bars = [b for b in blobs if 9 * g <= b.w <= 20 * g and 1.4 * g <= b.h <= 2.8 * g
             and 24 * g <= b.x <= 39 * g]
     if not bars:
-        return None
+        return give_up("can't find the HP bar next to the class name")
     hp = min(bars, key=lambda b: b.x)                 # the HP bar (the MP bar is right of it)
+    if debug is not None:
+        debug["boxes"].append((hp.x, hp.y, hp.x + hp.w, hp.y + hp.h, "mesos"))
     label = [b for b in blobs if hp.x - 0.5 * g <= b.x <= hp.x + 3 * g
              and b.y + b.h <= hp.y + 0.2 * g and 0.6 * g <= b.h <= 1.6 * g]
     if not label:
-        return None
+        return give_up("can't find the HP label")
     top, bottom = min(b.y for b in label), max(b.y + b.h for b in label)
     row = sorted((b for b in blobs if b.x + b.w <= hp.x - g and b.y >= top - 0.3 * g
                   and b.y + b.h <= bottom + 0.4 * g and b.h >= 0.3 * g), key=lambda b: b.x)
     if len(row) < 2:
-        return None
+        return give_up("no class name found left of the HP bar")
     words = [[row[0]]]
     for b in row[1:]:
         if b.x - max(c.x + c.w for c in words[-1]) > 2.0 * g:
@@ -600,6 +615,8 @@ def read_job(bgr, x0, cy, g):
             words[-1].append(b)
     word = words[-1]                                  # the letters right before "HP"
     x_a, x_b = max(0, min(b.x for b in word) - int(0.4 * g)), max(b.x + b.w for b in word) + int(0.4 * g)
+    if debug is not None:
+        debug["boxes"].append((x_a, top, x_b, bottom, "exp"))
     crop = white[max(0, top - int(0.4 * g)):bottom + int(0.4 * g), x_a:x_b]
     glyph_h = max(b.h for b in word)
     if glyph_h > 10:                                  # big screens: read at small-window size,
@@ -608,11 +625,13 @@ def read_job(bgr, x0, cy, g):
     votes = _ocr_votes(crop.astype(np.float32), glyph_h, None, _clean_job)
     text, n = votes.most_common(1)[0] if votes else ("", 0)
     if n < 2:
-        return None
+        return give_up("the tries didn't agree on what it says" + (f" (best guess: {text})" if text else ""))
     score, best = max((SequenceMatcher(None, text.lower(), j.lower()).ratio(), j) for j in JOBS)
     if score >= 0.72:
         return best
-    return text.title() if n >= 3 else None
+    if n >= 3:
+        return text.title()
+    return give_up(f"it reads \"{text}\", which isn't a class it knows")
 
 
 def _whiteness(bgr):
@@ -1102,6 +1121,9 @@ class ScreenReader:
         self.look_again_requested = False
         self.exp_anchor = None      # where the EXP number starts, relative to the game window
         self.job = None             # the class shown in the status bar
+        self.job_look = None        # what the last try at reading it saw: {"image", "boxes", "why"}
+        self.map_look = None        # the same for the map name: {"image", "text"}
+        self.last_rect = None       # where the game window was at the last look (x, y, w, h)
         self.next_job_read = 0.0
 
     def use_window(self):
@@ -1134,6 +1156,7 @@ class ScreenReader:
             self.look_again_requested = False
             self._forget_places()
         rect = self._game_rect()
+        self.last_rect = rect
         if self.mode == "region":
             reading = self._read_region(sct, rect)
         elif not self.hwnd and PLATFORM.missing_permission():
@@ -1151,6 +1174,31 @@ class ScreenReader:
                 self._read_job(sct, rect)
         return reading
 
+    def diagnostics(self):
+        """What this reader knows about where things are, for bug reports (a plain dict)."""
+        rect, g = self.last_rect, self.gh
+        covering = []
+        if rect and g:
+            wx, wy = rect[0], rect[1]
+            if self.box and self._covered(wx + self.box[0], wy + self.box[1], self.box[2], self.box[3]):
+                covering.append("EXP bar")
+            if self.mesos_box and self._covered(wx + self.mesos_box[0], wy + self.mesos_box[1], self.mesos_box[2],
+                                                self.mesos_box[3], margin=max(2, int(0.3 * self.mesos_box[3]))):
+                covering.append("mesos box")
+            if self.map_box and self._covered(wx + self.map_box[0], wy + self.map_box[1], self.map_box[2], self.map_box[3]):
+                covering.append("minimap name")
+            if self.party_area and self._covered(*self.party_area):
+                covering.append("party list")
+            if self.exp_anchor:
+                ax, ay = self.exp_anchor
+                if self._covered(wx + int(ax - 65 * g), wy + int(ay - 3 * g), int(46 * g), int(6.5 * g)):
+                    covering.append("class name")
+        return dict(mode=self.mode, found=bool(self.hwnd), rect=rect, gh=g, region=self.region,
+                    own_rect=self.own_rect, covering=covering, exp_box=self.box, exp_misses=self.misses,
+                    map_box=self.map_box, map_unread=self.map_unread, mesos_box=self.mesos_box,
+                    mesos_fails=self.mesos_fails, two_boxes=self.two_boxes, mesos_learned=self.mesos_digits.complete,
+                    party_area=self.party_area, job_why=(self.job_look or {}).get("why") or "")
+
     def _read_job(self, sct, rect):
         """Reads the class from the status bar now and then (it only changes at a job advance)."""
         now = time.monotonic()
@@ -1162,9 +1210,12 @@ class ScreenReader:
         x0, y0, w, h = wx + int(ax - 65 * g), wy + int(ay - 3 * g), int(46 * g), int(6.5 * g)
         if self._covered(x0, y0, w, h):
             self.next_job_read = now + 5
+            self.job_look = {"image": None, "boxes": [], "why": "this window is covering the class name: move it"}
             return
         shot = grab(sct, x0, y0, w, h)
-        job = read_job(shot[0], wx + ax - shot[1], wy + ay - shot[2], g) if shot else None
+        look = {}
+        job = read_job(shot[0], wx + ax - shot[1], wy + ay - shot[2], g, look) if shot else None
+        self.job_look = look or None
         if job:
             self.job = job
         self.next_job_read = now + (60 if job else 10)
@@ -1460,6 +1511,7 @@ class ScreenReader:
                         self.map_unread, self.next_map_read = True, 0.0
                     elif self.map_unread and now >= self.next_map_read:
                         name = read_map_name(shot[0], g)
+                        self.map_look = {"image": shot[0], "text": name}
                         self.map_unread = name is None
                         self.next_map_read = now + 5          # if unreadable, try again later
                     self.map_print = picture
@@ -2498,7 +2550,7 @@ class RegionSelector:
         self.win.attributes("-topmost", True)
         self.canvas = tk.Canvas(self.win, bg="black", cursor="cross", highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
-        self.canvas.create_text(v["width"] // 2, 60, fill="white", font=(*PLATFORM.font("Segoe UI", "bold"), 20),
+        self.canvas.create_text(v["width"] // 2, 60, fill="white", font=(PLATFORM.font("Segoe UI", "bold")[0], 20, PLATFORM.font("Segoe UI", "bold")[1]),
                                 text="Drag a box around the EXP numbers  (Esc to cancel)")
         self.start = None
         self.rect = None
@@ -2563,6 +2615,8 @@ class App:
         self._party_seen = (None, 0)
         self.last_mesos = None
         self.rejected = 0
+        self.started, self.cpu0 = time.monotonic(), time.process_time()
+        self.recent, self.health = Recent(40, self.started), Health()      # for bug reports
         self.autolog = AutoLog(self.cfg["gap_seconds"])
         self.map_name = None
         self.level = None
@@ -2632,7 +2686,8 @@ class App:
             self.status.set("Looking for the MapleStory window..." if mode == "window"
                             else "Using your selected area.")
 
-        threading.Thread(target=self._worker, daemon=True).start()
+        self._worker_thread = threading.Thread(target=self._worker, daemon=True)
+        self._worker_thread.start()
         root.after(200, self._pump)
         root.after(500, self._refresh)
         if self.cfg["check_updates"]:
@@ -3350,10 +3405,13 @@ class App:
                 t0 = time.monotonic()
                 try:
                     self.q.put(("reading", self.reader.read(sct)))
+                    self.health.finished(t0)
                 except Exception as e:
                     log_error("reading the screen", e)
+                    self.health.failed(e)
                     self.q.put(("error", f"{type(e).__name__}: {e}"))
                 self.stop_evt.wait(max(0.1, POLL_SECONDS - (time.monotonic() - t0)))
+            self.health.alive = False
 
     # ---- sharing runs
     def open_best_maps(self):
@@ -3470,6 +3528,7 @@ class App:
             while True:
                 kind, payload = self.q.get_nowait()
                 if kind == "error":
+                    self.recent.add(f"Error reading the screen: {payload}")
                     self.status.set("Something went wrong reading the screen. Trying again... "
                                     "(details are in errors.log: Settings > Open data folder)")
                 elif kind == "update":
@@ -3540,6 +3599,7 @@ class App:
         if self.note:
             status += f"\n{self.note}"
         self.status.set(status)
+        self.recent.add(status)
         self.level = level_for_req(t.req) or self.level
         self._log_tick(now)
 
@@ -3672,9 +3732,11 @@ class App:
 
     def toggle(self):
         if self.session.on:                     # (also while it's paused by itself)
+            self.recent.add("You paused")
             self.session.pause()
             self._set_start("Resume")
         else:
+            self.recent.add("You pressed Start")
             self.session.start(time.monotonic())
             self.reader.request_map()           # read the map name now
             self._set_start("Pause")
@@ -3768,6 +3830,17 @@ class App:
     def _boxed(self, bgr, boxes):
         return ImageTk.PhotoImage(self._boxed_image(bgr, boxes))
 
+    def _class_line(self):
+        """What the class reading shows: (picture or None, boxes, a line saying how it went)."""
+        look = self.reader.job_look
+        if self.job:
+            how = f"Class. Read: {self.job}"
+        elif look:
+            how = f"Class. Not read: {look.get('why') or 'no clear look yet'}"
+        else:
+            how = "Class. Not read yet (it's tried every few seconds once the EXP bar is found)"
+        return (look or {}).get("image"), (look or {}).get("boxes", []), how
+
     def view_capture(self):
         r, mr = self.last_capture, self.last_mesos
         if not r and not mr:
@@ -3782,17 +3855,16 @@ class App:
         for delay in (0, 150, 800):
             win.after(delay, lambda: PLATFORM.style_window(win, INK, TEXT_DIM) if win.winfo_exists() else None)
         th = self.theme
-        shots = []
-        if r:
-            shots.append((r.image, r.boxes, f"EXP bar. Read: {r.text or 'nothing'}   ({r.where})"))
-        if mr:
-            read = fmt_num(mr.mesos) if mr.mesos is not None else "nothing (waiting for a clear look)"
-            shots.append((mr.mesos_image, mr.mesos_boxes, f"Mesos. Read: {read}"))
+        shots = self._look_shots()
         win._imgs = []
         for shot, boxes, text in shots:
-            win._imgs.append(self._boxed(shot, boxes))
-            tk.Label(win, image=win._imgs[-1], bg=BG).pack(padx=th.px(16), pady=(th.px(16), th.px(4)))
-            tk.Label(win, text=text, bg=BG, fg=FG, font=th.font("semibold", 12)).pack(anchor="w", padx=th.px(16))
+            if shot is not None and shot.size:
+                win._imgs.append(self._boxed(shot, boxes))
+                tk.Label(win, image=win._imgs[-1], bg=BG).pack(padx=th.px(16), pady=(th.px(16), th.px(4)))
+            else:
+                tk.Frame(win, bg=BG, height=th.px(12)).pack()
+            tk.Label(win, text=text, bg=BG, fg=FG, font=th.font("semibold", 12), wraplength=th.px(560),
+                     justify="left").pack(anchor="w", padx=th.px(16))
         bottom = tk.Frame(win, bg=BG)
         bottom.pack(fill="x", padx=th.px(16), pady=(th.px(12), th.px(16)))
         tk.Label(bottom, text="Boxes show where each digit was found.", bg=BG, fg=DIM,
@@ -3803,35 +3875,156 @@ class App:
     # ---- bug reports
     def report_bug(self, parent=None):
         """Opens a new GitHub issue in the browser, filled in with what the tracker knows, and
-        saves a picture of what it last read for the player to drag in. Nothing is sent by
-        the tracker itself: the player sees everything and clicks Submit (or doesn't)."""
+        saves a picture and a text file of the details for the player to drag in. Nothing is
+        sent by the tracker itself: the player sees everything and clicks Submit (or doesn't)."""
         parent = parent or self.root
         if not messagebox.askokcancel(
                 "Report a bug",
                 "Your browser will open a bug report on GitHub, already filled in with your "
                 "version and what the overlay was reading (nothing personal).\n\n"
                 "1. Write a sentence about what went wrong.\n"
-                "2. Drag in the picture from the folder that opens.\n"
+                "2. Drag in the two files from the folder that opens.\n"
                 "3. Click Submit.\n\n"
                 "You need a free GitHub account.", parent=parent):
             return
-        picture = self._save_report_picture()
+        screen = messagebox.askyesno(
+            "Report a bug",
+            "Also save a small picture of the whole game window?\n\n"
+            "It shows exactly what the overlay sees, which helps a lot when something can't be found. "
+            "But it can include chat and character names, so only drag it in if you're happy with that.\n\n"
+            "(No is fine: the report works without it.)", default="no", parent=parent)
+        files = self._save_report_files(screen)
         query = urllib.parse.urlencode({"title": f"Bug: (describe it here) [v{VERSION}]",
-                                        "body": self._report_text(picture)})
+                                        "body": self._report_text(files)})
         webbrowser.open(f"https://github.com/{GITHUB_REPO}/issues/new?{query}")
-        if picture:
+        shown = files.get("picture") or files.get("details")
+        if shown:
             try:
-                PLATFORM.show_file(picture)
+                PLATFORM.show_file(shown)
             except Exception as e:
-                log_error("opening the bug report picture's folder", e)
+                log_error("opening the bug report's folder", e)
+
+    @staticmethod
+    def _private(text):
+        """Without your Windows user name (it's in file paths)."""
+        for secret in {str(Path.home()), os.environ.get("USERNAME", "")}:
+            if len(secret) > 2:
+                text = text.replace(secret, "<you>")
+        return text
+
+    def _report_facts(self):
+        """Everything a bug report says, as a plain dict (see report.py)."""
+        r, t = self.last_capture, self.tracker
+        d = self.reader.diagnostics()
+        rect = d["rect"]
+        monitors = []
+        try:
+            with mss.mss() as sct:
+                monitors = [(m_["width"], m_["height"]) for m_ in sct.monitors[1:]]
+        except Exception as e:
+            log_error("listing the screens for a bug report", e)
+        errors = ""
+        try:
+            errors = self._private(ERROR_LOG_PATH.read_text(encoding="utf-8", errors="replace"))[-2500:]
+        except Exception:
+            pass
+        now = time.monotonic()
+        h = self.health
+        up = max(1.0, now - self.started)
+        tess = TESS
+        return {
+            "version": VERSION, "frozen": bool(getattr(sys, "frozen", False)), "system": PLATFORM.version(),
+            "python": sys.version.split()[0], "monitors": monitors, "uptime_s": up,
+            "cpu_pct": round((time.process_time() - self.cpu0) / up * 100, 1),
+            "dpi_awareness": PLATFORM.dpi_awareness(),
+            "dpi": PLATFORM.screen_dpi(rect[0] + rect[2] // 2, rect[1] + rect[3] // 2) if rect else None,
+            "tesseract": {"found": bool(tess), "version": tess.version() if tess else None,
+                          "where": ("included" if str(APP_DIR) in str(tess.cmd) else "installed") if tess else None},
+            "game": {"mode": d["mode"], "found": d["found"], "rect": rect, "gh": d["gh"], "region": d["region"],
+                     "minimized": bool(d["found"] and not rect and d["mode"] == "window"),
+                     "fullscreen": bool(rect and any(rect[2] == mw and rect[3] == mh for mw, mh in monitors))},
+            "overlay": {"rect": d["own_rect"], "covering": d["covering"]},
+            "reader": {**{k: d[k] for k in ("exp_box", "exp_misses", "map_box", "mesos_box", "mesos_fails", "two_boxes",
+                                            "mesos_learned", "party_area", "job_why")},
+                       "level_unknown": t.req is None},
+            "health": {"alive": h.alive and self._worker_alive(), "polls": h.polls, "errors": h.errors,
+                       "last_error": h.last_error, "average_ms": h.average_ms(), "max_ms": h.max_ms,
+                       "last_ms": h.last_ms, "age": None if h.last_at is None else now - h.last_at},
+            "rejected": self.rejected, "status": self.status.get().replace("\n", " | "),
+            "last_exp": r.text if r else None, "level": self.level, "job": self.job, "map": self.map_name,
+            "party": party_label(self.party),
+            "mesos": fmt_num(self.meso.value) if self.meso.value is not None else None, "tracking": bool(self.session.on),
+            "tracker": f"paused: {self.session.waiting or 'no'}, gained {fmt_num(t.gained)} EXP in {fmt_dur(t.elapsed())}",
+            "settings": {"mode": self.reader.mode, **{k: self.cfg.get(k) for k in ("gap_seconds", "transparency", "topmost", "ui_scale",
+                                                      "compact", "hotkeys_on", "share_runs", "check_updates")}},
+            "timeline": [self._private(x) for x in self.recent.lines()], "errors": errors,
+        }
+
+    def _worker_alive(self):
+        return getattr(self, "_worker_thread", None) is None or self._worker_thread.is_alive()
+
+    def _look_shots(self):
+        """What each reader last saw, with a line on how it went: [(picture or None, boxes, text)]."""
+        r, mr = self.last_capture, self.last_mesos
+        shots = []
+        if r:
+            shots.append((r.image, r.boxes, f"EXP bar. Read: {r.text or 'nothing'}   ({r.where})"))
+        if mr:
+            read = fmt_num(mr.mesos) if mr.mesos is not None else "nothing (waiting for a clear look)"
+            shots.append((mr.mesos_image, mr.mesos_boxes, f"Mesos. Read: {read}"))
+        if r:
+            shots.append(self._class_line())
+            look = self.reader.map_look
+            if look:
+                shots.append((look["image"], [], f"Map name. Read: {look['text'] or 'nothing (not clear yet)'}"))
+        return shots
+
+    def _save_report_files(self, with_screen=False):
+        """The picture of what was read, the details as text, and (if asked) the game window:
+        saved in the data folder. Returns {"picture", "details", "screen"} (missing ones left out)."""
+        files = {}
+        try:
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            log_error("making the data folder for a bug report", e)
+            return files
+        facts = None
+        try:
+            facts = self._report_facts()
+            path = DATA_DIR / "bug-report.txt"
+            path.write_text(self._private(report.details(facts)), encoding="utf-8")
+            files["details"] = path
+        except Exception as e:
+            log_error("saving the bug report details", e)
+        self._report_facts_cache = facts
+        picture = self._save_report_picture()
+        if picture:
+            files["picture"] = picture
+        if with_screen:
+            screen = self._save_report_screen()
+            if screen:
+                files["screen"] = screen
+        return files
+
+    def _captioned(self, image, text):
+        """A crop with a line of text above it."""
+        try:
+            font = ImageFont.truetype(str(ASSETS / "fonts" / "ManropeSemiBold.ttf"), 15)
+        except Exception:
+            font = ImageFont.load_default()
+        w = max(image.width if image is not None else 0, 760)
+        sheet = Image.new("RGB", (w, (image.height if image is not None else 0) + 26), BG)
+        ImageDraw.Draw(sheet).text((2, 3), text[:110], fill=FG, font=font)
+        if image is not None:
+            sheet.paste(image, (0, 26))
+        return sheet
 
     def _save_report_picture(self):
-        """What the tracker last read (EXP bar and mesos, with the digit boxes), as one PNG."""
+        """What each reader last saw (EXP bar, mesos, class, map name), with captions, as one PNG."""
         parts = []
-        if self.last_capture is not None:
-            parts.append(self._boxed_image(self.last_capture.image, self.last_capture.boxes))
-        if self.last_mesos is not None:
-            parts.append(self._boxed_image(self.last_mesos.mesos_image, self.last_mesos.mesos_boxes))
+        for shot, boxes, text in self._look_shots():
+            image = self._boxed_image(shot, boxes) if shot is not None and shot.size else None
+            parts.append(self._captioned(image, text))
         if not parts:
             return None
         sheet = Image.new("RGB", (max(p.width for p in parts), sum(p.height + 8 for p in parts)), BG)
@@ -3841,52 +4034,47 @@ class App:
             y += p.height + 8
         path = DATA_DIR / "bug-report.png"
         try:
-            DATA_DIR.mkdir(parents=True, exist_ok=True)
             sheet.save(path)
             return path
         except Exception as e:
             log_error("saving the bug report picture", e)
             return None
 
-    def _report_text(self, picture):
-        """The bug report's text: room to describe it, then the details, without anything
-        personal (your Windows user name is taken out of file paths)."""
-        def private(text):
-            for secret in {str(Path.home()), os.environ.get("USERNAME", "")}:
-                if len(secret) > 2:
-                    text = text.replace(secret, "<you>")
-            return text
-        r, mr, t = self.last_capture, self.last_mesos, self.tracker
-        errors = ""
+    def _save_report_screen(self):
+        """The game window as the overlay sees it (this window blacked out), shrunk, as a JPEG."""
+        rect = self.reader.last_rect
+        if not rect:
+            return None
         try:
-            errors = private(ERROR_LOG_PATH.read_text(encoding="utf-8", errors="replace"))[-1500:]
-        except Exception:
-            pass
+            with mss.mss() as sct:
+                shot = self.reader._hide_own(grab(sct, *rect))
+            if not shot:
+                return None
+            img = Image.fromarray(cv2.cvtColor(shot[0], cv2.COLOR_BGR2RGB))
+            img.thumbnail((1600, 900), Image.LANCZOS)
+            path = DATA_DIR / "bug-report-game.jpg"
+            img.save(path, quality=72)
+            return path
+        except Exception as e:
+            log_error("saving the bug report's game picture", e)
+            return None
+
+    def _report_text(self, files):
+        """The bug report's text: room to describe it, then the short details (the whole of it is
+        in bug-report.txt: the address a report is opened with can't be very long)."""
+        facts = getattr(self, "_report_facts_cache", None) or self._report_facts()
+        attach = [f"`{files[k].name}`" for k in ("picture", "details", "screen") if k in files]
+        errors = (facts.get("errors") or "").strip()[-700:]
         lines = [
             "**What went wrong?**", "(Describe it here: what did you do, what did you expect, what did it show?)", "",
-            "**Screenshot**",
-            ("(Drag in `bug-report.png` from the folder that just opened: it shows what the overlay read.)"
-             if picture else "(If you can, add a screenshot of the game and the overlay.)"), "",
+            "**Files**",
+            (f"(Drag in {' and '.join(attach)} from the folder that just opened: they show what the overlay read "
+             "and how it's doing.)" if attach else "(If you can, add a screenshot of the game and the overlay.)"), "",
             "---", "<details><summary>Details (filled in by the overlay)</summary>", "",
-            f"- Version: {VERSION} ({'download' if getattr(sys, 'frozen', False) else 'from source'})",
-            f"- System: {PLATFORM.version()}",
-            f"- Game window: {'x'.join(map(str, self.reader.size)) if self.reader.size else 'not found'}"
-            f" (EXP digits {fmt_num(self.reader.gh) if self.reader.gh else '?'} px)",
-            f"- Last EXP read: {r.text if r else 'nothing'}",
-            f"- Level: {self.level or '?'}, class: {self.job or 'not read'}, map: {self.map_name or 'not read'},"
-            f" party: {party_label(self.party)}",
-            f"- Mesos: {fmt_num(self.meso.value) if self.meso.value is not None else 'not read'}"
-            f" (last read {fmt_num(mr.mesos) if mr and mr.mesos is not None else 'nothing'})",
-            f"- Tracking: {'on' if self.session.on else 'off'}, paused: {self.session.waiting or 'no'},"
-            f" gained {fmt_num(t.gained)} EXP in {fmt_dur(t.elapsed())}",
-            f"- Status: {private(self.status.get())}",
-            f"- Sharing runs: {'on' if self.cfg.get('share_runs') else 'off'}"
-            f" ({len(self.autolog.runs)} runs, {len(self.autolog.unshared_runs())} not sent)",
-            f"- Settings: pause after {self.cfg['gap_seconds']} s, transparency {self.cfg['transparency']}%,"
-            f" map names {'on' if tesseract_ok else 'off (no Tesseract)'}",
+            self._private(report.summary(facts)),
         ]
         if errors:
-            lines += ["", "Recent errors:", "```", errors.strip(), "```"]
+            lines += ["", "Recent errors:", "```", errors, "```"]
         lines += ["", "</details>"]
         return "\n".join(lines)
 

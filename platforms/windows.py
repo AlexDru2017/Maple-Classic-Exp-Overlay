@@ -238,6 +238,15 @@ class WindowsPlatform(Platform):
             pass
         return None
 
+    def dpi_awareness(self):
+        try:
+            level = ctypes.c_int()
+            if ctypes.windll.shcore.GetProcessDpiAwareness(0, ctypes.byref(level)) == 0:
+                return {0: "not aware", 1: "system", 2: "per-monitor"}.get(level.value)
+        except Exception:
+            pass
+        return None
+
     def create_hotkeys(self, on_press):
         return WindowsHotkeys(on_press)
 

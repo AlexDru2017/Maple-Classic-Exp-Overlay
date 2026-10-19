@@ -250,7 +250,7 @@ for old in sorted((Path(__file__).parent / "upgrade").iterdir()):
           all(k in now_notes and now_notes[k] == v for k, v in old_notes.items())
           and len(after) == len(before["entries"]) + 1)
 check("the newest upgrade fixture has notes in it (so keeping them is really tested)",
-      sum("note" in e for e in json.loads((Path(__file__).parent / "upgrade" / "0.9.8-beta" / "exp_log.json")
+      sum("note" in e for e in json.loads((Path(__file__).parent / "upgrade" / "0.9.9-beta" / "exp_log.json")
                                           .read_text(encoding="utf-8"))["entries"]) >= 3)
 
 

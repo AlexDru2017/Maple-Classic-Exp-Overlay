@@ -132,6 +132,10 @@ class Platform(ABC):
     def show_file(self, path):
         """Opens the file's folder in the OS's file browser, with the file selected."""
 
+    def dpi_awareness(self):
+        """How this program handles screen scaling, in words, for bug reports (None if n/a)."""
+        return None
+
     def font(self, family, weight):
         """(family, weight) to use for one of the overlay's fonts, named by its Windows font."""
         return family, weight

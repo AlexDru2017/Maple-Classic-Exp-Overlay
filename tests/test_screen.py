@@ -207,6 +207,16 @@ if m.tesseract_ok:
     for name, info in sorted(PARTS["status"].items()):
         got = m.read_job(cv2.imread(str(FRAMES / name)), info["x0"], info["cy"], info["gh"])
         check(f"reads the class at EXP digits {info['gh']:.0f} px: {got}", got == info["job"])
+        look = {}
+        m.read_job(cv2.imread(str(FRAMES / name)), info["x0"], info["cy"], info["gh"], look)
+        check(f"...and shows what it looked at ({name}): a picture, boxes, no reason to give up",
+              look["image"].size > 0 and len(look["boxes"]) == 2 and look["why"] == "")
+    blank = np.full((300, 900, 3), 20, np.uint8)
+    look = {}
+    check("a picture with no status bar gives no class, and says why",
+          m.read_job(blank, 600, 150, 11, look) is None and "HP bar" in look["why"])
+    look = {}
+    check("off the edge of the screen says so", m.read_job(blank, 10, 150, 11, look) is None and look["why"])
 else:
     print("     (Tesseract isn't installed: class reading not tested)")
 

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.9.9-beta
+
+**Fixed**
+- **Select area** crashed on Windows ("expected integer but got bold") since 0.9.7. It opens again.
+
+**Better bug reports**
+- The report now also saves **bug-report.txt**: your screens and Windows scaling, the game window, where each part (EXP bar, mesos, minimap, party list) was found, how the reading thread is doing, what the overlay last said (with times), and the end of errors.log. At the top it lists what looks wrong, like "the overlay is covering the class name".
+- The picture now also shows where the class and map name are read, with a line on how each went. View capture shows the same, and says why the class wasn't read.
+- Optionally (it asks) a small picture of the whole game window, saved only if you say yes.
+
 ## 0.9.8-beta
 
 **Lighter and more reliable**

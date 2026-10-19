@@ -218,6 +218,47 @@ check("compact mode shows mesos/hr under the number, and only there",
 app.set_compact(False)
 app._update_display()
 check("full mode doesn't show that line (it has the tile)", hero.itemcget(hero._mval, "state") == "hidden")
+picked = []
+selector = m.RegionSelector(root, picked.append)             # (it crashed on Windows in 0.9.7 and 0.9.8-beta)
+root.update()
+check("Select area opens its full-screen picker", selector.win.winfo_exists())
+selector._finish(None)
+check("...and Esc closes it without choosing anything", picked == [None] or picked == [])
+import numpy as np
+fake = m.Reading(*([None] * len(m.Reading._fields)))._replace(
+    where="MapleStory window 1920x1080", text="3,060 [1.04%]", image=np.full((40, 200, 3), 60, np.uint8), boxes=[])
+app.last_capture = fake
+app.job = None
+app.reader.job_look = {"image": np.full((60, 300, 3), 90, np.uint8), "boxes": [(10, 10, 80, 40, "exp")],
+                       "why": "the tries didn't agree on what it says"}
+before = set(root.winfo_children())
+app.view_capture()
+root.update()
+win = next(w for w in set(root.winfo_children()) - before)
+texts = " | ".join(w.cget("text") for w in win.winfo_children() if w.winfo_class() == "Label" and w.cget("text"))
+check("View capture says why the class wasn't read", "Class. Not read: the tries didn't agree" in texts)
+win.destroy()
+app.reader.job_look = {"image": None, "boxes": [], "why": "this window is covering the class name: move it"}
+app.view_capture(); root.update()
+win = next(w for w in set(root.winfo_children()) - before)
+check("...and works when there is no picture (the overlay is in the way)",
+      "covering the class name" in " ".join(w.cget("text") for w in win.winfo_children() if w.winfo_class() == "Label"))
+win.destroy()
+app.reader.box = (700, 1000, 200, 30)                          # (the EXP bar is found: only then is the class worth asking about)
+files = app._save_report_files(False)
+text = app._report_text(files)
+check("a bug report says why the class wasn't read", "Class not read: this window is covering the class name" in text)
+check("it saves a picture, and the details as a text file", files["picture"].exists() and files["details"].exists())
+check("...with the whole story in the text file", all(w in files["details"].read_text(encoding="utf-8")
+                                                      for w in ("== Game window ==", "== What it found ==", "== What happened")))
+check("the web address a report is opened with stays short enough",
+      len(m.urllib.parse.urlencode({"title": "x", "body": text})) < 7000)
+check("it never contains the Windows user name",
+      not any(len(s) > 2 and s in text + files["details"].read_text(encoding="utf-8")
+              for s in {str(m.Path.home()), m.os.environ.get("USERNAME", "")}))
+print(text)
+app.job, app.reader.job_look, app.last_capture = None, None, None
+app.reader.box = None
 check("the typeface is the bundled one, or it fell back cleanly", app._own_fonts in (True, False) and bool(app.theme.fam["extra"]))
 app.close()
 

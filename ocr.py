@@ -71,5 +71,17 @@ class Tesseract:
             raise TesseractError(f"Tesseract read {len(texts)} pictures of {len(images)}")
         return texts
 
+    def version(self):
+        """Tesseract's version line (asked once), or None if it can't say."""
+        if not hasattr(self, "_version"):
+            try:
+                run = subprocess.run([self.cmd, "--version"], capture_output=True, stdin=subprocess.DEVNULL,
+                                     timeout=10, **_hidden())
+                text = (run.stdout or run.stderr).decode("utf-8", "replace").strip()
+                self._version = text.splitlines()[0] if text else None
+            except Exception:
+                self._version = None
+        return self._version
+
     def read_line(self, image, chars=None):
         return self.read_lines([image], chars)[0]

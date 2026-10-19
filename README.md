@@ -155,7 +155,7 @@ Every version is tested against thousands of misread numbers, and against real s
 
 **To report a bug,** click **Report a bug** in ⚙ (or **Something's wrong? Report a bug** in View capture):
 1. Your browser opens a bug report on GitHub, already filled in with your version and what the overlay was reading. Nothing personal is included, and nothing is sent until you click Submit.
-2. A folder opens with **bug-report.png**, a picture of what the overlay read. Drag it into the report.
+2. A folder opens with **bug-report.png** (what the overlay read: the EXP bar, mesos, class and map name) and **bug-report.txt** (how it's doing: your screen and game window size, what it found, what it last said, and any errors). Drag both into the report. Neither has your character name or Windows user name. It also asks if you want to save a small picture of the whole game window: that one can show chat and names, so it's saved only if you say yes, and you choose whether to attach it.
 3. Write a sentence about what went wrong, and click **Submit**. (You need a free GitHub account.)
 
 ## Is it safe? Is it allowed?
