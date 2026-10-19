@@ -160,6 +160,8 @@ Every version is tested against thousands of misread numbers, and against real s
 
 ## Is it safe? Is it allowed?
 
+**Only download this overlay from this repository's [Releases](https://github.com/beanguri/Maple-Classic-Exp-Overlay/releases).** Other people have copied the code (that's allowed, it's open source), but their copies aren't mine and I haven't checked them. Mine are built by GitHub, and the steps below show how to check that.
+
 - **It only looks at your screen, like a screen recorder.** It never touches the game's files or memory, and never presses keys or clicks for you.
 - **It only goes online for two things:** asking GitHub whether there's a newer version when it starts, and, only if you said yes, sharing your finished 15-minute runs (see above). Nothing about who you are is sent. Both can be turned off in ⚙. See [Privacy](#privacy).
 - **Your antivirus might warn about it.** Antivirus programs sometimes flag small new programs by mistake. All of the code is public right here, so anyone can check what it does.

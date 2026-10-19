@@ -22,6 +22,11 @@ NOT_A_TOWN = re.compile(r"Florina Beach|Marr's Forest|Forgotten Hollow|Henesys P
                         r"Forest of Patience|Thieves' Hideout|Top of the Hill|Maple Hill|Bygone Days|B2 <|Backalley")
 
 
+# Maps the game has that meowdb's page doesn't (yet): new maps, event maps. Add "Name" or ("Name", is_town) here
+# (see tools/moderation.sql, query 10), then run this again and deploy. They then show at once.
+EXTRA_MAPS = []
+
+
 def parse(page):
     names = {}
     for _, inner in re.findall(r'<a[^>]*href="/msclassic/maps/(\d+)"[^>]*>(.*?)</a>', page, re.S):
@@ -30,6 +35,9 @@ def parse(page):
         if 3 <= len(name) <= 60:
             names.setdefault(name, set()).add("(town)" in text)
     # a name used by a town and a hunting map is treated as a hunting map
+    for extra in EXTRA_MAPS:
+        name, town = (extra, False) if isinstance(extra, str) else extra
+        names[name] = {bool(town)}
     return sorted((n, int(flags == {True} and not NOT_A_TOWN.search(n))) for n, flags in names.items())
 
 

@@ -62,6 +62,24 @@ CREATE TABLE IF NOT EXISTS map_review (
   first_seen TEXT NOT NULL
 ) WITHOUT ROWID;
 
+-- Who has sent runs: when the server first heard from each install, how many runs it has sent, and whether it's
+-- banned. Only installs that are not banned, were first seen at least a day ago and have at least 4 runs count
+-- in the numbers shown on the site (so made-up players can't appear at once). To ban one: see tools/moderation.sql.
+CREATE TABLE IF NOT EXISTS installs (
+  install    TEXT PRIMARY KEY,
+  first_seen TEXT    NOT NULL,                -- UTC, when the server first got a run from it
+  runs       INTEGER NOT NULL DEFAULT 0,
+  banned     INTEGER NOT NULL DEFAULT 0,
+  note       TEXT
+) WITHOUT ROWID;
+
+-- Per day: runs accepted and new installs (to keep a flood from using up the free database's daily writes).
+CREATE TABLE IF NOT EXISTS daily (
+  day          TEXT PRIMARY KEY,
+  runs         INTEGER NOT NULL DEFAULT 0,
+  new_installs INTEGER NOT NULL DEFAULT 0
+) WITHOUT ROWID;
+
 -- Answers the site worked out recently, shared by every Cloudflare location, so each one is
 -- worked out at most once every few minutes however many people visit.
 CREATE TABLE IF NOT EXISTS answers (
@@ -69,6 +87,13 @@ CREATE TABLE IF NOT EXISTS answers (
   body TEXT    NOT NULL,
   at   INTEGER NOT NULL                     -- when, in milliseconds since 1970
 ) WITHOUT ROWID;
+
+-- The installs table follows the runs too: every install with runs has a row (first seen at its first run),
+-- and run counts are redone. Banned installs stay banned even when their runs are deleted.
+INSERT OR IGNORE INTO installs (install, first_seen, runs, banned) SELECT install, MIN(received), COUNT(*), 0 FROM runs GROUP BY install;
+UPDATE installs SET runs = (SELECT COUNT(*) FROM runs r WHERE r.install = installs.install)
+  WHERE runs != (SELECT COUNT(*) FROM runs r WHERE r.install = installs.install);
+DELETE FROM installs WHERE banned = 0 AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.install = installs.install);
 
 -- Bring the summary tables exactly in line with the runs: rows with no run behind them are
 -- taken out, missing ones added, counts redone. (Never emptied first, so the site never sees

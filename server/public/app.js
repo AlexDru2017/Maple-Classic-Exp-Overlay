@@ -341,7 +341,7 @@ function showChart(animate = true) {
         : `No map has ${Number(minPlayers)} players around your level yet. Here's what's come in so far.`}</span></div>
       ${early.map((m, i) => rowHtml(m, i, s, true, minPlayers - m.players)).join("")}` : ""}
     <div class="chart-foot">EXP/hr is the chart's scale; the time per level is the same pace as a share of your level's EXP.
-      Each player counts once, however much they play. ${JOIN.replace('class="more" ', "")}</div>
+      Each player counts once, however much they play, and a new player's runs start counting after a day. ${JOIN.replace('class="more" ', "")}</div>
   </div><div class="tip" role="status"><b></b><span></span></div>`;
   spreadDots();
   hookDetails();

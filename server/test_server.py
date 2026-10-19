@@ -7,6 +7,7 @@ import hashlib
 import json
 import random
 import sys
+import time
 import urllib.request
 from datetime import date, timedelta
 
@@ -22,10 +23,14 @@ def check(name, ok):
     failures += not ok
 
 
-def call(path, body=None, ip=None, content_type="application/json"):
+def call(path, body=None, ip=None, content_type="application/json", later=None):
     """A request to the test server. Each made-up player sends from their own made-up internet
     address (the live site gets the real one from Cloudflare), unless `ip` says otherwise."""
     headers = {"content-type": content_type}
+    if body is None:                                   # a page asking: "a day and an hour later", so the players
+        headers["X-Test-Now"] = str(int((time.time() + 25 * 3600) * 1000))      # sent above count (see VET_HOURS)
+    if later is not None:
+        headers["X-Test-Now"] = str(int((time.time() + later * 3600) * 1000))
     if isinstance(body, dict) and isinstance(body.get("install"), str):
         n = int(hashlib.md5(body["install"].encode()).hexdigest()[:4], 16)
         headers["CF-Connecting-IP"] = ip or f"10.0.{n >> 8}.{n & 255}"
@@ -66,18 +71,21 @@ for i in range(6):
     who = install()
     typical = rnd.uniform(45000, 55000)
     r = call("/api/runs", {"install": who, "runs": [run(t, typical * rnd.uniform(0.93, 1.07), level=30 + i % 4)
-                                                     for t in hours(f"{day(1)}", 3)]})
+                                                     for t in hours(f"{day(1)}", 4)]})
     normal.append(typical)
-    check(f"normal player {i + 1}: all 3 runs received", r.get("received") == 3)
+    check(f"normal player {i + 1}: all 4 runs received", r.get("received") == 4)
 
 # a faker and an AFK player
-r = call("/api/runs", {"install": install(), "runs": [run(t, 500000) for t in hours(f"{day(1)}", 3)]})
-check("a faker's runs are received (but should be left out of the numbers)", r.get("received") == 3)
-call("/api/runs", {"install": install(), "runs": [run(t, 5000) for t in hours(f"{day(1)}", 3)]})
+r = call("/api/runs", {"install": install(), "runs": [run(t, 250000) for t in hours(f"{day(1)}", 4)]})
+check("a faker's runs are received (but should be left out of the numbers)", r.get("received") == 4)
+r = call("/api/runs", {"install": install(), "runs": [run(t, 500000) for t in hours(f"{day(1)}", 4)]})
+check(f"...but a run gaining 4 levels' worth an hour at Lv 31 is refused outright ({r['results'][0].get('why')})",
+      r.get("received") == 0 and r["results"][0].get("why") == "impossible EXP for that level")
+call("/api/runs", {"install": install(), "runs": [run(t, 5000) for t in hours(f"{day(1)}", 4)]})
 
 # a map only two players have farmed
 for _ in range(2):
-    call("/api/runs", {"install": install(), "runs": [run(f"{day(1)}T09:00", 40000, map_name="Rocky Road II")]})
+    call("/api/runs", {"install": install(), "runs": [run(t, 40000, map_name="Rocky Road II") for t in hours(f"{day(1)}", 4, 4)]})
 
 # broken runs
 bad = [dict(run(f"{day(2)}T10:00", 50000), seconds=300),                 # only 5 minutes
@@ -127,13 +135,13 @@ spammer, received = install(), 0
 for part in range(3):
     spam = [run(f"{day(4 + i // 24)}T{i % 24:02d}:00", 50000) for i in range(part * 50, part * 50 + 50)]
     received += call("/api/runs", {"install": spammer, "runs": spam}).get("received", 0)
-check(f"one install can only send so many a day ({received} of 150 received)", received == 100)
+check(f"one install can only send so many a day ({received} of 150 received)", received == 70)
 
 # other jobs on the same map: a Chief Bandit (the same path), Rogues (1st job: every Thief
 # path), Hermits (the other Thief path), Beginners and Hunters
 def players(n, job, exp_hr, day):
     for _ in range(n):
-        call("/api/runs", {"install": install(), "runs": [run(f"{day}T10:00", exp_hr, job=job)]})
+        call("/api/runs", {"install": install(), "runs": [run(t, exp_hr, job=job) for t in hours(day, 4)]})
 
 
 players(1, "Chief Bandit", 50000, f"{day(5)}")
@@ -143,8 +151,8 @@ players(3, "Beginner", 50000, f"{day(5)}")
 players(3, "Hunter", 50000, f"{day(5)}")
 # three Bandits in parties of 2, 4 and 6: shown together under "party", never under "solo"
 for size in (2, 4, 6):
-    call("/api/runs", {"install": install(), "runs": [run(f"{day(6)}T10:00", 120000, map_name="Sleepywood Dungeon",
-                                                          party=size)]})
+    call("/api/runs", {"install": install(), "runs": [run(t, 120000, map_name="Cold Field I", party=size)
+                                                      for t in hours(f"{day(6)}", 4)]})
 
 # made-up map names: web addresses are turned down; a name only one player has sent isn't shown
 r = call("/api/runs", {"install": install(), "runs": [run(f"{day(6)}T12:{m}", 50000, map_name=name, job="Hunter")
@@ -162,13 +170,13 @@ boar = maps.get("The Land of Wild Boar II")
 print("stats:", json.dumps(s, indent=1)[:900])
 check("a map farmed by enough players is shown", boar is not None)
 if boar:
-    check(f"the faker and the AFK player are left out ({boar['outliers']} outliers)", boar["outliers"] == 6)
+    check(f"the faker and the AFK player are left out ({boar['outliers']} outliers)", boar["outliers"] == 8)
     check(f"EXP/hr is the typical player's (median {boar['exp_hr']:,}, normal players 45k-55k)",
           45000 <= boar["exp_hr"] <= 55000)
     # 8 Bandits (not the faker or the AFK one), the Chief Bandit and 3 Rogues. Not the
     # Hermits, Beginners or Hunters.
     check(f"Shadower counts Bandits, Chief Bandits and Rogues, each once (players: {boar['players']})",
-          boar["players"] == 12)
+          boar["players"] == 11)
 if boar:
     check(f"how much farming it's from, in hours ({boar['hours']} h from {boar['runs']} runs)",
           abs(boar["hours"] - boar["runs"] * 900.4 / 3600) < 0.2)
@@ -177,7 +185,7 @@ if boar:
           len(dots) == boar["players"] and dots == sorted(dots)
           and all(0.5 * boar["exp_hr"] <= d <= 2 * boar["exp_hr"] for d in dots))
     check(f"the faker and the AFK player are the left-out dots ({boar.get('unusual')})",
-          sorted(boar.get("unusual", [])) == [5000, 500000])
+          sorted(boar.get("unusual", [])) == [5000, 250000])
     check(f"every dot has the level its player was at ({boar.get('dot_levels')})",
           len(boar.get("dot_levels", [])) == len(dots) and all(isinstance(v, int) and 25 <= v <= 40 for v in boar["dot_levels"])
           and len(boar.get("unusual_levels", [])) == len(boar.get("unusual", [])))
@@ -199,15 +207,15 @@ check(f"Night Lord counts the Hermits and the Rogues, not the Bandits ({nl_boar 
       nl_boar is not None and nl_boar["players"] == 6)
 everyone = {m["map"]: m for m in call("/api/stats?class=Thief&level=32&party=1")["maps"]}
 check(f"no path: the whole class ({everyone['The Land of Wild Boar II']['players']} players)",
-      everyone["The Land of Wild Boar II"]["players"] == 15)
+      everyone["The Land of Wild Boar II"]["players"] == 14)
 check("other classes see nothing", call("/api/stats?class=Archer&path=Marksman&level=32&party=1")["maps"] == [])
 check("an Archer path sees the Hunters", len(call("/api/stats?class=Archer&path=Bowmaster&level=32&party=1")["maps"]) == 1)
 party = {m["map"]: m for m in call("/api/stats?class=Thief&path=Shadower&level=32&party=party")["maps"]}
-check(f"parties of 2, 4 and 6 are put together ({party.get('Sleepywood Dungeon', {}).get('players')} players)",
-      party.get("Sleepywood Dungeon", {}).get("players") == 3 and "The Land of Wild Boar II" not in party)
+check(f"parties of 2, 4 and 6 are put together ({party.get('Cold Field I', {}).get('players')} players)",
+      party.get("Cold Field I", {}).get("players") == 3 and "The Land of Wild Boar II" not in party)
 check("a party size from the overlay's link means a party",
       [m["map"] for m in call("/api/stats?class=Thief&path=Shadower&level=32&party=4")["maps"]] == list(party))
-check("party runs aren't in solo", "Sleepywood Dungeon" not in maps)
+check("party runs aren't in solo", "Cold Field I" not in maps)
 check("a party of 7 is refused", call("/api/stats?class=Thief&level=32&party=7").get("status") == 400)
 check(f"around your level starts at 3 levels either way, and says how wide it can go ({s['levels']}, {s['ranges']})",
       s["levels"] == [29, 35] and s["ranges"] == [3, 5, 8])
@@ -231,8 +239,9 @@ call("/api/runs", {"install": install(), "runs": [run(f"{day(29)}T10:00", 52000,
 call("/api/runs", {"install": install(), "runs": [run(f"{day(29)}T10:00", 400000, job="Hunter")]})        # a faker on Wild Boar
 call("/api/runs", {"install": install(), "runs": [run(f"{day(29)}T10:00", 50000, job="Beginner")]})
 fresh = install()
-call("/api/runs", {"install": fresh, "runs": [run(f"{day(29)}T09:00", 48000, job="Hunter"),
-                                     run(f"{day(29)}T09:15", 51000, level=32, job="Hunter")]})
+call("/api/runs", {"install": fresh, "runs": [run(f"{day(29)}T09:00", 48000, job="Hunter"), run(f"{day(29)}T09:15", 48000, job="Hunter"),
+                                     run(f"{day(29)}T09:30", 48000, job="Hunter"),
+                                     run(f"{day(29)}T09:45", 51000, level=32, job="Hunter")]})
 latest = call("/api/recent").get("runs", [])
 check(f"the bar shows the latest runs, newest first ({len(latest)} runs)",
       0 < len(latest) <= 12 and [r["shared"] for r in latest] == sorted((r["shared"] for r in latest), reverse=True))
@@ -254,7 +263,7 @@ check(f"options list the 4 classes, no Beginner ({names})", names == ["Warrior",
 paths = {p["name"]: p for p in o["classes"][3]["paths"]}
 check(f"Thief's paths are named after the 4th job ({list(paths)})", list(paths) == ["Night Lord", "Shadower"])
 check(f"players per path ({paths['Night Lord']['players']} Night Lord, {paths['Shadower']['players']} Shadower)",
-      paths["Night Lord"]["players"] == 6 and paths["Shadower"]["players"] == 19)   # every Bandit (solo or not), Chief Bandit and Rogue
+      paths["Night Lord"]["players"] == 6 and paths["Shadower"]["players"] == 18)   # every Bandit (solo or not), Chief Bandit and Rogue
 check(f"each path lists its jobs, 1st to 4th ({paths['Shadower']['steps']})",
       paths["Shadower"]["steps"] == ["Rogue", "Bandit", "Chief Bandit", "Shadower"])
 
@@ -263,7 +272,7 @@ check(f"each path lists its jobs, 1st to 4th ({paths['Shadower']['steps']})",
 def players_on(map_name, levels, exp_hr=40000, job="Bandit", party=1, day_n=2):
     for i, lv in enumerate(levels):
         call("/api/runs", {"install": install(), "runs": [run(t, exp_hr * rnd.uniform(0.95, 1.05), level=lv, map_name=map_name,
-                                                              job=job, party=party) for t in hours(day(day_n), 2)]})
+                                                              job=job, party=party) for t in hours(day(day_n), 4)]})
 
 
 players_on("Rocky Road II", [50, 50, 51], 52000)                       # a busy level: 3 players within 3 levels
@@ -304,11 +313,23 @@ r = call("/api/runs", {"install": install(), "runs": [run(hours(day(6), 1)[0], 4
 check("...another town too", r["received"] == 0 and r["results"][0].get("why") == "town")
 r = call("/api/runs", {"install": install(), "runs": [run(hours(day(6), 1)[0], 45000, map_name="Henesys Hunting Ground II")]})
 check("...but a hunting map with a town's name in it is fine", r["received"] == 1)
-players_on("Halloween Event Field", [40, 40, 41], 90000, day_n=7)
-r = call("/api/runs", {"install": install(), "runs": [run(hours(day(6), 1)[0], 50000, level=40, map_name="Halloween Event Field")]})
-check("a map that isn't on the game's list (an event map) is still accepted", r["received"] == 1)
+event = [install() for _ in range(3)]
+for who in event:
+    call("/api/runs", {"install": who, "runs": [run(t, 90000, level=40, map_name="Halloween Event Field") for t in hours(day(7), 4)]})
 d = call("/api/stats?class=Thief&path=Shadower&level=40&party=solo")
-check("...and shows up like any other map", any(x["map"] == "Halloween Event Field" for x in d["maps"] + d["early"]))
+check("a map that isn't on the game's list (an event map) is accepted but hidden after one day of players",
+      not any(x["map"] == "Halloween Event Field" for x in d["maps"] + d["early"]))
+for who in event:                                        # (and again "the next day": the server's clock moved on)
+    call("/api/runs", {"install": who, "runs": [run(t, 90000, level=40, map_name="Halloween Event Field") for t in hours(day(8), 4)]}, later=26)
+d = call("/api/stats?class=Thief&path=Shadower&level=40&party=solo")
+check("...and shown once 3 players have shared it on 2 days", any(x["map"] == "Halloween Event Field" for x in d["maps"]))
+two = [install() for _ in range(2)]
+for who in two:
+    for dn, later in ((9, None), (10, 26)):
+        call("/api/runs", {"install": who, "runs": [run(t, 70000, level=40, map_name="Totally Another Place") for t in hours(day(dn), 4)]}, later=later)
+d = call("/api/stats?class=Thief&path=Shadower&level=40&party=solo")
+check("...but 2 players over 2 days aren't enough for a name the game doesn't list",
+      not any(x["map"] == "Totally Another Place" for x in d["maps"] + d["early"]))
 
 # the ladder
 ladder = call("/api/ladder?class=Thief&path=Shadower&party=solo")
@@ -322,6 +343,131 @@ check("...each with EXP/hr, %/hr and players, best first", all(
 check("the ladder needs a class", call("/api/ladder?party=solo").get("status") == 400)
 check("...and a real one", call("/api/ladder?class=constructor").get("status") == 400
       and call("/api/ladder?class=Thief&path=__proto__").get("status") == 400 and call("/api/ladder?class=Thief&party=9").get("status") == 400)
+
+
+# ---- hardening: made-up players, made-up names, floods
+import os
+import subprocess
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def sql(command):
+    """Rows from a query on the LOCAL test database (the same one the test server uses)."""
+    wrangler = os.path.join(HERE, "node_modules", ".bin", "wrangler.cmd" if os.name == "nt" else "wrangler")
+    out = subprocess.run([wrangler, "d1", "execute", "classicexp", "--local", "--persist-to", ".wrangler/test-state", "--json",
+                          "--command", command], cwd=HERE, capture_output=True, text=True, timeout=120).stdout
+    start = out.index("[")
+    return json.loads(out[start:])[0]["results"]
+
+
+def stats(level, later=None, cls="Thief", path="Shadower", party="solo"):
+    return call(f"/api/stats?class={cls}&path={path.replace(' ', '%20')}&level={level}&party={party}", later=later)
+
+
+def seen(level, name, **kw):
+    d = stats(level, **kw)
+    return any(x["map"] == name for x in d["maps"] + d["early"])
+
+
+# a new player doesn't count for a day, nor with fewer than 4 runs
+crowd = [install() for _ in range(5)]
+for who in crowd:
+    r = call("/api/runs", {"install": who, "runs": [run(t, 61000, level=55, map_name="Cold Field II") for t in hours(day(12), 4)]})
+    assert r.get("received") == 4
+check("five brand-new players are stored but not shown an hour later", not seen(55, "Cold Field II", later=1))
+check("...they show once a day has passed", seen(55, "Cold Field II", later=25))
+few = install()
+call("/api/runs", {"install": few, "runs": [run(t, 61000, level=71, map_name="Cold Field II") for t in hours(day(12), 3)]})
+check("a player with only 3 runs never counts, however long it's been", not seen(71, "Cold Field II", later=500))
+before = call("/api/options?fresh=1", later=1)["players"]
+after = call("/api/options?fresh=1", later=25)["players"]
+check(f"the player count on the page leaves out new players ({before} an hour later, {after} a day later)", after >= before + 5)
+
+# made-up players from one IPv6 home: the whole /64 is one connection
+six = [install() for _ in range(8)]
+got = [call("/api/runs", {"install": who, "runs": [run(f"{day(13)}T08:00", 50000, map_name="Ant Tunnel II")]},
+            ip=f"2001:db8:1:2:{i:x}:{i * 7:x}::{i:x}")["results"][0] for i, who in enumerate(six)]
+check(f"billions of IPv6 addresses at one home are one connection: only 6 players get through ({[g['ok'] for g in got]})",
+      sum(g["ok"] for g in got) == 6 and got[-1].get("retry") is True)
+ok_other = call("/api/runs", {"install": install(), "runs": [run(f"{day(13)}T09:00", 50000, map_name="Ant Tunnel II")]},
+                ip="2001:db8:1:3::1")["results"][0]
+check("...while another home next door is its own connection", ok_other["ok"])
+mapped = [call("/api/runs", {"install": install(), "runs": [run(f"{day(14)}T08:00", 50000, map_name="Ant Tunnel II")]},
+               ip=f"::ffff:198.51.100.{9}")["results"][0] for _ in range(7)]
+check("an IPv4 address written the IPv6 way is still the same IPv4 connection", sum(g["ok"] for g in mapped) == 6)
+
+# what a run may claim
+who = install()
+
+
+def bad(**kw):
+    r = call("/api/runs", {"install": who, "runs": [dict(run(f"{day(15)}T10:00", 50000), **kw)]})
+    return r["results"][0].get("why")
+
+
+check(f"a job the game doesn't have is refused ({bad(**{'class': 'Free Mesos Seller'})})", bad(**{"class": "Free Mesos Seller"}) == "not a job")
+check("...and a real one is fine", call("/api/runs", {"install": who, "runs": [run(f"{day(15)}T11:00", 50000)]})["received"] == 1)
+look_alike = bad(map_read="Ant Tunnel IⅠАnt Tunnel")
+check(f"a map name with letters outside English is refused ({look_alike})", look_alike == "not a map name")
+check("...so is an advert", bad(map_read="Join our discord for free mesos now") == "not a map name"
+      and bad(map_read="Visit discord.gg slash maple fans") == "not a map name" and bad(map_read="Best prices telegram channel") == "not a map name")
+check("...and a real map with the word 'free' in it is fine", call("/api/runs", {"install": who, "runs": [run(f"{day(15)}T12:00", 50000, map_name="Free Market 3")]})["results"][0].get("why") == "town")
+check("a run gaining 100 levels' worth of mesos an hour is refused",
+      bad(mesos=9e9) == "impossible mesos/hr")
+check("a Lv 200 run claiming 5% of the table's end a minute is refused", bad(level_start=200, level_end=200, exp=2e9) in
+      ("impossible EXP for that level", "impossible EXP for those levels"))
+dozen = install()
+names = [l.split("\t")[0] for l in open(os.path.join(HERE, "..", "assets", "maps.txt"), encoding="utf-8") if l.rstrip().endswith("\t0")][:14]
+results = [call("/api/runs", {"install": dozen, "runs": [run(f"{day(16)}T{8 + i // 4:02d}:{(i % 4) * 15:02d}", 50000, map_name=n)]})
+           ["results"][0] for i, n in enumerate(names)]
+check(f"one install can't farm more than 12 different maps in a day ({sum(r['ok'] for r in results)} of 14)",
+      sum(r["ok"] for r in results) == 12 and results[-1].get("why") == "too many different maps in a day")
+
+# the server's clock can't be set from outside: the live site ignores the test header
+check("the test header is only for a local server (the check is in the code)",
+      "x-test-now" in open(os.path.join(HERE, "src", "index.js"), encoding="utf-8").read().lower()
+      and "localhost" in open(os.path.join(HERE, "src", "index.js"), encoding="utf-8").read())
+
+# a banned install: refused, and gone from the numbers
+villain = install()
+call("/api/runs", {"install": villain, "runs": [run(t, 61000, level=90, map_name="Cold Field I") for t in hours(day(17), 4)]})
+check("a player with runs shows a day later", seen(90, "Cold Field I", later=25))
+sql(f"UPDATE installs SET banned = 1 WHERE install = '{villain}'")
+r = call("/api/runs", {"install": villain, "runs": [run(f"{day(17)}T20:00", 61000, level=90, map_name="Cold Field I")]})
+check(f"a banned install is refused ({r['results'][0].get('why')})", r["received"] == 0 and r["results"][0].get("why") == "refused"
+      and not r["results"][0].get("retry"))
+check("...and its runs are left out of the numbers", not seen(90, "Cold Field I", later=25))
+
+# a flood costs nothing: broken posts make no database rows
+rows_before = sql("SELECT (SELECT COUNT(*) FROM installs) AS i, (SELECT COALESCE(SUM(new_installs), 0) FROM daily) AS d, (SELECT COUNT(*) FROM map_review) AS m")[0]
+ghost = install()
+for body in ({"install": ghost, "runs": [{"x": 1}]}, {"install": ghost, "runs": [dict(run(f"{day(18)}T10:00", 50000), **{"class": "x"})]},
+             {"install": ghost, "runs": [dict(run(f"{day(18)}T10:00", 50000), map_read="Join discord now")]}, {"install": ghost, "runs": []}):
+    call("/api/runs", body)
+rows_after = sql("SELECT (SELECT COUNT(*) FROM installs) AS i, (SELECT COALESCE(SUM(new_installs), 0) FROM daily) AS d, (SELECT COUNT(*) FROM map_review) AS m")[0]
+check(f"posts with nothing valid in them leave no trace in the database ({rows_before} -> {rows_after})", rows_before == rows_after)
+check("...and the player never became known", sql(f"SELECT COUNT(*) AS n FROM installs WHERE install = '{ghost}'")[0]["n"] == 0)
+
+# a flood of brand-new players is stopped for the day, while players the server knows carry on
+known = install()
+call("/api/runs", {"install": known, "runs": [run(f"{day(19)}T08:00", 50000, map_name="Ant Tunnel II")]})
+stopped = None
+for i in range(420):
+    r = call("/api/runs", {"install": install(), "runs": [run(f"{day(19)}T09:00", 50000, map_name="Ant Tunnel II")]}, ip=f"203.0.{i // 200}.{i % 200 + 1}")
+    if r["results"][0].get("retry") and "new players" in r["results"][0].get("why", ""):
+        stopped = i
+        break
+check(f"after a few hundred new players in one day the rest are asked to come back tomorrow (stopped after {stopped})",
+      stopped is not None and 50 < stopped < 420)
+r = call("/api/runs", {"install": known, "runs": [run(f"{day(19)}T09:15", 50000, map_name="Ant Tunnel II")]})
+check("...but a player the server already knows still gets through", r["received"] == 1)
+
+# hostile names never reach the page as anything but text (and don't break the answers)
+hostile = install()
+call("/api/runs", {"install": hostile, "runs": [run(t, 50000, level=60, map_name="<img src=x onerror=alert(1)> Cave") for t in hours(day(20), 4)]})
+body = json.dumps(call("/api/stats?class=Thief&path=Shadower&level=60&party=solo", later=25))
+check("a name with HTML in it has its angle brackets removed", "<img" not in body and "<script" not in body)
 
 print("\nALL PASSED" if not failures else f"\n{failures} FAILED")
 sys.exit(1 if failures else 0)

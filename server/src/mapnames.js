@@ -38,12 +38,13 @@ export function fixRomans(name) {
 
 // Screens and menus the overlay's text reader can mistake for a map (the region line under the minimap,
 // the cash shop, settings).
-const NOT_MAPS = /\b(?:cash deco|set ?up|blacklist|keyboard|mouse|controller|citizens)\b|^(?:hidden street|world|victoria road)$/i;
+const NOT_MAPS = /\b(?:cash deco|set ?up|blacklist|keyboard|mouse|controller|citizens|discord|telegram|whatsapp|giveaway|facebook|youtube|instagram|twitch|paypal|dot ?com)\b|\bwww\b|\bhttps?\b|\.gg\b|^(?:hidden street|world|victoria road)$/i;
 
-/** Not a map name at all: too little text to be a name (no word of 4 letters), or a menu. Only asked of names
- * that aren't on the game's list. */
+/** Not a map name at all: too little text to be a name (no word of 4 letters), letters outside the English
+ * alphabet (look-alikes of English ones are a way to make a second "map"), or a menu or advert. Only asked
+ * of names that aren't on the game's list. */
 export function junk(name) {
-  return !/[A-Za-z]{4,}/.test(name) || NOT_MAPS.test(name);
+  return !/[A-Za-z]{4,}/.test(name) || /[^\x20-\x7e]/.test(name) || NOT_MAPS.test(name);
 }
 
 /** Roman numerals and numbers in a name: maps that differ in these are different maps. */
@@ -108,3 +109,6 @@ function lookup(read) {
 }
 
 export const LISTED = entries.length;
+
+/** Is this (already cleaned) name on the game's list? */
+export const isListed = (name) => byKey.has(keyOf(name));

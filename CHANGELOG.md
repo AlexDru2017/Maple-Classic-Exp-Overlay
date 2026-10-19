@@ -7,6 +7,12 @@
 - **The minimap's name can't be seen** (hidden, covered): after 45 seconds the overlay pauses instead of carrying on under the map you were on before, and carries on when it can read the name again. (This is likely why a town like Perion could end up in people's logs.)
 - **Towns** aren't logged ("In a town: nothing is logged here"), and the site turns town runs down.
 
+**The best-maps website: harder to fake**
+- A new player's runs start counting a day after their first, and after 4 runs, so made-up players can't change the numbers at once. Runs from a banned player are refused and hidden.
+- Runs are checked before anything is stored: the job must be a real job, the map name plain English text (adverts, links and look-alike letters are turned down), and EXP and mesos must be believable for the level.
+- One home's IPv6 addresses count as one connection, a day's new players and runs have a limit (so a flood can't use up the database), and nobody farms more than 12 different maps a day.
+- A map name the game doesn't list shows only once 3 players have shared it on 2 different days.
+
 **The best-maps website**
 - **A closer level range.** A map's numbers start from players within 3 levels of yours, and go to 5 or 8 only if the map needs more players to be ranked (the row says "wider range").
 - **% of a level per hour and time per level** on every map ("about 14 h per level"), which compares players at different levels.
