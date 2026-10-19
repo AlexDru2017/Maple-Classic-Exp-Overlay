@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.9.10-beta
+
+**Cleaner map names**
+- A map's name is now put right against the game's own list of maps (from meowdb.com, thank you): OCR slips like "ist Accompaniment" for "1st Accompaniment" or "Boar Il" for "Boar II" become one map, in your log and on the best-maps site. A map that isn't on the list (an event map, a new map) is used as it was read.
+- **The minimap's name can't be seen** (hidden, covered): after 45 seconds the overlay pauses instead of carrying on under the map you were on before, and carries on when it can read the name again. (This is likely why a town like Perion could end up in people's logs.)
+- **Towns** aren't logged ("In a town: nothing is logged here"), and the site turns town runs down.
+
+**The best-maps website**
+- **A closer level range.** A map's numbers start from players within 3 levels of yours, and go to 5 or 8 only if the map needs more players to be ranked (the row says "wider range").
+- **% of a level per hour and time per level** on every map ("about 14 h per level"), which compares players at different levels.
+- **Sort** by EXP/hr, %/hr or mesos/hr, and **hide early data**.
+- **Details** under every map: solo vs party, EXP/hr at each level, and the last 7 days against before.
+- **Leveling ladder:** the best map for each 5 levels of your class and path.
+- **Copy link**: the address always holds your level, class, path and sort, so a view can be shared.
+- It tells you when the newest run was shared.
+- **Maps at your level come first**: maps that had to use players from further away (up to 8 levels) are listed under their own "Wider range" heading.
+- **Dots are coloured by the player's level** against yours (4+ lower, 1–3 lower, your level, 1–3 higher, 4+ higher), so you can see which level the high-EXP players are at, and hovering a dot or a level bar in Details says the level and number of players.
+
 ## 0.9.9-beta
 
 **New**

@@ -178,6 +178,9 @@ if boar:
           and all(0.5 * boar["exp_hr"] <= d <= 2 * boar["exp_hr"] for d in dots))
     check(f"the faker and the AFK player are the left-out dots ({boar.get('unusual')})",
           sorted(boar.get("unusual", [])) == [5000, 500000])
+    check(f"every dot has the level its player was at ({boar.get('dot_levels')})",
+          len(boar.get("dot_levels", [])) == len(dots) and all(isinstance(v, int) and 25 <= v <= 40 for v in boar["dot_levels"])
+          and len(boar.get("unusual_levels", [])) == len(boar.get("unusual", [])))
     check("dots are rounded and carry no player IDs",
           all(isinstance(d, (int, float)) and d == float(f"{d:.3g}") for d in dots + boar.get("unusual", [])))
 early = {m["map"]: m for m in s.get("early", [])}
@@ -206,8 +209,9 @@ check("a party size from the overlay's link means a party",
       [m["map"] for m in call("/api/stats?class=Thief&path=Shadower&level=32&party=4")["maps"]] == list(party))
 check("party runs aren't in solo", "Sleepywood Dungeon" not in maps)
 check("a party of 7 is refused", call("/api/stats?class=Thief&level=32&party=7").get("status") == 400)
-check(f"around your level means 5 levels either way ({s['levels']})", s["levels"] == [27, 37])
-check("runs 6+ levels away are left out", call("/api/stats?class=Thief&path=Shadower&level=39&party=solo")["maps"] == [])
+check(f"around your level starts at 3 levels either way, and says how wide it can go ({s['levels']}, {s['ranges']})",
+      s["levels"] == [29, 35] and s["ranges"] == [3, 5, 8])
+check("runs more than 8 levels away are left out", call("/api/stats?class=Thief&path=Shadower&level=43&party=solo")["maps"] == [])
 check("level is required", call("/api/stats?class=Thief&path=Shadower").get("status") == 400)
 check("an old-style job name isn't a class", call("/api/stats?class=Bandit&level=32&party=1").get("status") == 400)
 check("a path from another class is refused", call("/api/stats?class=Thief&path=Bishop&level=32").get("status") == 400)
@@ -253,6 +257,71 @@ check(f"players per path ({paths['Night Lord']['players']} Night Lord, {paths['S
       paths["Night Lord"]["players"] == 6 and paths["Shadower"]["players"] == 19)   # every Bandit (solo or not), Chief Bandit and Rogue
 check(f"each path lists its jobs, 1st to 4th ({paths['Shadower']['steps']})",
       paths["Shadower"]["steps"] == ["Rogue", "Bandit", "Chief Bandit", "Shadower"])
+
+
+# ---- 0.9.9 site: adaptive level range, % per hour, clean map names, towns, the ladder
+def players_on(map_name, levels, exp_hr=40000, job="Bandit", party=1, day_n=2):
+    for i, lv in enumerate(levels):
+        call("/api/runs", {"install": install(), "runs": [run(t, exp_hr * rnd.uniform(0.95, 1.05), level=lv, map_name=map_name,
+                                                              job=job, party=party) for t in hours(day(day_n), 2)]})
+
+
+players_on("Rocky Road II", [50, 50, 51], 52000)                       # a busy level: 3 players within 3 levels
+players_on("Sleepy Dungeon IV", [47, 52, 56], 61000)                   # a quiet one: needs the widest range
+a = call("/api/stats?class=Thief&path=Shadower&level=50&party=solo")
+byname = {m["map"]: m for m in a["maps"]}
+check(f"a busy level stays narrow ({byname.get('Rocky Road II', {}).get('levels')})",
+      byname.get("Rocky Road II", {}).get("levels") == [47, 53] and not byname["Rocky Road II"]["widened"])
+check(f"a quiet level widens until the map has enough players ({byname.get('Sleepy Dungeon IV', {}).get('levels')})",
+      byname.get("Sleepy Dungeon IV", {}).get("levels") == [42, 58] and byname["Sleepy Dungeon IV"]["widened"]
+      and byname["Sleepy Dungeon IV"]["players"] == 3)
+m = byname["Rocky Road II"]
+check(f"each map has % of a level per hour and hours per level ({m['pct_hr']}%/hr, {m['hours_per_level']} h)",
+      m["pct_hr"] > 0 and m["hours_per_level"] > 0 and abs(m["hours_per_level"] * m["pct_hr"] - 100) < 8
+      and m["pct_hr_low"] <= m["pct_hr"] <= m["pct_hr_high"])
+check("...and EXP/hr by level, for the detail panel", len(m["by_level"]) >= 2 and all(
+      set(b) == {"level", "players", "exp_hr"} for b in m["by_level"]))
+players_on("Rocky Road II", [50, 51, 49], 36000, party=3, day_n=3)    # the same map in a party
+b = call("/api/stats?class=Thief&path=Shadower&level=50&party=solo&x=1")
+m = {x["map"]: x for x in b["maps"]}["Rocky Road II"]
+check(f"solo numbers show what a party gets there ({m['other']})",
+      m["other"] and m["other"]["solo"] is False and m["other"]["players"] == 3 and 30000 < m["other"]["exp_hr"] < 42000)
+check("...and the recent trend is there or empty, never made up",
+      m["trend"] is None or set(m["trend"]) == {"recent", "before"})
+check("the answer says when the newest run was shared", bool(a["newest_run"]) and a["newest_run"].endswith("Z"))
+check("no install ids anywhere in the answer", "install" not in json.dumps(a))
+
+# map names
+players_on("ist Accompaniment Bonus", [35, 35, 36], 45000, day_n=4)
+players_on("1st Accompaniment Bonus", [35, 36, 35], 46000, day_n=5)
+c = call("/api/stats?class=Thief&path=Shadower&level=35&party=solo")
+acc = [x for x in c["maps"] + c["early"] if "Accompaniment" in x["map"]]
+check(f"'ist' and '1st' are one map ({[(x['map'], x['players']) for x in acc]})",
+      [(x["map"], x["players"]) for x in acc] == [("1st Accompaniment Bonus", 6)])
+r = call("/api/runs", {"install": install(), "runs": [run(hours(day(6), 1)[0], 45000, map_name="Perion")]})
+check(f"a town is turned down ({r['results'][0].get('why')})", r["received"] == 0 and r["results"][0].get("why") == "town")
+r = call("/api/runs", {"install": install(), "runs": [run(hours(day(6), 1)[0], 45000, map_name="Henesys")]})
+check("...another town too", r["received"] == 0 and r["results"][0].get("why") == "town")
+r = call("/api/runs", {"install": install(), "runs": [run(hours(day(6), 1)[0], 45000, map_name="Henesys Hunting Ground II")]})
+check("...but a hunting map with a town's name in it is fine", r["received"] == 1)
+players_on("Halloween Event Field", [40, 40, 41], 90000, day_n=7)
+r = call("/api/runs", {"install": install(), "runs": [run(hours(day(6), 1)[0], 50000, level=40, map_name="Halloween Event Field")]})
+check("a map that isn't on the game's list (an event map) is still accepted", r["received"] == 1)
+d = call("/api/stats?class=Thief&path=Shadower&level=40&party=solo")
+check("...and shows up like any other map", any(x["map"] == "Halloween Event Field" for x in d["maps"] + d["early"]))
+
+# the ladder
+ladder = call("/api/ladder?class=Thief&path=Shadower&party=solo")
+bands = {b["from"]: b for b in ladder.get("bands", [])}
+check(f"the ladder has a band of 5 levels with the best maps ({list(bands)[:6]})",
+      ladder.get("band") == 5 and 50 in bands and bands[50]["to"] == 54 and bands[50]["maps"][0]["map"] in ("Rocky Road II", "Sleepy Dungeon IV"))
+check("...each with EXP/hr, %/hr and players, best first", all(
+      set(mm) == {"map", "exp_hr", "pct_hr", "mesos_hr", "players"} and mm["players"] >= 3
+      for b in ladder["bands"] for mm in b["maps"]) and all(
+      [mm["exp_hr"] for mm in b["maps"]] == sorted((mm["exp_hr"] for mm in b["maps"]), reverse=True) for b in ladder["bands"]))
+check("the ladder needs a class", call("/api/ladder?party=solo").get("status") == 400)
+check("...and a real one", call("/api/ladder?class=constructor").get("status") == 400
+      and call("/api/ladder?class=Thief&path=__proto__").get("status") == 400 and call("/api/ladder?class=Thief&party=9").get("status") == 400)
 
 print("\nALL PASSED" if not failures else f"\n{failures} FAILED")
 sys.exit(1 if failures else 0)

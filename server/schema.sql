@@ -31,6 +31,7 @@ CREATE INDEX IF NOT EXISTS runs_by_install  ON runs (install, started);
 CREATE INDEX IF NOT EXISTS runs_by_ip       ON runs (ip_hash, received_day);
 CREATE INDEX IF NOT EXISTS runs_by_received ON runs (received, started);
 CREATE INDEX IF NOT EXISTS runs_by_map      ON runs (map, level_start);
+CREATE INDEX IF NOT EXISTS runs_by_job_level ON runs (job, level_start);   -- the best-maps query: a class's jobs in a few levels
 
 -- Small summary tables, kept up to date as runs come in, so the site never has to read
 -- every run (the free plan allows so many rows read a day): which players have shared each
@@ -51,6 +52,15 @@ CREATE TABLE IF NOT EXISTS totals (
   runs    INTEGER NOT NULL,
   seconds REAL    NOT NULL
 );
+
+-- Map names the game's list (src/maps.js) doesn't have: event maps, new maps, or misreads. They're
+-- accepted as they are; this is just so they can be looked at. Review with:
+--   SELECT r.map, r.first_seen, COUNT(DISTINCT p.install) AS players
+--   FROM map_review r JOIN map_players p ON p.map = r.map GROUP BY r.map ORDER BY players DESC;
+CREATE TABLE IF NOT EXISTS map_review (
+  map        TEXT PRIMARY KEY,
+  first_seen TEXT NOT NULL
+) WITHOUT ROWID;
 
 -- Answers the site worked out recently, shared by every Cloudflare location, so each one is
 -- worked out at most once every few minutes however many people visit.

@@ -250,7 +250,7 @@ for old in sorted((Path(__file__).parent / "upgrade").iterdir()):
           all(k in now_notes and now_notes[k] == v for k, v in old_notes.items())
           and len(after) == len(before["entries"]) + 1)
 check("the newest upgrade fixture has notes in it (so keeping them is really tested)",
-      sum("note" in e for e in json.loads((Path(__file__).parent / "upgrade" / "0.9.9-beta" / "exp_log.json")
+      sum("note" in e for e in json.loads((Path(__file__).parent / "upgrade" / "0.9.10-beta" / "exp_log.json")
                                           .read_text(encoding="utf-8"))["entries"]) >= 3)
 
 
@@ -750,6 +750,48 @@ s.start(clock[0])
 gains(s, 9.5)
 idle(s, 40)
 check("the pause time can be changed in Settings (60 s: a 40 s break doesn't pause)", s.exp.running)
+
+
+# ---- the minimap's name can't be seen: pause rather than log under an old map name
+s = session()
+s.start(clock[0])
+gains(s, 12)
+gained = s.exp.gained
+s.map_blind()
+check("when the minimap's name has been out of sight, it pauses", s.waiting == "blind" and not s.exp.running)
+gains(s, 12)
+check("...and EXP that comes in meanwhile doesn't restart it (it could be another map)",
+      s.waiting == "blind" and not s.exp.running and s.exp.gained == gained)
+s.map_seen("Rocky Road II")
+check("...seeing the same map again lets the usual rule carry on", s.waiting == "map")
+gains(s, 6.5)
+check("...at the next EXP gain", s.exp.running and s.waiting is None and s.map == "Rocky Road II")
+s.map_blind()
+s.map_seen("The Swamp of Despair I")
+gains(s, 6.5)
+check("...but a different map starts from zero", s.map == "The Swamp of Despair I" and s.exp.gained == 100)
+s = session()
+check("with Start never pressed, nothing pauses", (s.map_blind(), s.waiting)[1] is None)
+s = session()
+s.start(clock[0])
+gains(s, 12)
+idle(s, 40)
+s.map_blind()
+check("paused by being idle, then blind: it waits for the minimap too", s.waiting == "blind")
+
+# ---- map names: the game's spelling, OCR slips, towns
+check(f"the game's map list is bundled ({len(m.map_list().entries)} maps)", len(m.map_list().entries) > 300)
+slips = {"ist Accompaniment <Bonus>": "1st Accompaniment <Bonus>", "1st Accompaniment <Bonus>": "1st Accompaniment <Bonus>",
+         "The Land of Wild Boar Il": "The Land of Wild Boar II", "Rocky Road lI": "Rocky Road II",
+         "Tree Dungeon Monkey Forest II": "Tree Dungeon Monkey Forest II", "Ant Tunnel l": "Ant Tunnel I"}
+bad = {k: m.snap_map_name(m._clean_map_name(k)) for k, v in slips.items() if m.snap_map_name(m._clean_map_name(k)) != v}
+check(f"OCR slips like 'ist' for '1st' and 'Il' for 'II' are put right ({bad})", not bad)
+check("a map that isn't on the list (an event map) is kept as read", m.snap_map_name("Halloween Event Field") == "Halloween Event Field")
+check("a different Roman numeral is a different map (not snapped)", m.snap_map_name("Rocky Road IV") == "Rocky Road IV")
+check("towns are known", m.is_town("Perion") and m.is_town("Henesys") and m.is_town("Free Market <3>"))
+check("...a hunting map with a town's name in it isn't a town", not m.is_town("Henesys Hunting Ground II") and not m.is_town("Perion Street Corner"))
+check("...and an unknown name isn't", not m.is_town("Halloween Event Field") and not m.is_town(None))
+check("a short, unclear name isn't forced onto a map", m.snap_map_name("Perlon X") == "Perlon X")
 
 print("\nALL PASSED" if not failures else f"\n{failures} FAILED")
 sys.exit(1 if failures else 0)

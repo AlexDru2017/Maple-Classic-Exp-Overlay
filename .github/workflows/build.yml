@@ -1,7 +1,7 @@
 # Builds the Windows download on GitHub from this code. Release downloads only ever come from
 # here (never from someone's own PC), so anyone can check where a download came from.
 #
-# - Pushing a version tag (e.g. v0.9.9-beta) builds it, signs the .exe once SignPath is set
+# - Pushing a version tag (e.g. v0.9.10-beta) builds it, signs the .exe once SignPath is set
 #   up, records a signed attestation (this workflow built this zip from this commit), checks
 #   that attestation itself, and makes a DRAFT release with the zip and its SHA-256. A person
 #   reads it over and publishes it. A release that's already published is never changed from

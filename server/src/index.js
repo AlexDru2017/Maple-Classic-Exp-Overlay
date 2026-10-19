@@ -2,6 +2,7 @@
 //
 //   POST /api/runs    the overlay sends finished runs (only if the player agreed)
 //   GET  /api/stats   best maps for a class and path, level, solo or in a party
+//   GET  /api/ladder  the best maps for each band of 5 levels, for a class
 //   GET  /api/options the classes and paths, how many players each has, and totals
 //   GET  /api/recent  the latest runs shared, for the bar at the top of the site
 //   everything else   the website, from public/ (served by Cloudflare without running this)
@@ -13,12 +14,17 @@
 // with runs far from what other players get (same map, class, level, solo or party) left out.
 // Posts must be JSON, so other websites can't make their visitors' browsers send runs.
 
+import { canonicalMap } from "./mapnames.js";
+
 const MIN_PLAYERS = 3;              // different players needed before a map is ranked
+const MAX_MAPS = 40;                // ranked maps in one answer
 const MAX_EARLY = 8;                // maps with fewer players shown (greyed out) as early data
 const LATEST = 12;                  // runs in the bar at the top of the site
 const LATEST_DAYS = 14;             // how far back it looks
 const BAND = [0.5, 2.0];            // runs outside this share of the median are outliers
-const LEVEL_WINDOW = 5;             // "around your level": within this many levels
+const LEVEL_WINDOW = 5;             // "around your level" for the latest-runs bar: within this many levels
+const RADII = [3, 5, 8];            // the levels either way a map's numbers come from: the smallest that has MIN_PLAYERS
+const MAX_REVIEW = 500;             // names not on the game's map list that are kept for review
 const MAX_PER_REQUEST = 50;
 const RUN_SECONDS = [890, 3720];   // a run is 15 minutes (an hour from 0.9.3, still taken)
 const MAX_PER_INSTALL_DAY = 100;    // more than a day's worth of 15-minute runs can't be real
@@ -28,7 +34,7 @@ const MAX_BODY = 200_000;           // bytes in one post (50 runs are about 25,0
 const DAYS_BACK = 60;               // how old a run can be when it's sent (and up to 2 days ahead)
 // How long answers are kept (see cached()): new runs show up on the site within a few minutes.
 const EDGE_SECONDS = 60;            // in Cloudflare's cache, where the visitor is
-const KEEP = { stats: 120, latest: 120, options: 600 };   // in the database, for everyone
+const KEEP = { stats: 120, latest: 120, options: 600, ladder: 21600 };   // (the ladder changes slowly, and it reads a lot)   // in the database, for everyone
 
 // The four classes, each split into paths named after the job they end in (4th job). A run
 // counts for the path its job is on. 1st-job runs come before the path is picked, and play
@@ -107,6 +113,7 @@ export default {
     try {
       if (request.method === "POST" && url.pathname === "/api/runs") return await postRuns(request, env);
       if (request.method === "GET" && url.pathname === "/api/stats") return await getStats(url, env, ctx);
+      if (request.method === "GET" && url.pathname === "/api/ladder") return await getLadder(url, env, ctx);
       if (request.method === "GET" && url.pathname === "/api/options") {
         return await cached(url, env, ctx, "options", KEEP.options, () => getOptions(env));
       }
@@ -162,6 +169,8 @@ export function checkRun(r, now = Date.now()) {
   const mesosSeconds = inRange(r.mesos_seconds ?? 0, 0, RUN_SECONDS[1]);
   if (!map || !job || !started || !minutes(started)) return { why: "missing map, class or start time" };
   if (WEB_ADDRESS.test(map) || WEB_ADDRESS.test(job)) return { why: "not a map name" };
+  const named = canonicalMap(map);                   // the game's spelling (fixes OCR slips like "ist" for "1st")
+  if (named.town) return { why: "town" };            // nobody farms in a town: the overlay was on a stale name
   const ago = now / 60000 - minutes(started);       // (the overlay sends its local time)
   if (ago > DAYS_BACK * 1440 || ago < -2 * 1440) return { why: "start time out of range" };
   if (!levelStart || !levelEnd || !party) return { why: "bad level or party size" };
@@ -175,7 +184,7 @@ export function checkRun(r, now = Date.now()) {
   if (mesosHr !== null && mesosHr > 5e7) return { why: "impossible mesos/hr" };
   return {
     run: {
-      map, job, started, level_start: levelStart, level_end: levelEnd, party, exp, seconds,
+      map: named.name, unlisted: !named.listed, job, started, level_start: levelStart, level_end: levelEnd, party, exp, seconds,
       exp_hr: expHr, mesos, mesos_seconds: mesosSeconds, mesos_hr: mesosHr,
       version: text(r.version, 24) || "?",
     },
@@ -265,12 +274,22 @@ async function postRuns(request, env) {
       run.level_end, run.party, run.exp, run.seconds, run.exp_hr, run.mesos, run.mesos_seconds,
       run.mesos_hr, run.version).run();
     if (saved.meta.changes) await addToSummaries(env, run, install);
+    if (saved.meta.changes && run.unlisted) await noteForReview(env, run.map, now.toISOString());
     taken.push(at);
     mine++;
     fromIp++;
     results.push({ started, ok: true });
   }
   return json({ received: results.filter((r) => r.ok).length, results }, 200, false);
+}
+
+/** A map name that isn't on the game's list (an event map, a new map, or a misread) is kept as
+ * it is and noted here, so it can be looked at: SELECT from map_review (the query is in schema.sql).
+ * Capped, so nobody can fill it up with made-up names. */
+function noteForReview(env, map, at) {
+  return env.DB.prepare(
+    "INSERT OR IGNORE INTO map_review (map, first_seen) SELECT ?1, ?2 WHERE (SELECT COUNT(*) FROM map_review) < ?3"
+  ).bind(map, at, MAX_REVIEW).run();
 }
 
 /** Adds a newly saved run to the small summary tables (see schema.sql), so the site can
@@ -312,6 +331,18 @@ function perPlayer(runs, field) {
   return [...by.values()].map(median);
 }
 
+/** Each player's EXP/hr and the level they were at (the median of their runs), lowest EXP/hr first:
+ * [[exp_hr, level], ...]. No ids. */
+function playerDots(runs) {
+  const by = new Map();
+  for (const r of runs) {
+    if (!by.has(r.install)) by.set(r.install, { exp: [], level: [] });
+    by.get(r.install).exp.push(r.exp_hr);
+    by.get(r.install).level.push(r.level_start);
+  }
+  return [...by.values()].map((p) => [median(p.exp), Math.round(median(p.level))]).sort((a, b) => a[0] - b[0]);
+}
+
 /** 3 significant figures (74,213 -> 74,200): plenty for a dot on a chart. */
 const roughly = (n) => Number(n.toPrecision(3));
 
@@ -327,20 +358,26 @@ export function summarize(runs) {
   const usual = (r) => r.exp_hr >= BAND[0] * typical && r.exp_hr <= BAND[1] * typical;
   const kept = runs.filter(usual), left = runs.filter((r) => !usual(r));
   const players = new Set(kept.map((r) => r.install)).size;
-  const exp = perPlayer(kept, "exp_hr"), mesos = perPlayer(kept, "mesos_hr");
-  const sorted = (values) => values.map(roughly).sort((a, b) => a - b);
+  const exp = perPlayer(kept, "exp_hr"), mesos = perPlayer(kept, "mesos_hr"), pct = perPlayer(kept, "pct_hr");
+  const dots = playerDots(kept), unusual = playerDots(left);
   return {
     ranked: players >= MIN_PLAYERS,
     exp_hr: Math.round(median(exp)),
     exp_hr_low: Math.round(quantile(exp, 0.25)),
     exp_hr_high: Math.round(quantile(exp, 0.75)),
     mesos_hr: mesos.length ? Math.round(median(mesos)) : null,
+    pct_hr: pct.length ? Math.round(median(pct) * 100) / 100 : null,           // % of a level per hour
+    pct_hr_low: pct.length ? Math.round(quantile(pct, 0.25) * 100) / 100 : null,
+    pct_hr_high: pct.length ? Math.round(quantile(pct, 0.75) * 100) / 100 : null,
+    hours_per_level: pct.length && median(pct) > 0 ? Math.round(1000 / median(pct)) / 10 : null,
     players,
     runs: kept.length,
     hours: Math.round(kept.reduce((sum, r) => sum + r.seconds, 0) / 360) / 10,
     outliers: left.length,
-    dots: sorted(exp),
-    unusual: sorted(perPlayer(left, "exp_hr")),
+    dots: dots.map((d) => roughly(d[0])),
+    dot_levels: dots.map((d) => d[1]),                   // the level of each dot, in the same order
+    unusual: unusual.map((d) => roughly(d[0])),
+    unusual_levels: unusual.map((d) => d[1]),
   };
 }
 
@@ -354,36 +391,134 @@ async function getStats(url, env, ctx) {
   if (!jobs || !(level >= 1 && level <= 250) || !party) {
     return json({ error: "give class (and path), level (1-250) and party (solo or party)" }, 400);
   }
-  return cached(url, env, ctx, `stats/${name}/${path || ""}/${level}/${party}`, KEEP.stats,
+  return cached(url, env, ctx, `stats2/${name}/${path || ""}/${level}/${party}`, KEEP.stats,
     () => findMaps(env, name, path, jobs, level, party));
 }
 
+/** % of its level's EXP a run gets per hour (its own level, or the middle of two if it levelled):
+ * comparable between levels, which is what lets a map's numbers come from a few levels either side. */
+export function pctPerHour(r) {
+  const need = (EXP_TABLE[r.level_start - 1] + EXP_TABLE[Math.min(r.level_end, r.level_start + 10) - 1]) / 2;
+  return need > 0 ? r.exp_hr / need * 100 : null;
+}
+
+const soloOf = (r) => r.party === 1;
+
+/**
+ * The best maps for a class and level. Each map's numbers come from the players at the fewest
+ * levels either side of yours (RADII: 3, then 5, then 8) that give it MIN_PLAYERS players, so a
+ * busy level stays precise and a quiet one still fills in (the map says how wide it had to go).
+ * Everything the page shows, including solo vs party, EXP/hr by level and the recent trend, is
+ * worked out here from the same rows: one request and one query.
+ */
 async function findMaps(env, name, path, jobs, level, party) {
-  const { results: runs } = await env.DB.prepare(
-    `SELECT install, map, seconds, exp_hr, mesos_hr FROM runs
-     WHERE job IN (${jobs.map((_, i) => `?${i + 3}`).join(", ")}) AND party ${party === "solo" ? "= 1" : ">= 2"}
-       AND level_start BETWEEN ?1 AND ?2`
-  ).bind(level - LEVEL_WINDOW, level + LEVEL_WINDOW, ...jobs).all();
-  const byMap = new Map();
-  for (const r of runs) {
-    if (!byMap.has(r.map)) byMap.set(r.map, []);
-    byMap.get(r.map).push(r);
+  const widest = RADII[RADII.length - 1];
+  const { results } = await env.DB.prepare(
+    `SELECT install, map, seconds, exp_hr, mesos_hr, level_start, level_end, party, started, received FROM runs
+     WHERE job IN (${jobs.map((_, i) => `?${i + 3}`).join(", ")}) AND level_start BETWEEN ?1 AND ?2`
+  ).bind(level - widest, level + widest, ...jobs).all();
+  const rows = results.map((r) => ({ ...r, pct_hr: pctPerHour(r) }));
+  const mine = rows.filter((r) => (party === "solo") === soloOf(r));
+  const theirs = rows.filter((r) => (party === "solo") !== soloOf(r));
+  const grouped = (list) => {
+    const by = new Map();
+    for (const r of list) {
+      if (!by.has(r.map)) by.set(r.map, []);
+      by.get(r.map).push(r);
+    }
+    return by;
+  };
+  const myMaps = grouped(mine), theirMaps = grouped(theirs);
+  const within = (list, radius) => list.filter((r) => Math.abs(r.level_start - level) <= radius);
+  const weekAgo = new Date(Date.now() - 7 * 864e5).toISOString().slice(0, 16);
+
+  const found = [];
+  for (const [map, list] of myMaps) {
+    let used = widest, s = null;
+    for (const radius of RADII) {                        // the narrowest range that has enough players
+      const part = within(list, radius);
+      const got = part.length ? summarize(part) : null;
+      if (got && (got.ranked || radius === widest)) { s = got; used = radius; break; }
+    }
+    if (!s) continue;
+    const near = within(list, used);
+    const other = within(theirMaps.get(map) || [], used);
+    const otherSummary = other.length ? summarize(other) : null;
+    const recent = near.filter((r) => r.started >= weekAgo), before = near.filter((r) => r.started < weekAgo);
+    const recentS = recent.length ? summarize(recent) : null, beforeS = before.length ? summarize(before) : null;
+    const levels = [];
+    for (let l = level - widest; l <= level + widest; l++) {
+      const here = list.filter((r) => r.level_start === l);
+      const each = perPlayer(here, "exp_hr");
+      if (each.length) levels.push({ level: l, players: each.length, exp_hr: roughly(median(each)) });
+    }
+    found.push({
+      map, ...s, levels: [Math.max(1, level - used), level + used], widened: used > RADII[0],
+      other: otherSummary && { solo: party !== "solo", players: otherSummary.players, exp_hr: otherSummary.exp_hr, pct_hr: otherSummary.pct_hr },
+      trend: recentS && beforeS ? { recent: { players: recentS.players, exp_hr: recentS.exp_hr },
+        before: { players: beforeS.players, exp_hr: beforeS.exp_hr } } : null,
+      by_level: levels,
+    });
   }
   // Ranked maps, best first. Maps with fewer players are early data: shown, but not ranked,
   // most players first (so one made-up player can't put a map at the top), and only maps at
   // least 2 players have shared somewhere (so one person can't show a made-up map name).
-  const named = byMap.size ? await sharedByTwo(env, [...byMap.keys()]) : new Set();
+  const named = found.length ? await sharedByTwo(env, found.map((f) => f.map)) : new Set();
   const maps = [], early = [];
-  for (const [map, list] of byMap) {
-    const { ranked, ...s } = summarize(list);
-    if (ranked) maps.push({ map, ...s });
-    else if (named.has(map)) early.push({ map, ...s });
+  for (const { ranked, ...f } of found) {
+    if (ranked) maps.push(f);
+    else if (named.has(f.map)) early.push(f);
   }
-  maps.sort((a, b) => b.exp_hr - a.exp_hr);
+  maps.sort((a, b) => a.widened - b.widened || b.exp_hr - a.exp_hr);      // those at your level first
+  maps.length = Math.min(maps.length, MAX_MAPS);        // (the answer's size and cost stay bounded)
   early.sort((a, b) => b.players - a.players || b.runs - a.runs || b.exp_hr - a.exp_hr);
+  const newest = rows.reduce((m, r) => (r.received > m ? r.received : m), "");
   return json({
-    class: name, path, jobs, party, levels: [Math.max(1, level - LEVEL_WINDOW), level + LEVEL_WINDOW],
+    class: name, path, jobs, party, levels: [Math.max(1, level - RADII[0]), level + RADII[0]], ranges: RADII,
     min_players: MIN_PLAYERS, maps, early: early.slice(0, MAX_EARLY), maps_waiting_for_players: early.length,
+    newest_run: newest ? `${newest.slice(0, 16)}Z` : null,
+  });
+}
+
+// ---------------------------------------------------------------- the leveling ladder
+
+const LADDER_BAND = 5;                       // levels in a band of the ladder
+const LADDER_ROWS = 20000;            // the most runs read for one ladder (a limit on what one answer costs)
+
+/** For a class (and path), solo or party: the best maps in each band of 5 levels. */
+async function getLadder(url, env, ctx) {
+  const name = url.searchParams.get("class"), path = url.searchParams.get("path") || null;
+  const jobs = jobsFor(name, path);
+  const asked = url.searchParams.get("party") || "solo";
+  const party = asked === "solo" || asked === "1" ? "solo" : asked === "party" || /^[2-6]$/.test(asked) ? "party" : null;
+  if (!jobs || !party) return json({ error: "give class (and path) and party (solo or party)" }, 400);
+  return cached(url, env, ctx, `ladder/${name}/${path || ""}/${party}`, KEEP.ladder, async () => {
+    const { results } = await env.DB.prepare(
+      `SELECT install, map, seconds, exp_hr, mesos_hr, level_start, level_end FROM runs
+       WHERE job IN (${jobs.map((_, i) => `?${i + 2}`).join(", ")}) AND party ${party === "solo" ? "= 1" : ">= 2"}
+       ORDER BY received DESC LIMIT ?1`
+    ).bind(LADDER_ROWS, ...jobs).all();
+    const bands = new Map();
+    for (const r of results) {
+      const from = Math.floor(r.level_start / LADDER_BAND) * LADDER_BAND;
+      if (!bands.has(from)) bands.set(from, new Map());
+      const maps = bands.get(from);
+      if (!maps.has(r.map)) maps.set(r.map, []);
+      maps.get(r.map).push({ ...r, pct_hr: pctPerHour(r) });
+    }
+    const out = [];
+    for (const from of [...bands.keys()].sort((a, b) => a - b)) {
+      const ranked = [];
+      for (const [map, list] of bands.get(from)) {
+        const s = summarize(list);
+        if (s?.ranked) ranked.push({ map, exp_hr: s.exp_hr, pct_hr: s.pct_hr, mesos_hr: s.mesos_hr, players: s.players });
+      }
+      ranked.sort((a, b) => b.exp_hr - a.exp_hr);
+      if (ranked.length) out.push({ from, to: from + LADDER_BAND - 1, maps: ranked.slice(0, 3) });
+    }
+    const named = await sharedByTwo(env, [...new Set(out.flatMap((b) => b.maps.map((m) => m.map)))]);
+    for (const b of out) b.maps = b.maps.filter((m) => named.has(m.map));
+    return json({ class: name, path, party, band: LADDER_BAND, min_players: MIN_PLAYERS, bands: out.filter((b) => b.maps.length) });
   });
 }
 

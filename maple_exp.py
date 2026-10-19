@@ -61,7 +61,7 @@ PLATFORM = create_platform()
 PLATFORM.setup_process()
 cv2.setNumThreads(1)
 
-VERSION = "0.9.9-beta"
+VERSION = "0.9.10-beta"
 WINDOW_TITLE = "Maple Classic Exp Overlay"    # the version is shown in Settings
 OLD_TITLES = ("Maple EXP/hr",)               # what versions before 0.9.3 were called
 
@@ -85,6 +85,8 @@ LOG_BLOCK = 300             # seconds of non-stop EXP gain behind each log updat
 MESOS_PATH = DATA_DIR / "mesos_digits.npz"             # learned as you play...
 MESOS_START_PATH = ASSETS / "mesos_digits.npz"          # ...starting from these
 MESOS_BOX_PATH = ASSETS / "mesos_box.npz"
+MAPS_PATH = ASSETS / "maps.txt"            # the game's map names (see server/tools/make_maps.py)
+MAP_BLIND_SECONDS = 45      # the minimap's name box unseen this long: the map may have changed unnoticed
 SCAN_SECONDS = 4            # how often the whole window is checked for the inventory and party
 OUTLINE_SECONDS = 8         # how often the (costly) search for a see-through mesos box may run
 DEFAULTS = {"gap_seconds": 15, "transparency": 0, "topmost": True,
@@ -679,7 +681,86 @@ def _clean_map_name(text):
     t = re.sub(r"(?<= )[Il1]{3}$", "III", t)         # Roman numerals read as l's and 1's
     t = re.sub(r"(?<= )[Il1]{2}$", "II", t)
     t = re.sub(r"(?<= )l$", "I", t)
+    t = re.sub(r"(^|\s)[IiLl]st(?=\s|$)", r"\g<1>1st", t)     # "ist Accompaniment" is "1st Accompaniment"
+    t = re.sub(r"(^|\s)[Zz]nd(?=\s|$)", r"\g<1>2nd", t)
+    t = re.sub(r"(^|\s)[SsBb5]rd(?=\s|$)", r"\g<1>3rd", t)
     return t if len(t) >= 3 else ""
+
+
+def _map_key(name):
+    """Only letters and digits, lower case: names that differ in punctuation are the same map."""
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
+def _edit_distance(a, b):
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        row = [i]
+        for j, cb in enumerate(b, 1):
+            row.append(min(prev[j] + 1, row[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = row
+    return prev[-1]
+
+
+class MapList:
+    """The game's own map names (assets/maps.txt, from meowdb.com), to spell a map the way the game
+    does and to know the towns, where nobody farms. It helps; it isn't a gate: a name that isn't
+    in it (an event map, a new map) is used as it was read. The site applies the same rules."""
+
+    def __init__(self, path=MAPS_PATH):
+        self.entries, self.by_key = [], {}
+        try:
+            lines = Path(path).read_text(encoding="utf-8").splitlines()
+        except OSError:
+            lines = []
+        for line in lines:
+            name, _, town = line.partition("\t")
+            style = _clean_map_name(name)               # as the overlay writes names (no commas)
+            if style:
+                entry = (style, _map_key(name), town.strip() == "1", _numbers(style))
+                self.entries.append(entry)
+                self.by_key[entry[1]] = entry
+
+    def find(self, read):
+        """The list's entry (name, key, is_town, numbers) for a name as read, or None."""
+        key = _map_key(read)
+        if key in self.by_key:
+            return self.by_key[key]
+        nums, best, second = _numbers(read), None, float("inf")
+        for e in self.entries:
+            if e[3] != nums or abs(len(e[1]) - len(key)) > 2:
+                continue
+            d = _edit_distance(key, e[1])
+            if best is None or d < best[0]:
+                second = best[0] if best else second
+                best = (d, e)
+            elif d < second:
+                second = d
+        # one clear match: a letter misread (two in a long name). Two names about as close, or too far, are left alone.
+        allowed = 2 if len(key) >= 24 else 1
+        return best[1] if best and best[0] <= allowed and second - best[0] >= 1 else None
+
+
+_MAP_LIST = None
+
+
+def map_list():
+    global _MAP_LIST
+    if _MAP_LIST is None:
+        _MAP_LIST = MapList()
+    return _MAP_LIST
+
+
+def snap_map_name(name):
+    """The game's spelling of a map name as read (or the name as it is, if it isn't on the list)."""
+    e = map_list().find(name)
+    return e[0] if e else name
+
+
+def is_town(name):
+    """Is this one of the game's towns? (A name not on the list isn't.)"""
+    e = map_list().by_key.get(_map_key(name or ""))
+    return bool(e and e[2])
 
 
 def read_map_name(bgr, gh):
@@ -703,7 +784,7 @@ def read_map_name(bgr, gh):
     y0, y1 = max(0, min(b.y for b in ln) - 2), max(b.y + b.h for b in ln) + 2
     votes = _ocr_votes(white[y0:y1, x0:x1], max(b.h for b in ln), None, _clean_map_name)
     name, n = votes.most_common(1)[0] if votes else (None, 0)
-    return name if n >= 2 else None
+    return snap_map_name(name) if n >= 2 else None
 
 
 # --------------------------------------------------------------------------- mesos and party
@@ -1124,6 +1205,7 @@ class ScreenReader:
         self.job = None             # the class shown in the status bar
         self.job_look = None        # what the last try at reading it saw: {"image", "boxes", "why"}
         self.map_look = None        # the same for the map name: {"image", "text"}
+        self.map_seen_at = None     # when the minimap's name box was last seen (so a map change would have shown)
         self.last_rect = None       # where the game window was at the last look (x, y, w, h)
         self.next_job_read = 0.0
 
@@ -1174,6 +1256,10 @@ class ScreenReader:
             if self.exp_anchor and self.mode == "window":
                 self._read_job(sct, rect)
         return reading
+
+    def map_blind_seconds(self):
+        """How long the minimap's name box hasn't been visible (0 if it never was: no map to lose)."""
+        return 0.0 if self.map_seen_at is None else time.monotonic() - self.map_seen_at
 
     def diagnostics(self):
         """What this reader knows about where things are, for bug reports (a plain dict)."""
@@ -1505,6 +1591,7 @@ class ScreenReader:
             else:
                 shot = grab(sct, wx + bx, wy + by, bw, bh)
                 if shot:
+                    self.map_seen_at = now
                     picture = cv2.resize(_whiteness(shot[0]), (64, 16), interpolation=cv2.INTER_AREA) > 0.3
                     if self.map_print is not None and (picture != self.map_print).mean() > 0.04:
                         # Changed map: find the box again (its size can change), then read it.
@@ -1948,7 +2035,7 @@ class Session:
             t.exp > exp_before or result[1] == "LEVEL UP!")
         if t.running and t.gained > gained_before:
             self.last_gain = now
-        elif self.on and self.waiting and rose:
+        elif self.on and self.waiting and self.waiting != "blind" and rose:
             if self.map and self.here and self.here != self.map:
                 t.new_session()             # a different map: its own numbers
                 self.meso.reset()
@@ -1958,8 +2045,22 @@ class Session:
             t.start()
         return result
 
+    def map_blind(self):
+        """The minimap's name has been out of sight for a while (hidden, covered, or the game
+        closed it): you may have changed maps without it noticing, so it pauses instead of
+        carrying on under the old name. It carries on once the name can be read again."""
+        self.here = None
+        if self.waiting == "blind" or not self.on:
+            return
+        if self.exp.running:
+            self._wait("blind")
+        elif self.waiting:
+            self.waiting = "blind"
+
     def map_seen(self, name):
         """The map name was read (already matched to known names, see AutoLog.canonical)."""
+        if self.waiting == "blind":
+            self.waiting = "map"            # visible again: the usual rule decides (same map: carry on; another: new numbers)
         self.here = name
         if not self.on:
             return
@@ -2620,6 +2721,7 @@ class App:
         self.recent, self.health = Recent(40, self.started), Health()      # for bug reports
         self.autolog = AutoLog(self.cfg["gap_seconds"])
         self.map_name = None
+        self.in_town = False                # on a town map: nobody farms there, so nothing is logged
         self.level = None
         self.note = None
         self.last_logged = None
@@ -3609,6 +3711,10 @@ class App:
             waiting = self.session.waiting
             self.session.map_seen(self.map_name)
             self._after_pause_check(waiting)
+        self.in_town = is_town(self.map_name)
+        if (self.session.on and self.map_name and self.reader.mode == "window" and tesseract_ok
+                and self.reader.map_blind_seconds() > MAP_BLIND_SECONDS):
+            self.session.map_blind()
         self.note = r.note
         if r.candidates:
             if self.found_at is None or t.req is not None:
@@ -3629,6 +3735,8 @@ class App:
             status = self._status_for(note)
         else:
             status = r.where
+        if self.in_town:
+            status += "\nIn a town: nothing is logged here."
         if self.note:
             status += f"\n{self.note}"
         self.status.set(status)
@@ -3659,6 +3767,9 @@ class App:
         if s.waiting == "map":
             return ("Paused: you left the map. It carries on at your next EXP gain "
                     "(from zero if that's on a different map).")
+        if s.waiting == "blind":
+            return ("Paused: the minimap's name can't be seen, so it can't tell which map you're on. "
+                    "It carries on when the minimap is back.")
         if t.running:
             return "Tracking your EXP. Not logging this run." if self.skip_log else "Tracking your EXP."
         if t.elapsed() > 0:
@@ -3666,7 +3777,7 @@ class App:
         return "Ready. Press Start when you begin farming."
 
     def _log_tick(self, now):
-        if not self.tracker.running or self.skip_log:
+        if not self.tracker.running or self.skip_log or self.in_town:
             return
         m = self.meso
         mesos = (m.gained, m.seen_at) if m.value is not None and now - m.seen_at <= 30 else None

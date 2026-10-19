@@ -429,6 +429,25 @@ if app.hotkeys.supported:
     app.settings_win = None
     check("closing Settings leaves hotkeys working", getattr(app.hotkeys, "_paused", True) is False)
 
+# ---- towns aren't logged; a minimap that can't be seen pauses
+blank = m.Reading(*([None] * len(m.Reading._fields)))
+app._handle(blank._replace(where="Reading", map="Perion"))
+check("on a town map the status says nothing is logged", app.in_town and "In a town" in app.status.get())
+entries = len(app.autolog.entries)
+app._log_tick(m.time.monotonic())
+check("...and nothing is logged there", len(app.autolog.entries) == entries)
+app._handle(blank._replace(where="Reading", map="Rocky Road II"))
+check("on a hunting map it's normal again", not app.in_town and "In a town" not in app.status.get())
+real_ok = m.tesseract_ok
+m.tesseract_ok = True
+app.session.on, app.session.waiting = True, "idle"
+app.reader.map_seen_at = m.time.monotonic() - m.MAP_BLIND_SECONDS - 5
+app._handle(blank._replace(where="Reading"))
+check("a minimap name unseen for a while pauses it", app.session.waiting == "blind")
+app.reader.map_seen_at = m.time.monotonic()
+app.session.on, app.session.waiting = False, None
+m.tesseract_ok = real_ok
+
 check("the typeface is the bundled one, or it fell back cleanly", app._own_fonts in (True, False) and bool(app.theme.fam["extra"]))
 app.close()
 

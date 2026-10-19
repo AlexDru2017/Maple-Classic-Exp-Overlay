@@ -209,7 +209,7 @@
   .row.early:hover { background: rgba(0, 0, 0, 0.06); }
   .row.early .rank { visibility: hidden; }
   .row.early h3 { color: #c9c6bf; }
-  .row.early .dot:not(.out) { background: #8d929b; }
+  .row.early .dot:not(.out):not([data-b]) { background: #8d929b; }
   .row.early .dot.on:not(.out) { background: var(--text); }
   .row.early .med { width: 2px; margin-left: -1px; background: var(--dim); box-shadow: none; }
   .row.early .nums .exp { color: #c9c6bf; font-size: 20px; }
@@ -274,6 +274,99 @@
   footer .wrap { display: flex; gap: 24px; justify-content: space-between; flex-wrap: wrap; align-items: center; }
   footer .brand { font-size: 16px; }
   footer nav { display: flex; gap: 18px; }
+
+
+
+  /* dots and legend swatches coloured by the player's level against yours */
+  :root { --b0: #4f86f0; --b1: #92b8ff; --b2: #fff3d1; --b3: #ffb067; --b4: #ff6f3d; }
+  .dot[data-b="0"], .lg-dot[data-b="0"] { background: var(--b0); }
+  .dot[data-b="1"], .lg-dot[data-b="1"] { background: var(--b1); }
+  .dot[data-b="2"], .lg-dot[data-b="2"] { background: var(--b2); box-shadow: 0 0 0 1.5px var(--card), 0 0 0 3px var(--gold); }
+  .lg-dot[data-b="2"] { box-shadow: 0 0 0 1.5px var(--card), 0 0 0 2.5px var(--gold); margin: 0 1px; }
+  .dot[data-b="3"], .lg-dot[data-b="3"] { background: var(--b3); }
+  .dot[data-b="4"], .lg-dot[data-b="4"] { background: var(--b4); }
+  .dot.out[data-b] { background: var(--card); box-shadow: inset 0 0 0 1.5px var(--out); }
+  .dot.on[data-b]:not(.out) { background: var(--gold); }
+  .row.early .dot[data-b]:not(.out) { opacity: 0.8; }
+  .lv-legend { flex-basis: 100%; align-items: center; }
+  .lv-legend b { font-weight: 600; color: var(--dim); }
+  .wide-head { background: rgba(120, 170, 255, 0.05); }
+  .wide-head b { color: #9cc4ff; }
+
+  /* ---- results: tabs, sort and filter, map details, the leveling ladder */
+  .viewbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; margin: -6px 0 16px; }
+  .seg { display: inline-flex; padding: 3px; gap: 2px; background: var(--card); border: 1px solid var(--line); border-radius: 11px; }
+  .seg button { font: inherit; font-size: 14px; font-weight: 600; color: var(--dim); background: none; border: 0; border-radius: 8px;
+    padding: 7px 16px; cursor: pointer; transition: background 0.2s, color 0.2s; }
+  .seg button:hover { color: var(--text); }
+  .seg button[aria-selected="true"] { background: var(--card2); color: var(--gold); box-shadow: inset 0 0 0 1px var(--line); }
+  .btn.small { padding: 7px 14px; font-size: 14px; border-radius: 9px; cursor: pointer; font-family: inherit; }
+  .tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 22px; padding: 14px 22px 0; font-size: 13.5px; color: var(--dim); }
+  .tools label { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; margin: 0; font-size: 13.5px; font-weight: 400; color: var(--dim); }
+  .tools select { font: inherit; font-size: 13.5px; color: var(--text); background: var(--card2); border: 1px solid var(--line);
+    border-radius: 8px; padding: 5px 10px; }
+  .tools .chk { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
+  .tools input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--gold); }
+  .chip.widen { color: #9cc4ff; background: rgba(120, 170, 255, 0.1); box-shadow: inset 0 0 0 1px rgba(120, 170, 255, 0.28); margin-top: 0; }
+  .meta .chip { vertical-align: 1px; }
+  .pace { font-size: 12.5px; color: var(--dim); margin-top: 3px; white-space: nowrap; }
+  .open { margin-top: 6px; display: inline-flex; align-items: center; gap: 6px; font: inherit; font-size: 12.5px; font-weight: 600;
+    color: var(--gold-soft); background: none; border: 0; padding: 2px 0; cursor: pointer; }
+  .open:hover { color: var(--gold); }
+  .open i { width: 7px; height: 7px; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor;
+    transform: rotate(45deg) translate(-1px, -1px); transition: transform 0.2s; }
+  .open[aria-expanded="true"] i { transform: rotate(-135deg) translate(-1px, -1px); }
+  .row .info, .row .nums { cursor: pointer; }
+  .detail { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; padding: 4px 22px 22px;
+    background: rgba(0, 0, 0, 0.1); animation: openup 0.25s ease-out; }
+  @keyframes openup { from { opacity: 0; transform: translateY(-6px); } }
+  .d-card { background: var(--card2); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; min-width: 0; }
+  .d-card h4 { margin: 0 0 10px; font-size: 12.5px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--faint); }
+  .d-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .d-pair b { display: block; font-size: 20px; color: var(--text); font-variant-numeric: tabular-nums; }
+  .d-pair span { font-size: 12.5px; color: var(--dim); }
+  .d-note { margin: 10px 0 0; font-size: 13px; color: var(--dim); }
+  .d-note b.up { color: #93d9ab; } .d-note b.down { color: #ff9b7f; }
+  .d-none { margin: 0; font-size: 13px; color: var(--faint); }
+  .lv-bars { display: flex; align-items: flex-end; gap: 4px; height: 92px; }
+  .lvb { position: relative; flex: 1; min-width: 0; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; gap: 4px; }
+  .lvb i { display: block; width: 100%; max-width: 22px; border-radius: 4px 4px 0 0; background: #4a4f59; transition: background 0.2s; }
+  .d-card { position: relative; }
+  .lv-bars { touch-action: pan-y; }
+  .lvb { cursor: default; border-radius: 4px; }
+  .lvb:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+  .lvb.on i { background: var(--gold-soft); }
+  .lv-tip { position: absolute; z-index: 5; left: 0; top: 0; transform: translate(-50%, -100%); pointer-events: none; opacity: 0;
+    background: #14161a; border: 1px solid #3a3f4a; border-radius: 9px; padding: 7px 11px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+    transition: opacity 0.12s; white-space: nowrap; }
+  .lv-tip.show { opacity: 1; }
+  .lv-tip b { display: block; font-size: 13.5px; color: var(--text); font-variant-numeric: tabular-nums; }
+  .lv-tip span { display: block; font-size: 12px; color: var(--dim); margin-top: 1px; }
+  .lvb:hover i { background: var(--gold-soft); }
+  .lvb.me i { background: var(--gold); }
+  .lvb span { font-size: 10.5px; color: var(--faint); font-variant-numeric: tabular-nums; }
+  .lvb.me span { color: var(--gold); font-weight: 700; }
+  .ladder .stage { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 10px 22px; padding: 16px 22px; border-top: 1px solid var(--line); align-items: start; }
+  .ladder .stage:first-child { border-top: 0; }
+  .ladder .stage.me { background: rgba(255, 204, 51, 0.05); }
+  .ladder .lv { font-size: 17px; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
+  .ladder .lv small { display: block; font-size: 11.5px; font-weight: 600; color: var(--gold); }
+  .ladder .picks { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; }
+  .pick { text-align: left; font: inherit; color: var(--text); background: var(--card2); border: 1px solid var(--line); border-radius: 11px;
+    padding: 10px 14px; cursor: pointer; transition: border-color 0.2s, background 0.2s; }
+  .pick:hover { border-color: var(--gold-soft); background: #2a2d36; }
+  .pick.top { box-shadow: inset 3px 0 0 var(--gold); }
+  .pick b { display: block; font-size: 15px; font-weight: 600; }
+  .pick span { display: block; font-size: 12.5px; color: var(--dim); margin-top: 2px; }
+  .seg button:focus-visible, .open:focus-visible, .pick:focus-visible, .tools select:focus-visible, .tools input:focus-visible, .btn.small:focus-visible {
+    outline: 2px solid var(--gold); outline-offset: 2px; }
+  @media (prefers-reduced-motion: reduce) { .detail { animation: none; } }
+  @media (max-width: 720px) {
+    .tools { padding: 12px 16px 0; }
+    .detail { padding: 4px 16px 18px; grid-template-columns: 1fr; }
+    .ladder .stage { grid-template-columns: 1fr; padding: 14px 16px; }
+    .seg button { padding: 7px 12px; }
+  }
 
   @media (max-width: 880px) {
     .hero .wrap, .tracker .wrap { grid-template-columns: 1fr; }
@@ -386,6 +479,13 @@
 <section class="results" id="results-section">
   <div class="wrap">
     <div class="section-head"><h2 id="results-title">Best maps</h2><p id="results-sub"></p></div>
+    <div class="viewbar">
+      <div class="seg" role="tablist" aria-label="What to show">
+        <button type="button" role="tab" id="tab-maps" aria-selected="true">Best maps</button>
+        <button type="button" role="tab" id="tab-ladder" aria-selected="false" tabindex="-1">Leveling ladder</button>
+      </div>
+      <button type="button" class="btn ghost small" id="copy-link">Copy link</button>
+    </div>
     <div id="results" class="chart-wrap"></div>
   </div>
 </section>
@@ -476,7 +576,7 @@
     <details><summary>How do I read the chart?</summary>
       <p>Each row is a map, and every row uses the same scale, so further right means more EXP/hr. Each dot is one player: their typical run on that map, however much they've played it. The gold line is the typical EXP/hr there (half of players get more, half less), and the shaded bar is what the middle half of players get. A short bar means most players get about the same; a long one means gear, skills and how busy the map is make a big difference. Hollow red rings are runs left out of the numbers for being under half or over double what others get, like an AFK player or a leech. Point at anything (or tap it) for the exact numbers.</p></details>
     <details><summary>Why isn't my map or class here yet?</summary>
-      <p>A map is ranked once 3 different players around your level (within 5 levels), on the same path, and solo or in a party like you, have shared a run there. Until then, it's listed under Early data, greyed out, so you can see what's come in so far. The more people share, the faster it fills in. You can help by sharing yours!</p></details>
+      <p>A map is ranked once 3 different players around your level (close to your level: a map starts with players within 3 levels of yours and only goes up to 5, then 8, if it needs more players, and says so), on the same path, and solo or in a party like you, have shared a run there. Until then, it's listed under Early data, greyed out, so you can see what's come in so far. The more people share, the faster it fills in. You can help by sharing yours!</p></details>
     <details><summary>Found a problem?</summary>
       <p>Use <b>Report a bug</b> in the overlay's settings, or open an issue on <a href="https://github.com/beanguri/Maple-Classic-Exp-Overlay/issues">GitHub</a>.</p></details>
   </div></div>
