@@ -18,6 +18,9 @@ STATES = {"waiting": ("#6c7280", False), "ready": ("#ffcf4a", False), "tracking"
           "paused": ("#ffb27a", False), "alert": ("#ff7a5c", True)}
 
 
+MIN_TEXT_PX = 8                          # the smallest text, at any Size, so it stays readable
+
+
 class Theme:
     """One size of everything: the graphics engine and the text fonts, for this screen and Size setting."""
 
@@ -35,7 +38,7 @@ class Theme:
     def font(self, weight, size):
         key = (weight, size)
         if key not in self._tk:
-            self._tk[key] = tkfont.Font(root=self.root, family=self.fam[weight], size=-self.px(size))
+            self._tk[key] = tkfont.Font(root=self.root, family=self.fam[weight], size=-max(MIN_TEXT_PX, self.px(size)))
         return self._tk[key]
 
 
@@ -368,7 +371,12 @@ class Tile(tk.Canvas):
 
     def set(self, value):
         if self.itemcget(self._v, "text") != value:
-            self.itemconfigure(self._v, text=value)
+            room = self.t.px(self.bw) - 2 * self.t.px(13)
+            for size in (17, 15, 13, 11):                      # a long number gets a smaller size, not cut off
+                font = self.t.font("bold", size)
+                if font.measure(value) <= room:
+                    break
+            self.itemconfigure(self._v, text=value, font=font)
 
 
 class Details(tk.Canvas):

@@ -381,7 +381,7 @@ function nextNews(first = false) {
 
 async function loadNews() {
   let data = null;
-  try { data = await (await fetch("/api/latest", { cache: "no-store" })).json(); } catch {}
+  try { data = await (await fetch("/api/recent", { cache: "no-store" })).json(); } catch {}
   if (!data?.runs) return;
   if (!data.runs.length) {
     if (!news.length) $("news").hidden = true;            // nothing shared yet
@@ -412,8 +412,19 @@ for (const [on, held] of [["pointerenter", true], ["pointerleave", false], ["foc
 setInterval(() => {                       // a new one every 5 seconds, unless you're on it
   if (news.length > 1 && !newsHeld && !document.hidden) { newsAt++; nextNews(); }
 }, 5000);
-setInterval(loadNews, 90000);             // and the latest ones every minute and a half
-loadNews();
+// The latest runs are asked for only while the page is on screen, and at most every 5 minutes: a tab
+// left open in the background must not keep calling the server all day (each call counts toward the
+// free plan's daily limit).
+const NEWS_EVERY = 5 * 60 * 1000;
+let newsAsked = 0;
+function refreshNews() {
+  if (document.hidden || Date.now() - newsAsked < NEWS_EVERY) return;
+  newsAsked = Date.now();
+  loadNews();
+}
+setInterval(refreshNews, 30000);
+document.addEventListener("visibilitychange", refreshNews);   // back on the tab: catch up
+refreshNews();
 
 // The hero: the headline rises into place line by line, the rest fades up.
 if (motion()) {

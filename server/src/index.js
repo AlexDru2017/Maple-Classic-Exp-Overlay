@@ -3,7 +3,7 @@
 //   POST /api/runs    the overlay sends finished runs (only if the player agreed)
 //   GET  /api/stats   best maps for a class and path, level, solo or in a party
 //   GET  /api/options the classes and paths, how many players each has, and totals
-//   GET  /api/latest  the latest runs shared, for the bar at the top of the site
+//   GET  /api/recent  the latest runs shared, for the bar at the top of the site
 //   everything else   the website, from public/ (served by Cloudflare without running this)
 //
 // Anyone can send anything to a public server, so nothing is taken on trust: every run is
@@ -110,7 +110,8 @@ export default {
       if (request.method === "GET" && url.pathname === "/api/options") {
         return await cached(url, env, ctx, "options", KEEP.options, () => getOptions(env));
       }
-      if (request.method === "GET" && url.pathname === "/api/latest") {
+      // (/api/latest is what pages open before 2026-10-19 ask for; it's a static file now, see public/api/latest)
+      if (request.method === "GET" && (url.pathname === "/api/recent" || url.pathname === "/api/latest")) {
         return await cached(url, env, ctx, "latest", KEEP.latest, () => getLatest(env));
       }
       if (url.pathname.startsWith("/api/")) {

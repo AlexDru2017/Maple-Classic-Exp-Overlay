@@ -217,7 +217,7 @@ check("odd names don't break it", call("/api/stats?class=constructor&level=32").
 sneaky = install()
 call("/api/runs", {"install": sneaky, "runs": [dict(run(f"{day(28)}T10:00", 52000, job="Hunter"), note="PRIVATE-NOTE-TEXT",
                                                     notes=["PRIVATE-NOTE-TEXT"])]})
-seen = json.dumps([call("/api/latest"), call("/api/options?fresh=1"),
+seen = json.dumps([call("/api/recent"), call("/api/options?fresh=1"),
                    call("/api/stats?class=Archer&path=Bowmaster&level=32&party=1"),
                    call("/api/stats?class=Thief&path=Shadower&level=32&party=1")])
 check("a note sent with a run is dropped (not stored or shown anywhere)", "PRIVATE-NOTE-TEXT" not in seen)
@@ -229,7 +229,7 @@ call("/api/runs", {"install": install(), "runs": [run(f"{day(29)}T10:00", 50000,
 fresh = install()
 call("/api/runs", {"install": fresh, "runs": [run(f"{day(29)}T09:00", 48000, job="Hunter"),
                                      run(f"{day(29)}T09:15", 51000, level=32, job="Hunter")]})
-latest = call("/api/latest").get("runs", [])
+latest = call("/api/recent").get("runs", [])
 check(f"the bar shows the latest runs, newest first ({len(latest)} runs)",
       0 < len(latest) <= 12 and [r["shared"] for r in latest] == sorted((r["shared"] for r in latest), reverse=True))
 check(f"...starting with the newest ordinary one ({latest[0] if latest else None})",

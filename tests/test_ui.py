@@ -259,6 +259,176 @@ check("it never contains the Windows user name",
 print(text)
 app.job, app.reader.job_look, app.last_capture = None, None, None
 app.reader.box = None
+# ---- every Size at every Windows scaling: nothing drawn outside its box, nothing cut off, nothing broken
+def spill(widget, slack=2):
+    """Texts or pictures that stick out of the canvas they're drawn in (listed by kind)."""
+    bad = []
+    for canvas in [widget] + [c for c in widget.winfo_children()]:
+        stack = [canvas]
+        while stack:
+            c = stack.pop()
+            stack.extend(c.winfo_children())
+            if c.winfo_class() != "Canvas" or not c.winfo_ismapped():
+                continue
+            c.update_idletasks()
+            w, h = c.winfo_width(), c.winfo_height()
+            for item in c.find_all():
+                if c.type(item) != "text" or c.itemcget(item, "state") == "hidden" or not c.itemcget(item, "text"):
+                    continue
+                x0, y0, x1, y1 = c.bbox(item)
+                if x0 < -slack or y0 < -slack or x1 > w + slack or y1 > h + slack:
+                    bad.append(f"{c.itemcget(item, 'text')[:18]!r} {x0},{y0},{x1},{y1} in {w}x{h}")
+    return bad
+
+
+app._check_screen = lambda: None                          # (it would put the screen's own scaling back)
+layout_bad = []
+for dpi in (96, 120, 144, 192):                          # Windows scaling 100%, 125%, 150%, 200%
+    app._dpi = dpi
+    for scale in m.UI_SCALES:
+        app.cfg["ui_scale"] = scale
+        app._apply_ui_scale()
+        for case in ("tracking", "huge", "compact", "details"):
+            t.exp, t.pct, t.req, t.gained, t.levels = 31204, 54.2, 57600, 412300, 2
+            huge = case == "huge"
+            t.rate = lambda huge=huge: 123456789.0 if huge else 72566.0
+            t.rolling_rate = lambda huge=huge: 99999999.0 if huge else 71900.0
+            t.elapsed = lambda: 5620.0
+            meso.value, meso.gained = 18449220, 41000
+            app.level = 35
+            app.set_compact(case == "compact")
+            if case == "details" and not app.view.details_open:
+                app.view._toggle_details()
+            if case != "details" and app.view.details_open:
+                app.view._toggle_details()
+            app.session.on = True
+            app._update_display()
+            root.update()
+            for line in spill(app.view):
+                layout_bad.append(f"{dpi}dpi {scale}% {case}: {line}")
+        app.set_compact(False)
+check("at every Size and Windows scaling, no text sticks out of its box on the main window"
+      + (f" ({len(layout_bad)} problems, first: {layout_bad[:3]})" if layout_bad else ""), not layout_bad)
+
+fonts_small = []
+for dpi in (96, 120, 144, 192):
+    app._dpi = dpi
+    for scale in m.UI_SCALES:
+        app.cfg["ui_scale"] = scale
+        app._apply_ui_scale()
+        for name, f in app.fonts.items():
+            if abs(int(f.cget("size"))) < 9:
+                fonts_small.append(f"{dpi}dpi {scale}% {name} {f.cget('size')}")
+        for (weight, size), f in app.theme._tk.items():
+            if abs(int(f.cget("size"))) < m.MIN_TEXT_PX if hasattr(m, "MIN_TEXT_PX") else False:
+                fonts_small.append(f"{dpi}dpi {scale}% {weight} {size}")
+check(f"text never gets smaller than the readable minimum ({fonts_small[:3]})", not fonts_small)
+
+# the window, the log and Settings still fit their contents at the smallest and biggest sizes
+fit_bad = []
+for dpi in (96, 192):
+    app._dpi = dpi
+    for scale in (60, 70, 100, 200):
+        app.cfg["ui_scale"] = scale
+        app._apply_ui_scale()
+        app.set_compact(False)
+        if not app.log_open:
+            app.toggle_log()
+        root.update()
+        tree = app.log_tree
+        headfont = m.tkfont.nametofont("TkHeadingFont") if "TkHeadingFont" in m.tkfont.names(root) else app.fonts["text"]
+        for col in tree["columns"]:
+            need = app.fonts["text"].measure(tree.heading(col, "text") or "") + 6
+            if int(tree.column(col, "width")) + 2 < min(need, 40):
+                fit_bad.append(f"{dpi}dpi {scale}% log column {col}")
+        app.open_settings()
+        sw = app.settings_win
+        sw.geometry("")
+        sw.update()
+        for child in sw.winfo_children():
+            stack = [child]
+            while stack:
+                c = stack.pop()
+                stack.extend(c.winfo_children())
+                if c.winfo_ismapped() and (c.winfo_rootx() + c.winfo_width() > sw.winfo_rootx() + sw.winfo_width() + 2
+                                           or c.winfo_rooty() + c.winfo_height() > sw.winfo_rooty() + sw.winfo_height() + 2):
+                    fit_bad.append(f"{dpi}dpi {scale}% settings: {c.winfo_class()} sticks out")
+        for line in spill(sw):
+            fit_bad.append(f"{dpi}dpi {scale}% settings: {line}")
+        sw.destroy()
+        app.settings_win = None
+        app.toggle_log()
+check(f"the log and Settings fit at the smallest and biggest Sizes ({fit_bad[:3]})", not fit_bad)
+app._dpi = 192 if app._dpi not in (96, 120, 144, 192) else app._dpi
+app.cfg["ui_scale"] = 100
+app._apply_ui_scale()
+
+# ---- Size and Transparency limits
+check("sizes from 60% to 200% are offered", m.UI_SCALES[0] == 60 and m.UI_SCALES[1] == 70 and m.UI_SCALES[-1] == 200)
+saved = m.CONFIG_PATH
+cfg_file = Path(tempfile.mkdtemp()) / "config.json"
+cfg_file.write_text(json.dumps({"transparency": 90, "ui_scale": 70}), encoding="utf-8")
+m.CONFIG_PATH = cfg_file
+loaded = m.load_config()
+m.CONFIG_PATH = saved
+check("an older config with transparency 90 loads as the 40% limit, and a saved 70% size is kept",
+      loaded["transparency"] == 40 and loaded["ui_scale"] == 70)
+cfg_file.write_text(json.dumps({"transparency": -5, "ui_scale": 65}), encoding="utf-8")
+m.CONFIG_PATH = cfg_file
+loaded = m.load_config()
+m.CONFIG_PATH = saved
+check("a negative transparency is 0, and a size that isn't offered is 100%", loaded["transparency"] == 0 and loaded["ui_scale"] == 100)
+check("transparency can't go past 40%", m.MAX_TRANSPARENCY == 40)
+
+# ---- the transparency slider stops at the limit, and the window can't fade past it
+app.cfg["transparency"] = 90
+app._apply_window_settings()
+check("the window is never more see-through than the limit (opacity %.2f)" % float(root.attributes("-alpha")),
+      float(root.attributes("-alpha")) >= 1 - m.MAX_TRANSPARENCY / 100 - 0.01)
+app.cfg["transparency"] = 0
+app._apply_window_settings()
+
+# ---- hotkeys in Settings: one waiting at a time, and clicking it again cancels
+if app.hotkeys.supported:
+    app.open_settings()
+    sw = app.settings_win
+    sw.update()
+    ui = app._hotkey_ui
+    names = list(ui["buttons"])
+    keys_before = dict(app.cfg["hotkeys"])
+    texts = lambda: {a: b.itemcget(b._txt, "text") for a, b in ui["buttons"].items()}
+    ui["choose"](names[0])
+    check("clicking a hotkey makes it wait for keys", ui["choosing"]["action"] == names[0] and texts()[names[0]] == "Press keys...")
+    ui["choose"](names[1])
+    t2 = texts()
+    check("clicking another one moves the wait to it: only one says Press keys",
+          ui["choosing"]["action"] == names[1] and sum(v == "Press keys..." for v in t2.values()) == 1
+          and t2[names[0]] == (keys_before[names[0]] or "Off"))
+    ui["choose"](names[1])
+    check("clicking the waiting one again cancels it, and every key is as it was",
+          ui["choosing"]["action"] is None and texts() == {a: (keys_before[a] or "Off") for a in names}
+          and app.cfg["hotkeys"] == keys_before)
+    check("hotkeys work again after cancelling", getattr(app.hotkeys, "_paused", True) is False)
+    ui["choose"](names[2])
+    esc = type("E", (), {"keysym": "Escape", "state": 0, "keycode": 27})()
+    ui["pressed"](esc)
+    check("Esc cancels too, keeping the key", ui["choosing"]["action"] is None and app.cfg["hotkeys"] == keys_before)
+    ui["choose"](names[3])
+    back = type("E", (), {"keysym": "BackSpace", "state": 0, "keycode": 8})()
+    ui["pressed"](back)
+    check("Backspace turns that hotkey off", app.cfg["hotkeys"][names[3]] == "" and ui["choosing"]["action"] is None)
+    app.cfg["hotkeys"].update(keys_before)
+    m.save_config(app.cfg)
+    ui["choose"](names[0])
+    ui["on"].set(False)
+    sw.update()
+    check("turning hotkeys off while one is waiting ends the wait", ui["choosing"]["action"] is None)
+    ui["on"].set(True)
+    sw.update()
+    sw.destroy()
+    app.settings_win = None
+    check("closing Settings leaves hotkeys working", getattr(app.hotkeys, "_paused", True) is False)
+
 check("the typeface is the bundled one, or it fell back cleanly", app._own_fonts in (True, False) and bool(app.theme.fam["extra"]))
 app.close()
 

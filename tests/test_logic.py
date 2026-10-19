@@ -454,7 +454,7 @@ m.CONFIG_PATH.write_text(json.dumps({"gap_seconds": "15", "transparency": 400, "
                                      "log_size": [5], "mode": "region"}), encoding="utf-8")
 cfg = m.load_config()
 check("damaged settings fall back to the defaults",
-      cfg["gap_seconds"] == 15 and cfg["transparency"] == 90 and "pos" not in cfg
+      cfg["gap_seconds"] == 15 and cfg["transparency"] == m.MAX_TRANSPARENCY and "pos" not in cfg
       and "log_size" not in cfg and cfg["mode"] == "window")
 m.CONFIG_PATH.write_text("[1, 2", encoding="utf-8")
 check("an unreadable settings file gives the defaults", m.load_config()["topmost"] is True)

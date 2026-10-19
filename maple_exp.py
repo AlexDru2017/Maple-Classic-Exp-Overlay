@@ -91,7 +91,8 @@ DEFAULTS = {"gap_seconds": 15, "transparency": 0, "topmost": True,
             "check_updates": True, "skip_version": "", "ui_scale": 100, "compact": False, "hotkeys_on": True,
             "details": False}
 # Settings > Size, in %: only these, so the window can't get too small to read or use.
-UI_SCALES = (80, 90, 100, 110, 125, 150, 175, 200)
+UI_SCALES = (60, 70, 80, 90, 100, 110, 125, 150, 175, 200)
+MAX_TRANSPARENCY = 40       # %: more and the window can fade out of sight, with Settings in it
 STATS_SITE = "https://maple-classic-exp-overlay.pages.dev"       # shared 15-minute runs (server/)
 GITHUB_REPO = "beanguri/Maple-Classic-Exp-Overlay"
 RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
@@ -157,7 +158,7 @@ def load_config():
         value = cfg.get(key)
         if type(value) is not type(default) or (key == "gap_seconds" and not 1 <= value <= 3600):
             cfg[key] = default
-    cfg["transparency"] = min(90, max(0, cfg["transparency"]))
+    cfg["transparency"] = min(MAX_TRANSPARENCY, max(0, cfg["transparency"]))
     if cfg["ui_scale"] not in UI_SCALES:
         cfg["ui_scale"] = 100
     keys = cfg.get("hotkeys") if isinstance(cfg.get("hotkeys"), dict) else {}
@@ -3144,7 +3145,7 @@ class App:
     # ---- settings
     def _apply_window_settings(self):
         self.root.attributes("-topmost", bool(self.cfg["topmost"]))
-        self.root.attributes("-alpha", 1 - min(90, max(0, int(self.cfg["transparency"]))) / 100)
+        self.root.attributes("-alpha", 1 - min(MAX_TRANSPARENCY, max(0, int(self.cfg["transparency"]))) / 100)
 
     def _switch(self, parent, text, var):
         """An on/off switch tied to a BooleanVar."""
@@ -3209,7 +3210,7 @@ class App:
         percent = tk.Label(line, text=f"{transparency.get()}%", **dim)
         percent.pack(side="right")
         transparency.trace_add("write", lambda *_: percent.config(text=f"{int(float(transparency.get()))}%"))
-        Slider(body, th, transparency, 0, 90, 330, BG).pack(anchor="w", pady=(px(6), px(12)))
+        Slider(body, th, transparency, 0, MAX_TRANSPARENCY, 330, BG).pack(anchor="w", pady=(px(6), px(12)))
         size_line = tk.Frame(body, bg=BG)
         size_line.pack(fill="x")
         tk.Label(size_line, text="Size", **text).pack(side="left")
@@ -3250,7 +3251,7 @@ class App:
                 seconds = 0
             if 1 <= seconds <= 3600:
                 self.cfg["gap_seconds"] = self.autolog.gap = self.session.gap = seconds
-            self.cfg["transparency"] = int(float(transparency.get()))
+            self.cfg["transparency"] = min(MAX_TRANSPARENCY, max(0, int(float(transparency.get()))))
             self.cfg["topmost"] = bool(topmost.get())
             self.cfg["check_updates"] = bool(updates.get())
             if bool(sharing.get()) != bool(self.cfg.get("share_runs")):
@@ -3309,22 +3310,49 @@ class App:
         grid = tk.Frame(box, bg=BG)
         grid.pack(anchor="w", padx=(px(2), 0))
         buttons, notes, choosing = {}, {}, {"action": None}
-        hint = tk.StringVar(value="Click one, then press the keys you want. Backspace turns it off.")
+        idle_hint = "Click one, then press the keys you want. Backspace turns it off."
+        hint = tk.StringVar(value=idle_hint)
 
         def show():
             for action, b in buttons.items():
                 key = self.cfg["hotkeys"][action]
-                b.set(text=key or "Off", kind="secondary" if key else "ghost")
+                if action == choosing["action"]:
+                    b.set(text="Press keys...", kind="primary")
+                else:
+                    b.set(text=key or "Off", kind="secondary" if key else "ghost")
                 notes[action].config(text=self.hotkeys.problems.get(action, ""))
 
+        def stop():
+            """Nobody is waiting for keys: hotkeys work again, every button shows its key."""
+            choosing["action"] = None
+            hint.set(idle_hint)
+            self.hotkeys.pause(False)
+            show()
+
+        def watch():
+            """Clicking away from Settings (into the game, say) ends the wait, so the hotkeys never stay off."""
+            if choosing["action"] and w.winfo_exists():
+                if w.focus_displayof() is None:
+                    stop()
+                else:
+                    w.after(400, watch)
+
         def choose(action):
-            choosing["action"] = action
+            if choosing["action"] == action:         # clicking the waiting one again cancels it
+                stop()
+                return
+            first = choosing["action"] is None
+            choosing["action"] = action              # (one at a time: another that was waiting goes back to its key)
             self.hotkeys.pause(True)                 # so the keys reach this window
-            buttons[action].set(text="Press keys...", kind="accent")
+            hint.set(f"Press the keys for {HOTKEY_ACTIONS[action]}. Click it again or press Esc to cancel.")
+            show()
             w.focus_force()
+            if first:
+                w.after(400, watch)
 
         def done(action, key):
             choosing["action"] = None
+            hint.set(idle_hint)
             if key:
                 for other, k in self.cfg["hotkeys"].items():
                     if k == key and other != action:
@@ -3349,7 +3377,6 @@ class App:
                 if not key:
                     hint.set("Use Ctrl, Alt or Shift with a number or letter, or an F key.")
                     return "break"
-                hint.set("Click one, then press the keys you want. Backspace turns it off.")
                 done(action, key)
             return "break"
 
@@ -3364,8 +3391,11 @@ class App:
         tk.Label(box, textvariable=hint, bg=BG, fg=FAINT, font=th.font("regular", 10)).pack(anchor="w", pady=(px(6), 0))
         w.bind("<KeyPress>", pressed)
         w.bind("<Destroy>", lambda e: e.widget is w and self.hotkeys.pause(False))
+        self._hotkey_ui = {"buttons": buttons, "choose": choose, "choosing": choosing, "pressed": pressed, "on": on}   # (tests)
 
         def switch(*_):
+            if choosing["action"]:
+                stop()
             self.cfg["hotkeys_on"] = bool(on.get())
             save_config(self.cfg)
             self.hotkeys.set(self.cfg["hotkeys"], self.cfg["hotkeys_on"])

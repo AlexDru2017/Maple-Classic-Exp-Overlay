@@ -2,7 +2,13 @@
 
 ## 0.9.9-beta
 
+**New**
+- **Smaller sizes:** Settings > Size now goes down to 70% and 60% (it was 80%). The smallest text stops at a readable size.
+- **Transparency stops at 40%.** More and the window could fade so far that you couldn't find Settings again. A higher saved value becomes 40%.
+
 **Fixed**
+- **Hotkeys in Settings:** clicking one to change it could leave several looking selected (and the first click could fail with an error). Now only one waits for keys at a time: clicking another moves it, clicking the same one again (or Esc) cancels, and hotkeys come back right away if you turn them off or click away from Settings.
+- A long number in the three small panels (like 99,999,999) now shrinks to fit instead of running out of its box.
 - **Select area** crashed on Windows ("expected integer but got bold") since 0.9.7. It opens again.
 
 **Better bug reports**
