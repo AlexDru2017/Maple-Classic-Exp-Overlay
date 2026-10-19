@@ -2768,6 +2768,7 @@ class App:
         saved = {k: round(v * self._px_per_pt) for k, v in (self.cfg.get("log_columns_pt") or {}).items()
                  if type(v) in (int, float)} or self.cfg.get("log_columns") or {}
         pad = cell.measure("00")
+        self._log_titles = {c[0]: c[1] for c in columns}
         tree = self.log_tree = ttk.Treeview(p, columns=[c[0] for c in columns], show="headings",
                                             style="Log.Treeview", height=11, selectmode="browse")
         for key, title, sample, anchor in columns:
@@ -2874,9 +2875,11 @@ class App:
             return
         self._fit_settings()
         ttk.Style(self.root).configure("Log.Treeview", rowheight=int(self.fonts["text"].metrics("linespace") * 1.8))
+        head, pad = self.fonts["caps"], self.fonts["text"].measure("00")
         for c in self.log_tree["columns"]:
             width = round(self.log_tree.column(c, "width") * self._px_per_pt / old)
-            self.log_tree.column(c, width=max(10, width))
+            # (text doesn't shrink as far as the window does, so a column keeps room for its heading)
+            self.log_tree.column(c, width=max(10, width, head.measure(self._log_titles.get(c, "")) + pad))
         self.cfg["log_size"] = None                         # a size from before may not fit any more
         if self.log_open:
             self.root.update_idletasks()
