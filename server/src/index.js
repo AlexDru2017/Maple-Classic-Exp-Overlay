@@ -414,16 +414,16 @@ function perPlayer(runs, field) {
   return [...by.values()].map(median);
 }
 
-/** Each player's EXP/hr and the level they were at (the median of their runs), lowest EXP/hr first:
- * [[exp_hr, level], ...]. No ids. */
+/** Each player's EXP/hr, the level they were at (the median of their runs) and 1 if they're a new player (only
+ * when the page asked for them), lowest EXP/hr first: [[exp_hr, level, new], ...]. No ids. */
 function playerDots(runs) {
   const by = new Map();
   for (const r of runs) {
-    if (!by.has(r.install)) by.set(r.install, { exp: [], level: [] });
+    if (!by.has(r.install)) by.set(r.install, { exp: [], level: [], fresh: r.confirmed === 0 });
     by.get(r.install).exp.push(r.exp_hr);
     by.get(r.install).level.push(r.level_start);
   }
-  return [...by.values()].map((p) => [median(p.exp), Math.round(median(p.level))]).sort((a, b) => a[0] - b[0]);
+  return [...by.values()].map((p) => [median(p.exp), Math.round(median(p.level)), p.fresh ? 1 : 0]).sort((a, b) => a[0] - b[0]);
 }
 
 /** 3 significant figures (74,213 -> 74,200): plenty for a dot on a chart. */
@@ -459,8 +459,11 @@ export function summarize(runs) {
     outliers: left.length,
     dots: dots.map((d) => roughly(d[0])),
     dot_levels: dots.map((d) => d[1]),                   // the level of each dot, in the same order
+    new_players: dots.filter((d) => d[2]).length,        // players who don't count yet (only with "include new players")
+    dot_new: dots.map((d) => d[2]),
     unusual: unusual.map((d) => roughly(d[0])),
     unusual_levels: unusual.map((d) => d[1]),
+    unusual_new: unusual.map((d) => d[2]),
   };
 }
 
@@ -474,13 +477,20 @@ async function getStats(url, env, ctx, now) {
   if (!jobs || !(level >= 1 && level <= 250) || !party) {
     return json({ error: "give class (and path), level (1-250) and party (solo or party)" }, 400);
   }
-  return cached(url, env, ctx, `stats2/${name}/${path || ""}/${level}/${party}`, KEEP.stats,
-    () => findMaps(env, name, path, jobs, level, party, now));
+  const withNew = wantsNew(url);
+  return cached(url, env, ctx, `stats2/${name}/${path || ""}/${level}/${party}${withNew ? "/new" : ""}`, KEEP.stats,
+    () => findMaps(env, name, path, jobs, level, party, now, withNew));
 }
 
 /** Who counts: not banned, seen for VET_HOURS, and at least VET_RUNS runs. The SQL pieces: `from` joins the
  * installs table, `where` is the condition, `args` its two values (put at the numbers given). */
-const vetting = (now) => ({ cutoff: new Date(now - VET_HOURS * 3600e3).toISOString(), runs: VET_RUNS });
+const vetting = (now, withNew = false) => withNew ? { cutoff: "9999", runs: 0 }
+  : { cutoff: new Date(now - VET_HOURS * 3600e3).toISOString(), runs: VET_RUNS };
+
+/** "Include new players" (new=1): everyone who isn't banned. Their runs are marked (confirmed = 0) so the page can say
+ * so, and a map name that isn't on the game's list never comes from them. */
+const wantsNew = (url) => url.searchParams.get("new") === "1";
+const onlyListed = (rows) => rows.filter((r) => r.confirmed || isListed(r.map));
 const VETTED = (n1, n2) => `i.banned = 0 AND i.runs >= ?${n1} AND i.first_seen <= ?${n2}`;
 
 /** In how many different days were these (listed-or-not) maps shared by players who count? */
@@ -519,15 +529,16 @@ const soloOf = (r) => r.party === 1;
  * Everything the page shows, including solo vs party, EXP/hr by level and the recent trend, is
  * worked out here from the same rows: one request and one query.
  */
-async function findMaps(env, name, path, jobs, level, party, now) {
-  const widest = RADII[RADII.length - 1], v = vetting(now), n = jobs.length;
+async function findMaps(env, name, path, jobs, level, party, now, withNew = false) {
+  const widest = RADII[RADII.length - 1], v = vetting(now, withNew), real = vetting(now), n = jobs.length;
   const { results } = await env.DB.prepare(
-    `SELECT r.install, r.map, r.seconds, r.exp_hr, r.mesos_hr, r.level_start, r.level_end, r.party, r.started, r.received
+    `SELECT r.install, r.map, r.seconds, r.exp_hr, r.mesos_hr, r.level_start, r.level_end, r.party, r.started, r.received,
+            (i.runs >= ?${n + 5} AND i.first_seen <= ?${n + 6}) AS confirmed
      FROM runs r JOIN installs i ON i.install = r.install
      WHERE ${VETTED(n + 3, n + 4)} AND r.job IN (${jobs.map((_, i) => `?${i + 3}`).join(", ")})
        AND r.level_start BETWEEN ?1 AND ?2`
-  ).bind(level - widest, level + widest, ...jobs, v.runs, v.cutoff).all();
-  const rows = results.map((r) => ({ ...r, pct_hr: pctPerHour(r) }));
+  ).bind(level - widest, level + widest, ...jobs, v.runs, v.cutoff, real.runs, real.cutoff).all();
+  const rows = onlyListed(results).map((r) => ({ ...r, pct_hr: pctPerHour(r) }));
   const mine = rows.filter((r) => (party === "solo") === soloOf(r));
   const theirs = rows.filter((r) => (party === "solo") !== soloOf(r));
   const grouped = (list) => {
@@ -586,7 +597,7 @@ async function findMaps(env, name, path, jobs, level, party, now) {
   const newest = rows.reduce((m, r) => (r.received > m ? r.received : m), "");
   return json({
     class: name, path, jobs, party, levels: [Math.max(1, level - RADII[0]), level + RADII[0]], ranges: RADII,
-    min_players: MIN_PLAYERS, maps, early: early.slice(0, MAX_EARLY), maps_waiting_for_players: early.length,
+    min_players: MIN_PLAYERS, with_new: withNew, maps, early: early.slice(0, MAX_EARLY), maps_waiting_for_players: early.length,
     newest_run: newest ? `${newest.slice(0, 16)}Z` : null,
   });
 }
@@ -603,17 +614,19 @@ async function getLadder(url, env, ctx, now) {
   const asked = url.searchParams.get("party") || "solo";
   const party = asked === "solo" || asked === "1" ? "solo" : asked === "party" || /^[2-6]$/.test(asked) ? "party" : null;
   if (!jobs || !party) return json({ error: "give class (and path) and party (solo or party)" }, 400);
-  return cached(url, env, ctx, `ladder/${name}/${path || ""}/${party}`, KEEP.ladder, async () => {
-    const v = vetting(now), n = jobs.length;
+  const withNew = wantsNew(url);
+  return cached(url, env, ctx, `ladder/${name}/${path || ""}/${party}${withNew ? "/new" : ""}`, KEEP.ladder, async () => {
+    const v = vetting(now, withNew), real = vetting(now), n = jobs.length;
     const { results } = await env.DB.prepare(
-      `SELECT r.install, r.map, r.seconds, r.exp_hr, r.mesos_hr, r.level_start, r.level_end
+      `SELECT r.install, r.map, r.seconds, r.exp_hr, r.mesos_hr, r.level_start, r.level_end,
+              (i.runs >= ?${n + 4} AND i.first_seen <= ?${n + 5}) AS confirmed
        FROM runs r JOIN installs i ON i.install = r.install
        WHERE ${VETTED(n + 2, n + 3)} AND r.job IN (${jobs.map((_, i) => `?${i + 2}`).join(", ")})
          AND r.party ${party === "solo" ? "= 1" : ">= 2"}
        ORDER BY r.received DESC LIMIT ?1`
-    ).bind(LADDER_ROWS, ...jobs, v.runs, v.cutoff).all();
+    ).bind(LADDER_ROWS, ...jobs, v.runs, v.cutoff, real.runs, real.cutoff).all();
     const bands = new Map();
-    for (const r of results) {
+    for (const r of onlyListed(results)) {
       const from = Math.floor(r.level_start / LADDER_BAND) * LADDER_BAND;
       if (!bands.has(from)) bands.set(from, new Map());
       const maps = bands.get(from);
@@ -625,7 +638,7 @@ async function getLadder(url, env, ctx, now) {
       const ranked = [];
       for (const [map, list] of bands.get(from)) {
         const s = summarize(list);
-        if (s?.ranked) ranked.push({ map, exp_hr: s.exp_hr, pct_hr: s.pct_hr, mesos_hr: s.mesos_hr, players: s.players });
+        if (s?.ranked) ranked.push({ map, exp_hr: s.exp_hr, pct_hr: s.pct_hr, mesos_hr: s.mesos_hr, players: s.players, ...(withNew ? { new_players: s.new_players } : {}) });
       }
       ranked.sort((a, b) => b.exp_hr - a.exp_hr);
       if (ranked.length) out.push({ from, to: from + LADDER_BAND - 1, maps: ranked.slice(0, 3) });
@@ -633,7 +646,7 @@ async function getLadder(url, env, ctx, now) {
     const odd = [...new Set(out.flatMap((b) => b.maps.map((m) => m.map)))].filter((m) => !isListed(m));
     const days = odd.length ? await daysSeen(env, odd, now) : new Map();
     for (const b of out) b.maps = b.maps.filter((m) => visibleMap(m, true, days));
-    return json({ class: name, path, party, band: LADDER_BAND, min_players: MIN_PLAYERS, bands: out.filter((b) => b.maps.length) });
+    return json({ class: name, path, party, band: LADDER_BAND, min_players: MIN_PLAYERS, with_new: withNew, bands: out.filter((b) => b.maps.length) });
   });
 }
 
@@ -693,6 +706,7 @@ async function getOptions(env, now) {
       `SELECT COALESCE((SELECT runs FROM totals WHERE id = 1), 0) AS runs,
               ROUND(COALESCE((SELECT seconds FROM totals WHERE id = 1), 0) / 3600.0, 1) AS hours,
               (SELECT COUNT(DISTINCT j.install) FROM job_players j JOIN installs i ON i.install = j.install WHERE ${VETTED(1, 2)}) AS players,
+              (SELECT COUNT(DISTINCT j.install) FROM job_players j JOIN installs i ON i.install = j.install WHERE i.banned = 0) AS players_all,
               (SELECT COUNT(DISTINCT m.map) FROM map_players m JOIN installs i ON i.install = m.install WHERE ${VETTED(1, 2)}) AS maps`)
       .bind(v.runs, v.cutoff),
   ]);
@@ -713,7 +727,8 @@ async function getOptions(env, now) {
       name: path, steps: [c.first[0], ...jobs], ...count(jobsFor(name, path)),   // steps: 1st job to 4th
     })),
   }));
-  return json({ classes, ...totals });
+  const { players_all, ...rest } = totals;
+  return json({ classes, ...rest, players_new: Math.max(0, players_all - totals.players) });   // (kept, not shown yet)
 }
 
 // ---------------------------------------------------------------- helpers

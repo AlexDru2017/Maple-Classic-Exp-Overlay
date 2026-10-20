@@ -119,6 +119,7 @@ Click the **log icon** (top left, next to the status pill) to open the log. It's
 - **Enter your level and whether you're solo or in a party, then pick your class and path.** Paths are named after their 4th job, like Night Lord or Bishop, and include the jobs before it (Shadower is Bandits, Chief Bandits and Shadowers). Under Lv 30 you're still 1st job, so Path is greyed out and you see what every player of your class gets.
 - **Around your level** starts at 3 levels either way. If a map doesn't have enough players that close, it widens to 5, then 8 levels, and the row says so ("wider range"). Parties of any size count together.
 - **Each map shows** its EXP/hr and mesos/hr, how many players and hours of farming it's based on, and about how long a level takes there (**% of a level per hour**). The dots on each line are players' typical runs, coloured by how their level compares to yours.
+- **Include new players:** a new player's runs only count after 24 hours and 4 runs, so the site starts strict. Tick **Include new players** to see them too. Those maps are labelled, the new players' dots are faded, and maps with a name the game doesn't list are never shown from new players.
 - **Sort and filter** the list, open **Details** on a map (solo vs party, EXP/hr by level, the trend lately), or switch to the **Leveling ladder** to see which maps to use as you level. **Copy link** shares exactly what you're looking at.
 
 ![The best-maps website, with a map's details open](docs/screenshot-site.png)

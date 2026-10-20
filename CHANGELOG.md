@@ -17,6 +17,7 @@
 - A map name the game doesn't list shows only once 3 players have shared it on 2 different days.
 
 **The best-maps website**
+- **Include new players.** A new box in Best maps and the ladder shows the players who joined lately and don't count yet (they count for everyone after a day and 4 runs). Maps that use them say so, their dots are faded, and the header shows how many are new. Off by default; map names the game doesn't list never come from new players.
 - **A closer level range.** A map's numbers start from players within 3 levels of yours, and go to 5 or 8 only if the map needs more players to be ranked (the row says "wider range").
 - **% of a level per hour and time per level** on every map ("about 14 h per level"), which compares players at different levels.
 - **Sort** by EXP/hr, %/hr or mesos/hr, and **hide early data**.

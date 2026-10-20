@@ -449,6 +449,47 @@ rows_after = sql("SELECT (SELECT COUNT(*) FROM installs) AS i, (SELECT COALESCE(
 check(f"posts with nothing valid in them leave no trace in the database ({rows_before} -> {rows_after})", rows_before == rows_after)
 check("...and the player never became known", sql(f"SELECT COUNT(*) AS n FROM installs WHERE install = '{ghost}'")[0]["n"] == 0)
 
+# ---- "Include new players" (new=1): new players are kept out by default, and shown, labelled, when asked
+def asked_new(level):
+    return call(f"/api/stats?class=Thief&path=Shadower&level={level}&party=solo&new=1", later=1)
+
+
+def row_of(d, name):
+    return next((m for m in d["maps"] + d["early"] if m["map"] == name), None)
+
+
+newbies = [install() for _ in range(3)]
+for who in newbies:
+    assert call("/api/runs", {"install": who, "runs": [run(t, 60000, level=66, map_name="Cold Field II") for t in hours(day(21), 2)]})["received"] == 2
+    call("/api/runs", {"install": who, "runs": [run(t, 60000, level=66, map_name="Imaginary Place Of Doom") for t in hours(day(21), 2, 14)]})
+default = call("/api/stats?class=Thief&path=Shadower&level=66&party=solo", later=1)
+check("new players are left out by default", row_of(default, "Cold Field II") is None and default.get("with_new") is False)
+withnew = asked_new(66)
+row = row_of(withnew, "Cold Field II")
+check("...and shown, ranked, with new=1", row is not None and row in withnew["maps"] and withnew["with_new"] is True)
+check("...with how many of them are new, and which dots", row and row["new_players"] == 3 and row["dot_new"] == [1, 1, 1])
+check("a map name the game doesn't list never comes from new players, even when asked", row_of(withnew, "Imaginary Place Of Doom") is None)
+check("the default answer doesn't change when someone asks for new players",
+      call("/api/stats?class=Thief&path=Shadower&level=66&party=solo", later=1) == default)
+later_default = call("/api/stats?class=Thief&path=Shadower&level=66&party=solo", later=30)
+check("a day later they count normally and are no longer marked new", row_of(later_default, "Cold Field II") is not None
+      and row_of(later_default, "Cold Field II")["new_players"] == 0)
+opts = call("/api/options?fresh=1", later=1)
+check(f"the player count says how many are new ({opts.get('players_new')})", opts.get("players_new", 0) >= 3)
+ladder_new = call("/api/ladder?class=Thief&path=Shadower&party=solo&new=1", later=1)
+band = next((b for b in ladder_new["bands"] if b["from"] <= 66 <= b["to"]), None)
+check("the ladder shows them too when asked", band is not None and any(m["map"] == "Cold Field II" and m["new_players"] == 3 for m in band["maps"]))
+check("...and not by default", not any(m["map"] == "Cold Field II" for b in call("/api/ladder?class=Thief&path=Shadower&party=solo", later=1)["bands"] for m in b["maps"]))
+sql(f"UPDATE installs SET banned = 1 WHERE install = '{newbies[0]}'")
+banned_row = row_of(asked_new(66), "Cold Field II")
+check("a banned new player is never shown (2 of the 3 at Lv 66 are left)", banned_row is not None
+      and banned_row["dot_levels"].count(66) == 2)
+fast = install()
+call("/api/runs", {"install": fast, "runs": [run(t, 400000, level=66, map_name="Cold Field II") for t in hours(day(21), 2, 18)]})
+odd = row_of(asked_new(66), "Cold Field II")
+check("a new player far from the others is left out as unusual", odd is not None and odd["outliers"] > 0
+      and 400000 not in odd["dots"] and any(v > 300000 for v in odd["unusual"]))
+
 # a flood of brand-new players is stopped for the day, while players the server knows carry on
 known = install()
 call("/api/runs", {"install": known, "runs": [run(f"{day(19)}T08:00", 50000, map_name="Ant Tunnel II")]})

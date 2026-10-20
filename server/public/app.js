@@ -56,6 +56,7 @@ function fromLink(q = new URLSearchParams(location.search)) {
   if (SORTS[q.get("sort")]) out.sort = q.get("sort");
   if (q.get("hide") === "early") out.hide = true;
   if (q.get("view") === "ladder") out.view = "ladder";
+  if (q.get("new") === "1") out.withNew = true;
   return out;
 }
 
@@ -107,6 +108,9 @@ async function loadOptions() {
   $("counts").style.display = data.runs ? "" : "none";       // no big zeros on day one
   $("c-hours").textContent = (data.hours || 0) < 10 ? String(Math.round((data.hours || 0) * 10) / 10) : fmt(data.hours);
   $("c-players").textContent = fmt(data.players || 0);
+  newPlayers = data.players_new || 0;
+  $("c-players-l").textContent = newPlayers ? `players (+${fmt(newPlayers)} new)` : "players";
+  $("c-players-l").title = newPlayers ? "New players count for everyone after a day and 4 runs. \"Include new players\" in Best maps shows them now." : "";
   $("c-maps").textContent = fmt(data.maps || 0);
   ["c-hours", "c-players", "c-maps"].forEach((id) => countUp($(id)));
   $("classes").innerHTML = classes.map((c) => `<label><input type="radio" name="job" value="${esc(c.name)}">` +
@@ -115,6 +119,7 @@ async function loadOptions() {
   const last = { ...saved(), ...link };
   if (SORTS[last.sort]) view.sort = last.sort;
   view.hideEarly = !!last.hide;
+  view.withNew = !!last.withNew;
   view.tab = link.view === "ladder" ? "ladder" : "maps";
   setTabs();
   if (last.level) $("level").value = last.level;
@@ -140,7 +145,14 @@ const SORTS = {
   pct: ["% of a level per hour", (m) => m.pct_hr ?? 0, "Fastest levelling"],
   mesos: ["Mesos/hr", (m) => m.mesos_hr ?? -1, "Most mesos"],
 };
-const view = { sort: "exp", hideEarly: false, tab: "maps" };
+const view = { sort: "exp", hideEarly: false, withNew: false, tab: "maps" };
+const NEW_TIP = "Players who joined lately. They count for everyone after a day and 4 runs.";
+const newBox = () => `<label class="chk" title="${NEW_TIP}"><input type="checkbox" id="with-new"${view.withNew ? " checked" : ""}> Include new players</label>`;
+/** Ticking "Include new players" asks again (it's in the chart's toolbar, the ladder's, and the empty answers). */
+function hookNew() {
+  $("with-new")?.addEventListener("change", (e) => { view.withNew = e.target.checked; remember(); ask(null, false); });
+}
+let newPlayers = 0;                          // players who joined lately and don't count yet (from /api/options)
 let current = null;                          // { data, level, party, job, path }
 const memo = new Map();
 const MEMO_MS = 15 * 60 * 1000;
@@ -169,6 +181,7 @@ function syncUrl() {
   if (!firstJob() && $("path").value) q.set("path", $("path").value);
   if (view.sort !== "exp") q.set("sort", view.sort);
   if (view.hideEarly) q.set("hide", "early");
+  if (view.withNew) q.set("new", "1");
   if (view.tab === "ladder") q.set("view", "ladder");
   try { history.replaceState(null, "", `${location.pathname}?${q}`); } catch {}
 }
@@ -189,7 +202,7 @@ async function ask(event, scroll = !!event) {
   fillPaths();
   const job = c.name, path = level < SECOND_JOB ? null : $("path").value;
   try {
-    localStorage.setItem("ask", JSON.stringify({ job, path: path || wantPath, level, party, sort: view.sort, hide: view.hideEarly }));
+    localStorage.setItem("ask", JSON.stringify({ job, path: path || wantPath, level, party, sort: view.sort, hide: view.hideEarly, withNew: view.withNew }));
   } catch {}
   syncUrl();
   if (view.tab === "ladder") return showLadder(job, path, level, party, scroll);
@@ -200,7 +213,7 @@ async function ask(event, scroll = !!event) {
   if (scroll) $("results-section").scrollIntoView({ behavior: "smooth", block: "start" });
   let data;
   try {
-    const query = new URLSearchParams({ class: job, ...(path ? { path } : {}), level, party });
+    const query = new URLSearchParams({ class: job, ...(path ? { path } : {}), level, party, ...(view.withNew ? { new: "1" } : {}) });
     data = await getJson(`/api/stats?${query}`);
     if (data.error) throw new Error(data.error);
   } catch {
@@ -211,12 +224,13 @@ async function ask(event, scroll = !!event) {
   current = { data, level, party, job, path };
   const [lo, hi] = data.levels;
   $("results-sub").innerHTML = `For <b>${who}</b> at Lv ${level}, ${partyName(party)}. Each map uses players at Lv ${lo}–${hi},`
-    + ` and goes wider only if it needs more players (the row says so).` +
+    + ` and goes wider only if it needs more players (the row says so).` + (view.withNew ? " Includes new players." : "") +
     (data.newest_run ? ` Newest run shared ${esc(ago(data.newest_run))}.` : "");
   if (!data.maps.length && !data.early.length) {
     $("results").innerHTML = `<div class="note"><h3>No maps here yet</h3>
       A map shows up once a player around your level has shared a run there.
-      Help fill it in by sharing your own farming.<br>${JOIN}</div>`;
+      Help fill it in by sharing your own farming.<br>${JOIN}</div>${newPlayers || view.withNew ? `<div class="tools">${newBox()}</div>` : ""}`;
+    hookNew();
     return;
   }
   showChart(true);
@@ -264,17 +278,19 @@ const off = (lv) => { const d = lv - current.level; return d === 0 ? "your level
 
 function rowHtml(m, i, s, early, need, rank = i + 1) {
   const x = s.x, dots = m.dots || [], out = m.unusual || [], dl = m.dot_levels || [], ul = m.unusual_levels || [];
+  const dn = m.dot_new || [], un = m.unusual_new || [];
   const lo = x(m.exp_hr_low), hi = x(m.exp_hr_high), mid = x(m.exp_hr);
   const band = early || m.players < 2 ? "" : `<b class="band" style="left:${lo}%;width:${Math.max(0.8, hi - lo)}%;` +
     `transform-origin:${hi > lo ? ((mid - lo) / (hi - lo)) * 100 : 50}% 50%"></b>`;
   const edge = (d) => d > s.hi ? `<span class="edge" style="right:0">${compact(d)} ›</span>`
     : d < s.lo ? `<span class="edge" style="left:0">‹ ${compact(d)}</span>` : "";
   const lvAttr = (lv) => Number.isFinite(lv) ? ` data-lv="${Number(lv)}" data-b="${bucket(Number(lv))}"` : "";
-  const marks = dots.map((d, k) => `<i class="dot" style="left:${x(d)}%" data-v="${Number(d)}"${lvAttr(dl[k])}></i>`).join("") +
-    out.map((d, k) => `<i class="dot out" style="left:${x(d)}%" data-v="${Number(d)}"${lvAttr(ul[k])}></i>${edge(d)}`).join("");
+  const marks = dots.map((d, k) => `<i class="dot${dn[k] ? " fresh" : ""}" style="left:${x(d)}%" data-v="${Number(d)}"${lvAttr(dl[k])}></i>`).join("") +
+    out.map((d, k) => `<i class="dot out${un[k] ? " fresh" : ""}" style="left:${x(d)}%" data-v="${Number(d)}"${lvAttr(ul[k])}></i>${edge(d)}`).join("");
   const best = i === 0 && !early && !m.widened;
   const levels = m.levels ? `Lv ${Number(m.levels[0])}–${Number(m.levels[1])}` : "";
   const widened = m.widened ? `<span class="chip widen" title="Not enough players at your level, so this map uses players from a wider range of levels">wider range</span>` : "";
+  const fresh = m.new_players ? `<span class="chip fresh" title="${plural(m.new_players, "player")} here joined lately and don't count for everyone yet (a day and 4 runs)">includes ${plural(m.new_players, "new player")}</span>` : "";
   const pace = m.pct_hr === null || m.pct_hr === undefined ? ""
     : `<div class="pace" title="${Number(m.pct_hr)}% of a level per hour">≈ ${esc(perLevel(m.hours_per_level))} per level</div>`;
   const id = `${early ? "e" : "m"}${i}`;
@@ -282,7 +298,7 @@ function rowHtml(m, i, s, early, need, rank = i + 1) {
     <div class="rank">${early ? "" : rank}</div>
     <div class="info"><h3>${esc(m.map)}${best ? `<span class="tag">${esc(SORTS[view.sort][2])}</span>` : ""}</h3>
       <div class="meta">${plural(m.players, "player")} · ${hours(m.hours)}<span class="wide-only"> of farming</span></div>
-      <div class="meta">${levels}${widened ? " " + widened : ""}</div>
+      <div class="meta">${levels}${widened ? " " + widened : ""}${fresh ? " " + fresh : ""}</div>
       ${early ? `<span class="chip wait">Needs ${plural(need, "more player")}</span>` : spread(m)}
       <button class="open" type="button" aria-expanded="false" aria-controls="d-${id}">Details <i aria-hidden="true"></i></button></div>
     <div class="track" aria-hidden="true"><i class="base"></i>${s.ticks.map((t) => `<i class="grid" style="left:${x(t)}%"></i>`).join("")}
@@ -335,10 +351,11 @@ function showChart(animate = true) {
     <div class="tools">
       <label>Sort by <select id="sort">${Object.entries(SORTS).map(([k, v]) => `<option value="${k}"${k === view.sort ? " selected" : ""}>${esc(v[0])}</option>`).join("")}</select></label>
       ${data.early.length ? `<label class="chk"><input type="checkbox" id="hide-early"${view.hideEarly ? " checked" : ""}> Hide early data</label>` : ""}
+      ${newPlayers || view.withNew ? newBox() : ""}
     </div>
     <div class="chart-top">
       <div class="legend" aria-hidden="true"><span><i class="lg-dot"></i>One player</span><span><i class="lg-med"></i>Typical</span>
-        <span><i class="lg-band"></i>Middle half of players</span><span><i class="lg-out"></i>Left out (unusual)</span></div>
+        <span><i class="lg-band"></i>Middle half of players</span><span><i class="lg-out"></i>Left out (unusual)</span>${view.withNew ? `<span><i class="lg-dot lg-fresh"></i>New player</span>` : ""}</div>
       <div class="legend lv-legend" aria-hidden="true"><b>Dot colour = player's level</b>${BUCKETS.map((t, k) => `<span><i class="lg-dot" data-b="${k}"></i>${t}</span>`).join("")}</div>
       <small>${touch ? "Tap" : "Point at"} a dot for details</small>
     </div>
@@ -360,11 +377,12 @@ function showChart(animate = true) {
   if (animate) animateChart();
   $("sort").addEventListener("change", (e) => { view.sort = e.target.value; remember(); showChart(false); });
   $("hide-early")?.addEventListener("change", (e) => { view.hideEarly = e.target.checked; remember(); showChart(false); });
+  hookNew();
 }
 
 /** Keeps the sort and filter for next time, and in the address. */
 function remember() {
-  try { localStorage.setItem("ask", JSON.stringify({ ...saved(), sort: view.sort, hide: view.hideEarly })); } catch {}
+  try { localStorage.setItem("ask", JSON.stringify({ ...saved(), sort: view.sort, hide: view.hideEarly, withNew: view.withNew })); } catch {}
   syncUrl();
 }
 
@@ -420,7 +438,7 @@ async function showLadder(job, path, level, party, scroll) {
   if (scroll) $("results-section").scrollIntoView({ behavior: "smooth", block: "start" });
   let data;
   try {
-    const query = new URLSearchParams({ class: job, ...(path ? { path } : {}), party });
+    const query = new URLSearchParams({ class: job, ...(path ? { path } : {}), party, ...(view.withNew ? { new: "1" } : {}) });
     data = await getJson(`/api/ladder?${query}`);
     if (data.error) throw new Error(data.error);
   } catch {
@@ -428,15 +446,17 @@ async function showLadder(job, path, level, party, scroll) {
     return;
   }
   if (!data.bands.length) {
-    $("results").innerHTML = `<div class="note"><h3>No ladder yet</h3>A stage shows up once ${Number(data.min_players)} players have shared a map there.<br>${JOIN}</div>`;
+    $("results").innerHTML = `<div class="note"><h3>No ladder yet</h3>A stage shows up once ${Number(data.min_players)} players have shared a map there.<br>${JOIN}</div>${newPlayers || view.withNew ? `<div class="tools">${newBox()}</div>` : ""}`;
+    hookNew();
     return;
   }
-  $("results").innerHTML = `<div class="chart ladder">${data.bands.map((b) => {
+  $("results").innerHTML = `<div class="chart ladder">${newPlayers || view.withNew ? `<div class="tools">${newBox()}</div>` : ""}${data.bands.map((b) => {
     const me = level >= b.from && level <= b.to;
     return `<div class="stage${me ? " me" : ""}"><div class="lv">Lv ${Number(b.from)}–${Number(b.to)}${me ? "<small>you are here</small>" : ""}</div>
       <div class="picks">${b.maps.map((m, i) => `<button type="button" class="pick${i === 0 ? " top" : ""}" data-level="${Math.max(1, Number(b.from) + 2)}">
-        <b>${esc(m.map)}</b><span>${fmt(m.exp_hr)} EXP/hr · ${m.pct_hr === null ? "" : `${Number(m.pct_hr)}% a hour · `}${plural(m.players, "player")}</span></button>`).join("")}</div></div>`;
-  }).join("")}<div class="chart-foot">Each stage ranks maps for players in those 5 levels (3 players needed). ${JOIN.replace('class="more" ', "")}</div></div>`;
+        <b>${esc(m.map)}</b><span>${fmt(m.exp_hr)} EXP/hr · ${m.pct_hr === null ? "" : `${Number(m.pct_hr)}% a hour · `}${plural(m.players, "player")}${m.new_players ? ` (${m.new_players} new)` : ""}</span></button>`).join("")}</div></div>`;
+  }).join("")}<div class="chart-foot">Each stage ranks maps for players in those 5 levels (3 players needed).${view.withNew ? " Includes new players." : ""} ${JOIN.replace('class="more" ', "")}</div></div>`;
+  hookNew();
   $("results").querySelector(".stage.me")?.scrollIntoView({ block: "nearest" });
 }
 

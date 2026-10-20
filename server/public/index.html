@@ -163,6 +163,7 @@
   .lg-med { width: 3px; height: 14px; border-radius: 2px; background: var(--gold); }
   .lg-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dot); }
   .lg-out { width: 8px; height: 8px; border-radius: 50%; box-shadow: inset 0 0 0 1.5px var(--out); }
+  .lg-fresh { opacity: 0.5; }
   .chart-top small { font-size: 12.5px; color: var(--faint); }
   .row, .axis { display: grid; grid-template-columns: 32px minmax(150px, 230px) minmax(0, 1fr) 118px; gap: 0 22px;
     align-items: center; padding: 0 22px; }
@@ -195,6 +196,7 @@
   .dot { position: absolute; z-index: 1; width: 8px; height: 8px; margin: -4px 0 0 -4px; top: calc(50% + var(--y, 0px));
     border-radius: 50%; background: var(--dot); box-shadow: 0 0 0 1.5px var(--card); transition: transform 0.2s, background 0.2s; }
   .dot.out { background: var(--card); box-shadow: inset 0 0 0 1.5px var(--out); }
+  .dot.fresh { opacity: 0.5; }                        /* a new player (only with "Include new players"): faded */
   .dot.on { z-index: 2; transform: scale(1.7); background: var(--gold); }
   .dot.out.on { background: var(--card); }
   .edge { position: absolute; top: calc(50% - 25px); font-size: 11px; color: var(--out); white-space: nowrap; }
@@ -307,6 +309,7 @@
     border-radius: 8px; padding: 5px 10px; }
   .tools .chk { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
   .tools input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--gold); }
+  .chip.fresh { color: var(--dim); background: var(--card2); box-shadow: inset 0 0 0 1px var(--line); margin-top: 0; }
   .chip.widen { color: #9cc4ff; background: rgba(120, 170, 255, 0.1); box-shadow: inset 0 0 0 1px rgba(120, 170, 255, 0.28); margin-top: 0; }
   .meta .chip { vertical-align: 1px; }
   .pace { font-size: 12.5px; color: var(--dim); margin-top: 3px; white-space: nowrap; }
@@ -442,7 +445,7 @@
       <p class="sub">Real EXP/hr and mesos/hr for every map, for your class and level, solo or in a party. Every number is real farming, shared by players using the free <a href="#overlay">Maple Classic Exp Overlay</a>.</p>
       <div class="counts" id="counts">
         <div class="count"><b id="c-hours">–</b><span>hours shared</span></div>
-        <div class="count"><b id="c-players">–</b><span>players</span></div>
+        <div class="count"><b id="c-players">–</b><span id="c-players-l">players</span></div>
         <div class="count"><b id="c-maps">–</b><span>maps</span></div>
       </div>
     </div>
