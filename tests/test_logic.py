@@ -174,6 +174,13 @@ cfg = m.load_config()
 check(f"hotkeys from the settings file: kept if valid or off, else the default ({cfg['hotkeys']})",
       cfg["hotkeys"] == {"start": "Ctrl+Q", "reset": "", "skip": "Shift+3", "compact": "Shift+4"})
 check("a size or compact setting edited by hand can't break the window", cfg["ui_scale"] == 100 and cfg["compact"] is False)
+m.CONFIG_PATH.write_text(json.dumps({"compact_shape": "triangle", "seen_version": 5}))
+cfg = m.load_config()
+check("a compact shape that doesn't exist falls back to Square, and a damaged seen version to none",
+      cfg["compact_shape"] == "square" and cfg["seen_version"] == "")
+m.CONFIG_PATH.write_text(json.dumps({"compact_shape": "bar", "seen_version": "0.9.9-beta"}))
+cfg = m.load_config()
+check("a chosen compact shape and the last seen version are kept", cfg["compact_shape"] == "bar" and cfg["seen_version"] == "0.9.9-beta")
 check(f"the right OS backend is made for {sys.platform} ({type(m.PLATFORM).__name__})",
       type(m.PLATFORM).__name__ == {"win32": "WindowsPlatform", "darwin": "MacPlatform"}.get(sys.platform))
 try:

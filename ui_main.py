@@ -12,8 +12,12 @@ from ui_gfx import (GOLD_BOTTOM, GOLD_TOP, INK, TEXT, TEXT_DIM, TEXT_FAINT, UP, 
 W = 360                                   # the window's width, in logical pixels
 SIDE = 16
 INNER = W - 2 * SIDE
+# The compact shapes (see Strip): Square is the narrow card (the Hero in a smaller window); Wide and Bar are sideways.
+SHAPES = ("square", "wide", "bar")
+SHAPE_W = {"square": W, "wide": 560, "bar": 720}
 
 # state -> (dot colour, glows)
+STRIP_KEYS = ("rate", "pct", "level", "eta", "eta_time", "mesos", "tiles", "state", "state_text", "message")
 STATES = {"waiting": ("#6c7280", False), "ready": ("#ffcf4a", False), "tracking": ("#5fe39a", True),
           "paused": ("#ffb27a", False), "alert": ("#ff7a5c", True)}
 
@@ -462,6 +466,195 @@ class Message(tk.Label):
             self.configure(text=text, wraplength=wrap)
 
 
+class Strip(tk.Frame):
+    """The Wide and Bar compact shapes: the same numbers as the Square one, laid out sideways. Wide is a card with the
+    level bar on top and four numbers below it; Bar is one thin strip with three numbers and a slim bar under them.
+    Both carry their own Start/Pause, compact and settings buttons, because the main window's are hidden here."""
+
+    CARD = {"wide": (54, 112), "bar": (12, 72)}               # the card's top and height
+    STATS = ("EXP / HR", "LAST 5 MIN", "MESOS / HR", "NEXT LEVEL")
+
+    def __init__(self, parent, theme, cb, shape, bg=INK):
+        super().__init__(parent, bg=bg)
+        self.t, self.shape, self.cb, self.active = theme, shape, cb, False
+        self.W = SHAPE_W[shape]
+        self.top, self.card_h = self.CARD[shape]
+        g, wide = theme.gfx, shape == "wide"
+        self.CW = self.W - 2 * SIDE - (0 if wide else 124)    # the card's width (Bar keeps its buttons beside it, on the window's colour)
+        self.canvas = c = tk.Canvas(self, width=g.px(self.W), height=g.px(self.top + self.card_h + 6), bg=bg, highlightthickness=0, bd=0)
+        c.grid(row=0, column=0)
+        self.columnconfigure(0, minsize=g.px(self.W))
+        self._photos, self._gphotos, self._digits = {}, {}, []
+        self._start = None
+        self._m = dict(rate=None, pct=None, level=None, eta="", eta_time="", mesos="\u2014", tiles={}, state="waiting", state_text="")
+        x0, y0 = g.px(SIDE), g.px(self.top)
+        self._card = c.create_image(x0, y0, anchor="nw")
+        self._photos["card"] = g.photo(g.hero_panel(g.px(self.CW), g.px(self.card_h), 16))
+        c.itemconfigure(self._card, image=self._photos["card"])
+        dim, text = TEXT_DIM, TEXT
+        self._bar = c.create_image(0, 0, anchor="nw")
+        self._pct = c.create_text(0, 0, anchor="e", text="", fill=dim, font=theme.font("semibold", 12))
+        if wide:
+            self._level = c.create_text(x0 + g.px(18), y0 + g.px(24), anchor="w", text="", fill="#e9c15a", font=theme.font("bold", 13))
+            self._caps, self._vals = [], []
+            colw = self.CW / 4
+            c.create_line(x0 + g.px(14), y0 + g.px(46), x0 + g.px(self.CW - 14), y0 + g.px(46), fill="#232733")
+            for i, cap in enumerate(self.STATS):
+                x = x0 + g.px(colw * i + 18)
+                if i:
+                    c.create_line(x0 + g.px(colw * i), y0 + g.px(56), x0 + g.px(colw * i), y0 + g.px(102), fill="#232733")
+                self._caps.append(c.create_text(x, y0 + g.px(56), anchor="nw", text=cap, fill=dim, font=theme.font("semibold", 9)))
+                if i:
+                    self._vals.append(c.create_text(x, y0 + g.px(72), anchor="nw", text="\u2014", fill=text, font=theme.font("bold", 18)))
+            self.pill = Pill(c, theme, bg)
+            c.create_window(g.px(SIDE), g.px(27), anchor="w", window=self.pill)
+        else:
+            self._dot = c.create_image(0, 0, anchor="nw")
+            self._unit = c.create_text(0, y0 + g.px(28), anchor="w", text="EXP/hr", fill=dim, font=theme.font("semibold", 10))
+            self._mval = c.create_text(x0 + g.px(192), y0 + g.px(28), anchor="w", text="\u2014", fill=text, font=theme.font("bold", 17))
+            self._munit = c.create_text(0, y0 + g.px(28), anchor="w", text="mesos/hr", fill=dim, font=theme.font("semibold", 10))
+            self._eta = c.create_text(x0 + g.px(372), y0 + g.px(28), anchor="w", text="", fill="#e9c15a", font=theme.font("bold", 13))
+            self._div = [c.create_line(0, y0 + g.px(14), 0, y0 + g.px(42), fill="#232733") for _ in range(2)]
+            self.pill = None
+        # buttons, from the right: settings, compact (back to full), Start/Pause
+        mid = g.px(27) if wide else y0 + g.px(self.card_h / 2)
+        right = g.px(self.W - SIDE)
+        self.settings_btn = Button(c, theme, icon="gear", kind="ghost", width=34, height=34, radius=10, command=cb["settings"], tip="Settings", bg=bg)
+        self.compact_btn = Button(c, theme, icon="grow", kind="ghost", width=34, height=34, radius=10, command=cb["compact"], tip="Back to full size", bg=bg)
+        c.create_window(right - g.px(17), mid, anchor="center", window=self.settings_btn)
+        c.create_window(right - g.px(17 + 36), mid, anchor="center", window=self.compact_btn)
+        if wide:
+            self.start_btn = Button(c, theme, text="Start", icon="play", kind="primary", width=104, height=34, radius=11, size=12,
+                                    weight="bold", command=cb["start"], bg=bg)
+            c.create_window(right - g.px(17 + 36 + 8 + 52), mid, anchor="center", window=self.start_btn)
+        else:
+            self.start_btn = Button(c, theme, icon="play", kind="primary", width=34, height=34, radius=11, command=cb["start"],
+                                    tip="Start / Pause", bg=bg)
+            c.create_window(right - g.px(17 + 36 + 36 + 4), mid, anchor="center", window=self.start_btn)
+        self.message = Message(self, theme, bg)
+        self.message.grid(row=1, column=0, padx=g.px(SIDE + 2), pady=(g.px(2), g.px(10)), sticky="we")
+        self._wrap = g.px(self.CW - 6)
+
+    # ---- the numbers
+    def show(self, **m):
+        changed = {k for k, v in m.items() if self._m.get(k) != v}
+        if changed:
+            self._m.update({k: m[k] for k in changed})
+            if self.active:
+                self._paint(changed)
+
+    def activate(self, on):
+        self.active = on
+        if on:
+            if self._start:
+                self.set_start(*self._start)
+            self._paint(None)
+
+    def set_start(self, text, icon, kind):
+        self._start = (text, icon, kind)
+        if self.shape == "wide":
+            self.start_btn.set(text=text, icon=icon, kind=kind)
+        else:
+            self.start_btn.set(icon=icon, kind=kind)
+
+    def _number(self, text, live, size, x, baseline):
+        """EXP/hr as ready-made digits, like the Hero's. Returns where the number ends."""
+        g = self.t.gfx
+        style = ("extra", size, GOLD_TOP, GOLD_BOTTOM, "#ffb71f") if live else ("extra", size, "#4a505d", "#393e49", None)
+        for i, ch in enumerate(text):
+            img, adv, asc, pad = g.glyph(ch, *style)
+            key = (ch, live, size)
+            if key not in self._gphotos:
+                self._gphotos[key] = g.photo(img)
+            if i >= len(self._digits):
+                self._digits.append(self.canvas.create_image(0, 0, anchor="nw"))
+            self.canvas.itemconfigure(self._digits[i], image=self._gphotos[key], state="normal")
+            self.canvas.coords(self._digits[i], x - pad, baseline - asc)
+            x += adv
+        for item in self._digits[len(text):]:
+            self.canvas.itemconfigure(item, state="hidden")
+        return x
+
+    def _flow(self):
+        """Bar: the three numbers side by side, each starting where the one before it ends (so a long number or a
+        small Size never makes them touch), with a divider between them."""
+        g, c, m = self.t.gfx, self.canvas, self._m
+        x0, y0 = g.px(SIDE), g.px(self.top)
+        gap, y, y2 = g.px(14), y0 + g.px(28), y0 + g.px(31)
+        x = c.bbox(self._unit)[2] + gap
+        c.coords(self._div[0], x, y0 + g.px(14), x, y0 + g.px(42))
+        c.coords(self._mval, x + gap, y)
+        c.coords(self._munit, c.bbox(self._mval)[2] + g.px(6), y2)
+        x = c.bbox(self._munit)[2] + gap
+        c.coords(self._div[1], x, y0 + g.px(14), x, y0 + g.px(42))
+        c.itemconfigure(self._eta, text=m["eta"])
+        c.coords(self._eta, x + gap, y)
+        if c.bbox(self._eta)[2] > x0 + g.px(self.CW - 14):        # too long for the card: just the time
+            c.itemconfigure(self._eta, text=m["eta_time"] or "")
+
+    def _paint(self, changed):
+        g, m, c = self.t.gfx, self._m, self.canvas
+        everything = changed is None
+        wide = self.shape == "wide"
+        x0, y0 = g.px(SIDE), g.px(self.top)
+        live = bool(m["rate"])
+        if everything or "rate" in changed:
+            base = y0 + g.px(94 if wide else 38)
+            end = self._number(m["rate"] if live else "\u2014", live, 26, x0 + g.px(18 if wide else 36), base)
+            if not wide:
+                c.coords(self._unit, end + g.px(6), y0 + g.px(31))
+        if wide and (everything or "tiles" in changed or "mesos" in changed or "eta_time" in changed or "level" in changed):
+            vals = (m["tiles"].get("Last 5 min", "\u2014"), m["mesos"] or "\u2014", m["eta_time"] or "\u2014")
+            for item, value in zip(self._vals, vals):
+                c.itemconfigure(item, text=value)
+            lvl = m["level"]
+            c.itemconfigure(self._caps[3], text=f"TO LV {lvl + 1}" if lvl else "NEXT LEVEL")
+            c.itemconfigure(self._level, text=f"LV {lvl}" if lvl else "")
+        if not wide and (everything or "mesos" in changed or "eta" in changed or "pct" in changed):
+            c.itemconfigure(self._mval, text=m["mesos"] or "\u2014")
+            c.itemconfigure(self._eta, text=m["eta"])
+            pct = m["pct"]
+            c.itemconfigure(self._pct, text=f"{pct:.1f}%" if pct is not None else "")
+        if not wide and (everything or "rate" in changed or "mesos" in changed or "eta" in changed):
+            self._flow()
+        if everything or "pct" in changed:
+            frac = round((m["pct"] or 0) / 100 * 500) / 500
+            if wide:
+                left = x0 + g.px(18 + 52)
+                right = x0 + g.px(self.CW - 18 - 54)
+                self._photos["bar"] = g.photo(g.bar(right - left, g.px(8), frac, pad=g.px(6)))
+                c.itemconfigure(self._bar, image=self._photos["bar"])
+                c.coords(self._bar, left, y0 + g.px(14))
+                c.itemconfigure(self._pct, text=f"{m['pct']:.1f}%" if m["pct"] is not None else "")
+                c.coords(self._pct, x0 + g.px(self.CW - 18), y0 + g.px(24))
+            else:
+                w = g.px(self.CW - 36 - 50)
+                self._photos["bar"] = g.photo(g.bar(w, g.px(6), frac, pad=g.px(4)))
+                c.itemconfigure(self._bar, image=self._photos["bar"])
+                c.coords(self._bar, x0 + g.px(18), y0 + g.px(self.card_h - 26))
+                c.itemconfigure(self._pct, text=f"{m['pct']:.1f}%" if m["pct"] is not None else "")
+                c.coords(self._pct, x0 + g.px(self.CW - 18), y0 + g.px(self.card_h - 19))
+        if wide and (everything or "state" in changed or "state_text" in changed):
+            self.pill.set(m["state"], m["state_text"])
+        if not wide and (everything or "state" in changed):
+            color, glows = STATES[m["state"]]
+            d = g.px(8)
+            dot = Image.new("RGBA", (d * 3, d * 3), (0, 0, 0, 0))
+            if glows:
+                dot.alpha_composite(g.glow(d, d, d / g.s / 2, color, 3, 0.55, d))
+            ImageDraw.Draw(dot).ellipse((d, d, 2 * d - 1, 2 * d - 1), fill=rgb(color) + (255,))
+            self._photos["dot"] = g.photo(dot)
+            c.itemconfigure(self._dot, image=self._photos["dot"])
+            c.coords(self._dot, x0 + g.px(18) - d, y0 + g.px(28) - d * 1.5)
+        if everything or "message" in changed or "state" in changed:
+            self.message.set(m.get("message", ""), self._wrap)
+            # Bar has no room for a status line, so it shows one only when something needs attention
+            if wide or m["state"] in ("alert", "waiting"):
+                self.message.grid()
+            else:
+                self.message.grid_remove()
+
+
 class MainView(tk.Frame):
     """Everything in the main window, top to bottom."""
 
@@ -470,9 +663,9 @@ class MainView(tk.Frame):
         self.t, self.cb, g = theme, cb, theme.gfx
         self.columnconfigure(0, weight=1, minsize=g.px(W))
         pad = lambda a=0, b=0: (g.px(a), g.px(b))
-        self.compact = False
+        self.compact, self.shape, self.strips, self._last = False, "square", {}, {}
 
-        head = tk.Frame(self, bg=bg)
+        head = self.head = tk.Frame(self, bg=bg)
         head.grid(row=0, column=0, sticky="we", padx=g.px(SIDE), pady=pad(14, 10))
         head.columnconfigure(0, weight=1)
         self.pill = Pill(head, theme, bg)
@@ -508,7 +701,7 @@ class MainView(tk.Frame):
             self.details.grid_remove()
         self.more_btn.set(icon="up" if details else "down")
 
-        controls = tk.Frame(self, bg=bg)
+        controls = self.controls = tk.Frame(self, bg=bg)
         controls.grid(row=5, column=0, padx=g.px(SIDE - 8), pady=pad(0, 2), sticky="we")
         controls.columnconfigure(0, weight=1)
         self.start_btn = Button(controls, theme, text="Start", icon="play", kind="primary", width=INNER - 8 - 52 - 52, height=46,
@@ -547,6 +740,11 @@ class MainView(tk.Frame):
             self.pill.set(m["state"], m.get("state_text", ""))
         if "message" in m:
             self.message.set(m["message"], self.t.px(INNER - 6))
+        strip = {k: v for k, v in m.items() if k in STRIP_KEYS}
+        if strip:
+            self._last.update(strip)
+            for st in self.strips.values():
+                st.show(**strip)
 
     def _toggle_details(self):
         self.details_open = not self.details_open
@@ -555,8 +753,42 @@ class MainView(tk.Frame):
         if self.cb.get("details"):
             self.cb["details"](self.details_open)
 
-    def set_compact(self, on):
-        self.compact = on
+    def set_start(self, text, icon, kind):
+        """The Start/Pause button, here and on the sideways shapes."""
+        self.start_btn.set(text=text, icon=icon, kind=kind)
+        self._start = (text, icon, kind)
+        for st in self.strips.values():
+            st.set_start(text, icon, kind)
+
+    def _strip(self, shape):
+        if shape not in self.strips:
+            st = self.strips[shape] = Strip(self, self.t, self.cb, shape, self["bg"])
+            st.show(**self._last)
+            if getattr(self, "_start", None):
+                st.set_start(*self._start)
+        return self.strips[shape]
+
+    def set_compact(self, on, shape="square"):
+        """Compact mode in one of the shapes. Square is this window with fewer rows; Wide and Bar swap the whole
+        window for a sideways Strip."""
+        self.compact, self.shape = on, shape if on else "square"
+        sideways = on and shape in ("wide", "bar")
+        for st in self.strips.values():
+            st.activate(False)
+            st.grid_remove()
+        rows = [self.head, self.hero, self.controls, self.message]
+        if sideways:
+            for w in rows + self.foot_widgets:
+                w.grid_remove()
+            st = self._strip(shape)
+            st.grid(row=8, column=0)
+            self.columnconfigure(0, minsize=self.t.px(SHAPE_W[shape]))
+            st.activate(True)
+            self.compact_btn.set(icon="grow")
+            return
+        self.columnconfigure(0, minsize=self.t.px(W))
+        for w in rows:
+            w.grid()
         self.hero.set_compact(on)
         for w in self.foot_widgets:
             if on:

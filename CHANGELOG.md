@@ -2,6 +2,11 @@
 
 ## 0.9.10-beta
 
+**Compact shapes and what's new**
+- **Compact mode has three shapes:** **Square** (as before), **Wide** (longer sideways, with a row of four numbers like a streamer's tracker) and **Bar** (one thin strip). Pick one in Settings, under Compact shape. The full view and the log are unchanged.
+- **A new install picks its shape on the first launch**, from three small pictures.
+- **A short "What's new" window** shows once after you update to a new version (never on a first install).
+
 **New address**
 - The best-maps website is now at **mcwo.app** (opening the old maple-classic-exp-overlay.pages.dev page now sends you there; older overlays keep working on the old address for now). The overlay's Best maps button and sharing use the new one.
 

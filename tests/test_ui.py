@@ -218,6 +218,95 @@ check("compact mode shows mesos/hr under the number, and only there",
 app.set_compact(False)
 app._update_display()
 check("full mode doesn't show that line (it has the tile)", hero.itemcget(hero._mval, "state") == "hidden")
+
+# ---- the compact shapes: Square, Wide and Bar
+import ui_main  # noqa: E402
+t.exp, t.pct, t.req, t.gained, t.levels = 31204, 54.2, 57600, 412300, 2
+t.rate, t.rolling_rate, t.elapsed = (lambda: 72566.0), (lambda: 71900.0), (lambda: 5620.0)
+meso.value, meso.gained = 18449220, 41000
+app.level, app.session.on = 35, True
+meso.per_hour = lambda el: 28830.0
+app._state = lambda: ("tracking", "Tracking")
+shapes_ok, fits = True, True
+for scale in (60, 100, 200):
+    app.cfg["ui_scale"] = scale
+    app._apply_ui_scale()
+    for shape in m.SHAPES:
+        try:
+            app.set_shape(shape)
+            app.set_compact(True)
+            app._update_display()
+            root.update()
+            want = app.theme.px(ui_main.SHAPE_W[shape])
+            fits = fits and abs(app.view.winfo_reqwidth() - want) <= 4 and root.winfo_width() >= want - 4
+        except Exception as e:
+            print("   error at", scale, "%", shape, ":", type(e).__name__, e)
+            shapes_ok = False
+    app.set_compact(False)
+root.update()
+check("every compact shape draws at 60%, 100% and 200%", shapes_ok)
+check("...and each window is as wide as its shape says (Square 360, Wide 560, Bar 720)", fits)
+app.cfg["ui_scale"] = 100
+app._apply_ui_scale()
+app.set_shape("wide")
+app.set_compact(True)
+app._update_display()
+root.update()
+wide = app.view.strips["wide"]
+shown = [wide.canvas.itemcget(i, "text") for i in wide._vals]
+check("Wide shows last 5 min, mesos/hr and time to the next level", shown[0] == "71,900" and shown[1] and shown[2] not in ("", "\u2014"))
+check("...with the level to reach in its heading", wide.canvas.itemcget(wide._caps[3], "text") == "TO LV 36")
+check("Wide has no big hero or tiles on screen", not app.view.hero.winfo_ismapped() and not app.view.tiles_row.winfo_ismapped())
+app.set_shape("bar")
+app._update_display()
+root.update()
+bar = app.view.strips["bar"]
+check("Wide gives way to Bar when the shape changes in compact mode", bar.winfo_ismapped() and not wide.winfo_ismapped())
+check("Bar shows mesos/hr and the level to reach", bar.canvas.itemcget(bar._mval, "text") not in ("", "\u2014")
+      and "Lv 36" in bar.canvas.itemcget(bar._eta, "text"))
+check("Bar has no status line while tracking...", not bar.message.winfo_ismapped())
+app._state = lambda: ("alert", "Can't read the EXP bar")
+app.status.set("Can't find the EXP bar.")
+app._update_display()
+root.update()
+check("...but shows it when something needs attention", bar.message.winfo_ismapped())
+app._state = lambda: ("tracking", "Tracking")
+app.status.set("Tracking.")
+app._update_display()
+app._set_start("Pause")
+check("Start/Pause on the sideways shapes follows the real button", bar.start_btn.icon == "pause" and wide.start_btn.icon == "pause"
+      and wide.start_btn.text == "Pause")
+app._set_start("Resume")
+check("...and the shape made later starts in the right state", app.view.strips["bar"].start_btn.icon == "play")
+bar.compact_btn.command()
+root.update()
+check("the compact icon on a sideways shape goes back to full", not app.compact and app.view.head.winfo_ismapped()
+      and not bar.winfo_ismapped() and app.view.hero.winfo_ismapped())
+check("full mode is as wide as ever whichever shape is chosen", abs(app.view.winfo_reqwidth() - app.theme.px(ui_main.W)) <= 4)
+check("the shape is saved", json.loads((DATA / "config.json").read_text(encoding="utf-8"))["compact_shape"] == "bar")
+app.set_shape("square")
+app._set_start("Start")
+
+# first launch: a new install picks a shape, an update shows what's new, and each only once
+calls = []
+app._shape_picker = lambda then: calls.append("picker") or then()
+app._whats_new = lambda notes, then: calls.append("notes") or then()
+app._ask_to_share = lambda: calls.append("share")
+
+
+def first_run(fresh, seen):
+    calls.clear()
+    app._fresh, app.cfg["seen_version"] = fresh, seen
+    app._first_run()
+    return list(calls), app.cfg["seen_version"]
+
+
+check("a new install picks a compact shape, then gets the sharing question", first_run(True, "") == (["picker", "share"], m.VERSION))
+check("someone updating sees what's new once, then the sharing question", first_run(False, "0.9.9-beta") == (["notes", "share"], m.VERSION))
+check("an existing config from before this feature counts as an update", first_run(False, "") == (["notes", "share"], m.VERSION))
+check("the same version shows neither again", first_run(False, m.VERSION) == (["share"], m.VERSION))
+check("going back to an older version shows nothing and keeps what was seen", first_run(False, "0.9.99") == (["share"], "0.9.99"))
+check("what's new has a note for this version", bool(m.WHATS_NEW.get(m.VERSION)))
 picked = []
 selector = m.RegionSelector(root, picked.append)             # (it crashed on Windows in 0.9.7 and 0.9.8-beta)
 root.update()

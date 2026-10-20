@@ -53,7 +53,7 @@ from report import Health, Recent
 from ui_gfx import INK, TEXT_DIM
 from ui_kit import (ACCENT, ACCENT_SOFT, BAD, BG, DIM, FAINT, FG, GOOD, LINE, LIST_BG, LIST_BG2, LIST_PART,  # noqa: F401
                     ON_ACCENT, RAISED, RAISED_HI, SELECT, SURFACE, WARN, setup_ttk)
-from ui_main import Button, MainView, PopupMenu, Slider, Theme, Toggle
+from ui_main import SHAPES, Button, MainView, PopupMenu, Slider, Theme, Toggle
 
 # Everything that differs between Windows and macOS (finding the game window, screen scaling,
 # hotkeys...) is behind this one object: see platforms/.
@@ -91,7 +91,18 @@ SCAN_SECONDS = 4            # how often the whole window is checked for the inve
 OUTLINE_SECONDS = 8         # how often the (costly) search for a see-through mesos box may run
 DEFAULTS = {"gap_seconds": 15, "transparency": 0, "topmost": True,
             "check_updates": True, "skip_version": "", "ui_scale": 100, "compact": False, "hotkeys_on": True,
-            "details": False}
+            "details": False, "compact_shape": "square", "seen_version": ""}
+SHAPE_LABELS = {"square": "Square", "wide": "Wide", "bar": "Bar"}
+SHAPE_BLURBS = {"square": "The narrow card: the big number, the level bar and Start/Pause.",
+                "wide": "Longer sideways: the level bar on top and four numbers in a row.",
+                "bar": "One thin strip with the main numbers and a slim level bar."}
+# What's new, shown once after updating to a version (plain words, newest changes only). A version with no entry shows nothing.
+WHATS_NEW = {"0.9.10-beta": (
+    "Compact mode now comes in three shapes: Square, Wide and Bar. Pick one in Settings, under Compact shape.",
+    "Map names are matched to the game's own list, so one map is one line in your log.",
+    "If the minimap's name can't be seen, it pauses instead of carrying on under the old map.",
+    "Towns are no longer logged.",
+    "The best-maps website moved to mcwo.app, with a new look and an Include new players box.")}
 # Settings > Size, in %: only these, so the window can't get too small to read or use.
 UI_SCALES = (60, 70, 80, 90, 100, 110, 125, 150, 175, 200)
 MAX_TRANSPARENCY = 40       # %: more and the window can fade out of sight, with Settings in it
@@ -161,6 +172,8 @@ def load_config():
         if type(value) is not type(default) or (key == "gap_seconds" and not 1 <= value <= 3600):
             cfg[key] = default
     cfg["transparency"] = min(MAX_TRANSPARENCY, max(0, cfg["transparency"]))
+    if cfg["compact_shape"] not in SHAPES:
+        cfg["compact_shape"] = "square"
     if cfg["ui_scale"] not in UI_SCALES:
         cfg["ui_scale"] = 100
     keys = cfg.get("hotkeys") if isinstance(cfg.get("hotkeys"), dict) else {}
@@ -2718,6 +2731,7 @@ LOG_HINT = "Click a line to write a note about it. Right-click to copy, rename o
 class App:
     def __init__(self, root, templates):
         self.root = root
+        self._fresh = not CONFIG_PATH.exists()          # a first install: it picks a compact shape
         self.cfg = {**DEFAULTS, **load_config()}
         mode = self.cfg.get("mode", "window")
         self.reader = ScreenReader(templates, mode, self.cfg.get("region"))
@@ -2808,7 +2822,7 @@ class App:
         root.after(500, self._refresh)
         if self.cfg["check_updates"]:
             self.check_updates()                       # only now, when it starts
-        root.after(1500, self._ask_to_share)           # (asked once, the first time)
+        root.after(1500, self._first_run)              # (once: the compact shape or what's new, then the sharing question)
 
     # ---- the main window
     def _build_view(self):
@@ -2823,7 +2837,7 @@ class App:
         self.view = self.main = MainView(self.root, self.theme, callbacks, details=bool(self.cfg.get("details")))
         self.view.grid(row=0, column=0, sticky="n")
         if self.compact:
-            self.view.set_compact(True)
+            self.view.set_compact(True, self.cfg["compact_shape"])
         self._set_start(self._start_text)
         self.view.log_btn.set(kind="secondary" if self.log_open else "ghost")
         self.view.show(message=self.status.get())
@@ -2969,11 +2983,22 @@ class App:
         self.compact = self.cfg["compact"] = on
         if on and self.log_open:
             self.toggle_log(remember=False)                 # out of the way, but remembered
-        self.view.set_compact(on)
+        self.view.set_compact(on, self.cfg["compact_shape"])
         self._style_frame()
         if not on and self.cfg.get("log_open"):
             self.toggle_log(remember=False)
         else:
+            self.root.geometry("")
+        save_config(self.cfg)
+
+    def set_shape(self, shape):
+        """Settings > Compact shape: Square, Wide or Bar. Only compact mode looks different."""
+        if shape not in SHAPES:
+            return
+        self.cfg["compact_shape"] = shape
+        if self.compact:
+            self.view.set_compact(True, shape)
+            self._style_frame()
             self.root.geometry("")
         save_config(self.cfg)
 
@@ -3351,6 +3376,22 @@ class App:
                         command=lambda: nudge(1), bg=BG)
         bigger.pack(side="left")
         nudge(0)
+        shape_line = tk.Frame(body, bg=BG)
+        shape_line.pack(fill="x", pady=(px(14), 0))
+        tk.Label(shape_line, text="Compact shape", **text).pack(side="left")
+        shape_box = tk.Frame(shape_line, bg=BG)
+        shape_box.pack(side="right")
+        shape_btns = {}
+
+        def pick_shape(shape):
+            self.set_shape(shape)
+            for k, b in shape_btns.items():
+                b.set(kind="primary" if k == shape else "secondary")
+        for k in SHAPES:
+            shape_btns[k] = Button(shape_box, th, text=SHAPE_LABELS[k], width=64, height=34, radius=10, size=12, bg=BG,
+                                   kind="primary" if k == self.cfg["compact_shape"] else "secondary",
+                                   command=lambda k=k: pick_shape(k))
+            shape_btns[k].pack(side="left", padx=(px(6), 0))
         topmost = tk.BooleanVar(value=bool(self.cfg["topmost"]))
         self._switch(body, "Always on top of other windows", topmost).pack(anchor="w", pady=(px(14), 0))
 
@@ -3566,6 +3607,91 @@ class App:
         """The best-maps site, already showing the maps for this level, party size and class."""
         ask = {k: v for k, v in (("level", self.level), ("party", self.party), ("job", self.job)) if v}
         webbrowser.open(STATS_SITE + ("/?" + urllib.parse.urlencode(ask) if ask else ""))
+
+    def _first_run(self):
+        """Once per install or update: a new install picks its compact shape, an update shows what's new. The
+        sharing question comes after."""
+        seen = self.cfg.get("seen_version", "")
+        newer = not seen or version_key(VERSION) > version_key(seen)
+        if newer:
+            self.cfg["seen_version"] = VERSION                 # (first, so a crash in a window can't repeat it)
+            save_config(self.cfg)
+        if self._fresh and newer:
+            self._shape_picker(self._ask_to_share)
+        elif newer and WHATS_NEW.get(VERSION):
+            self._whats_new(WHATS_NEW[VERSION], self._ask_to_share)
+        else:
+            self._ask_to_share()
+
+    def _small_window(self, title, then):
+        """A window for the one-time messages: like the other dialogs, and `then` runs when it closes."""
+        th = self.theme
+        w = tk.Toplevel(self.root)
+        w.title(title)
+        w.configure(bg=BG, padx=th.px(26), pady=th.px(22))
+        w.resizable(False, False)
+        w.transient(self.root)
+        w.attributes("-topmost", bool(self.cfg["topmost"]))
+        for delay in (0, 150, 800):
+            w.after(delay, lambda: PLATFORM.style_window(w, INK, TEXT_DIM) if w.winfo_exists() else None)
+        w.bind("<Destroy>", lambda e: then and e.widget is w and self.root.after(100, then))
+        return w
+
+    def _shape_photo(self, shape, width):
+        """The picture of a compact shape in the picker (assets/shape_<name>.png), `width` logical pixels wide."""
+        try:
+            img = Image.open(ASSETS / f"shape_{shape}.png").convert("RGBA")
+            w = self.theme.px(width)
+            return ImageTk.PhotoImage(img.resize((w, max(1, round(img.height * w / img.width))), Image.LANCZOS), master=self.root)
+        except Exception:
+            return None
+
+    def _shape_picker(self, then):
+        """A new install chooses how compact mode looks. Closing the window keeps Square."""
+        th = self.theme
+        w = self._small_window("Choose a compact look", then)
+        tk.Label(w, text="Pick a compact look", bg=BG, fg=ACCENT, font=th.font("extra", 20)).pack(anchor="w")
+        tk.Label(w, text="Compact mode is the small version of the overlay (the compact icon, or Shift+4). "
+                         "Choose how it looks. You can change it any time in Settings.", bg=BG, fg=DIM,
+                 font=th.font("regular", 12), wraplength=th.px(500), justify="left").pack(anchor="w", pady=(2, th.px(14)))
+        widths = {"square": 150, "wide": 250, "bar": 300}
+
+        def choose(shape):
+            self.set_shape(shape)
+            w.destroy()
+        for shape in SHAPES:
+            card = tk.Frame(w, bg=LIST_BG, highlightthickness=1, highlightbackground=LINE)
+            card.pack(fill="x", pady=(0, th.px(10)))
+            photo = self._shape_photo(shape, widths[shape])
+            if photo:
+                pic = tk.Label(card, image=photo, bg=LIST_BG, cursor="hand2")
+                pic.image = photo
+                pic.pack(side="left", padx=th.px(12), pady=th.px(12))
+                pic.bind("<Button-1>", lambda e, s=shape: choose(s))
+            side = tk.Frame(card, bg=LIST_BG)
+            side.pack(side="left", fill="both", expand=True, padx=(0, th.px(12)), pady=th.px(12))
+            tk.Label(side, text=SHAPE_LABELS[shape], bg=LIST_BG, fg=FG, font=th.font("bold", 14)).pack(anchor="w")
+            tk.Label(side, text=SHAPE_BLURBS[shape], bg=LIST_BG, fg=DIM, font=th.font("regular", 11),
+                     wraplength=th.px(190), justify="left").pack(anchor="w", pady=(2, th.px(8)))
+            Button(side, th, text=f"Use {SHAPE_LABELS[shape]}", kind="primary" if shape == "square" else "secondary",
+                   width=120, height=34, radius=10, size=12, command=lambda s=shape: choose(s), bg=LIST_BG).pack(anchor="w")
+        w.update_idletasks()
+
+    def _whats_new(self, notes, then):
+        """After an update: a few plain lines on what changed. Shown once per version."""
+        th = self.theme
+        w = self._small_window("What's new", then)
+        tk.Label(w, text=f"What's new in v{VERSION.split('-')[0]}", bg=BG, fg=ACCENT, font=th.font("extra", 20)).pack(anchor="w")
+        tk.Label(w, text="Thanks for updating. Your log, notes and settings are kept.", bg=BG, fg=DIM,
+                 font=th.font("regular", 12)).pack(anchor="w", pady=(2, th.px(12)))
+        for line in notes:
+            row = tk.Frame(w, bg=BG)
+            row.pack(fill="x", pady=(0, th.px(6)))
+            tk.Label(row, text="\u2022", bg=BG, fg=ACCENT, font=th.font("bold", 12)).pack(side="left", anchor="n")
+            tk.Label(row, text=line, bg=BG, fg=FG, font=th.font("regular", 12), wraplength=th.px(430), justify="left").pack(
+                side="left", padx=(th.px(8), 0))
+        Button(w, th, text="Got it", kind="primary", width=110, height=40, radius=12, size=13, command=w.destroy,
+               bg=BG).pack(anchor="e", pady=(th.px(10), 0))
 
     def _ask_to_share(self):
         if "share_runs" in self.cfg:
@@ -3852,6 +3978,7 @@ class App:
             delta=(rolling / rate - 1) if rate and rolling else None,
             spark=list(self._trend), pct=shown[1] if shown else None,
             eta=f"Lv {level + 1} in {eta}" if level and eta else f"Lv {level}" if level else "",
+            level=level or None, eta_time=eta or "",
             mesos=fmt_num(m.per_hour(el)),
             tiles={"Last 5 min": fmt_num(rolling), "Mesos / hr": fmt_num(m.per_hour(el)), "Elapsed": fmt_dur(el)},
             details={"% / hr": f"{rate / t.req * 100:.2f}%" if rate and t.req else "\u2014",
@@ -3904,8 +4031,7 @@ class App:
     def _set_start(self, text):
         """The Start button: gold when pressing it starts something, quiet while it's running."""
         self._start_text = text
-        self.view.start_btn.set(text=text, icon="pause" if text == "Pause" else "play",
-                                kind="secondary" if text == "Pause" else "primary")
+        self.view.set_start(text, "pause" if text == "Pause" else "play", "secondary" if text == "Pause" else "primary")
 
     def reset(self):
         self.session.reset()

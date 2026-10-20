@@ -20,5 +20,7 @@
     "map": 210,
     "exp": 90
   },
-  "share_runs": false
+  "share_runs": false,
+  "compact_shape": "wide",
+  "seen_version": "0.9.10-beta"
 }

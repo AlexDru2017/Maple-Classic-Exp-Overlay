@@ -61,8 +61,18 @@ Within a few seconds it shows your level and how much EXP you have. The per-hour
 | **...** (More) | **Select area** lets you drag a box around the EXP numbers, if it ever can't find them (it then turns into **Follow game**, which goes back to finding them by itself). **View capture** shows exactly what it read from your screen. |
 | **Best maps** | Opens the [best-maps website](#best-maps-for-your-class), already showing maps for your level, party size and class |
 | **Log icon** | Opens and closes the log |
-| **Compact icon** | A much smaller window with just EXP/hr, when you'll level, the last 5 minutes, **mesos/hr** and Start/Pause, in the same window size. Click it again to bring everything back. Shift+4 or double-clicking the big number does the same. |
+| **Compact icon** | A much smaller window with the main numbers and Start/Pause, in the [shape](#compact-shapes) you chose. Click it again to bring everything back. Shift+4 or double-clicking the big number does the same. |
 | **Gear icon** | Settings |
+
+## Compact shapes
+
+Compact mode comes in three shapes. Your first launch asks which you want, and you can change it any time in Settings, under **Compact shape**. The full view and the log always look the same.
+
+![The three compact shapes: Square, Wide and Bar](docs/screenshot-compact.png)
+
+- **Square:** the narrow card, with the big EXP/hr number, mesos/hr, the level bar and Start/Pause.
+- **Wide:** longer sideways, with the level bar on top and four numbers in a row: EXP/hr, last 5 minutes, mesos/hr and the time to your next level.
+- **Bar:** one thin strip with EXP/hr, mesos/hr, the time to your next level and a slim level bar. It shows a status line only when something needs your attention.
 
 ## Hotkeys
 
@@ -104,6 +114,7 @@ Click the **log icon** (top left, next to the status pill) to open the log. It's
 - **Pause tracking after no EXP for...** How long you can go without EXP before it pauses by itself. This also restarts the log's 5-minute timer. The default is 15 seconds.
 - **Window transparency.** Makes the overlay see-through, up to 40%. (More and it could fade out of sight, with Settings in it.)
 - **Size.** Makes the text and the whole window smaller or bigger, from 60% to 200%. The smallest text stops at a readable size, so it never gets too small to read. It's sized for each screen, so a window moved to a screen with different Windows scaling (like a 5K and a 1440p screen) looks the same size on both.
+- **Compact shape.** Square, Wide or Bar: how compact mode looks. See [Compact shapes](#compact-shapes).
 - **Hotkeys.** Turn them on or off, and change them. See [Hotkeys](#hotkeys).
 - **Always on top of other windows.** Keeps the overlay above the game. It's on by default.
 - **Check for updates when it starts.** On by default. See [Updates](#updates).
