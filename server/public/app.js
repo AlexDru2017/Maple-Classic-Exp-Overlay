@@ -1,5 +1,17 @@
 // The page's script: the class picker, the best-maps chart, the latest-runs bar and a little motion.
 // (Its own file so the site can tell browsers to run no other scripts: see _headers.)
+
+// The site's old address sends people to the new one, keeping their choices (level, class...). Only the page is
+// moved: the old /api/ address keeps answering for overlays from before the move. Only the exact old host, so
+// preview deployments and a local test server are left alone.
+const OLD_HOST = "maple-classic-exp-overlay.pages.dev", NEW_SITE = "https://mcwo.app";
+function movedTo(loc) {
+  return loc.hostname === OLD_HOST ? NEW_SITE + loc.pathname + loc.search + loc.hash : null;
+}
+if (typeof location !== "undefined" && movedTo(location)) {
+  location.replace(movedTo(location));
+  throw new Error("moved to " + NEW_SITE);          // (stops this script: the page is being replaced)
+}
 const $ = (id) => document.getElementById(id);
 const fmt = (n) => (n === null || n === undefined) ? "?" : Math.round(n).toLocaleString("en-US");
 const short = (n) => n >= 1e6 ? (n / 1e6).toFixed(2) + "M" : n >= 1e5 ? Math.round(n / 1e3) + "k"

@@ -3,7 +3,7 @@
 ## 0.9.10-beta
 
 **New address**
-- The best-maps website is now at **mcwo.app** (the old address keeps working for now). The overlay's Best maps button and sharing use the new one.
+- The best-maps website is now at **mcwo.app** (opening the old maple-classic-exp-overlay.pages.dev page now sends you there; older overlays keep working on the old address for now). The overlay's Best maps button and sharing use the new one.
 
 **Cleaner map names**
 - A map's name is now put right against the game's own list of maps (from meowdb.com, thank you): OCR slips like "ist Accompaniment" for "1st Accompaniment" or "Boar Il" for "Boar II" become one map, in your log and on the best-maps site. A map that isn't on the list (an event map, a new map) is used as it was read.

@@ -27,6 +27,8 @@ jobs:
         run: python tests/test_logic.py
       - name: Map-name matching tests (the site's)
         run: node server/test_mapnames.mjs
+      - name: Old-address redirect test (the site's)
+        run: node server/test_redirect.mjs
       - name: Bug report tests
         run: python tests/test_report.py
       - name: Text-reading tests (Tesseract, when installed)
@@ -55,6 +57,8 @@ jobs:
         run: python tests/test_screen.py
       - name: Map-name matching tests (the site's)
         run: node server/test_mapnames.mjs
+      - name: Old-address redirect test (the site's)
+        run: node server/test_redirect.mjs
       - name: Bug report tests
         run: python tests/test_report.py
       - name: Text-reading tests (Tesseract, when installed)

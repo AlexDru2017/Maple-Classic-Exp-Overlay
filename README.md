@@ -51,17 +51,18 @@ You need Windows 10 or 11. It takes about 2 minutes, and you don't need to insta
 
 Within a few seconds it shows your level and how much EXP you have. The per-hour numbers fill in once you've gained a little EXP.
 
-| Button | What it does |
+| Control | What it does |
 |---|---|
+| **Status pill** (top left) | Says what it's doing: tracking, paused, or what's wrong (for example it can't find the EXP bar) |
 | **Start / Pause / Resume** | Starts tracking. **Pause** stops it until you press **Resume**. |
-| **Reset** | Starts a new session from zero, and looks for the minimap, inventory and party list again (handy after moving them around) |
-| **Don't log** | Keeps the current run out of the log, for example while you're testing a map or waiting for your party. Everything is still shown on screen. It turns itself off when you leave the map or stop getting EXP, so your next run is logged as usual. |
-| **Select area** | Lets you drag a box around the EXP numbers, if it ever can't find them. The button then turns into **Follow game**, which goes back to finding them by itself. |
-| **View capture** | Shows exactly what it read from your screen |
+| **Reset** (the round arrow) | Starts a new session from zero, and looks for the minimap, inventory and party list again (handy after moving them around) |
+| **Log this run** (switch) | Turn it off to keep the current run out of the log, for example while you're testing a map or waiting for your party. Everything is still shown on screen. It turns itself back on when you leave the map or stop getting EXP, so your next run is logged as usual. |
+| **Details** | Shows or hides the extra numbers (gained, current, mesos, elapsed) |
+| **...** (More) | **Select area** lets you drag a box around the EXP numbers, if it ever can't find them (it then turns into **Follow game**, which goes back to finding them by itself). **View capture** shows exactly what it read from your screen. |
 | **Best maps** | Opens the [best-maps website](#best-maps-for-your-class), already showing maps for your level, party size and class |
-| **⚙** | Settings |
-| **>** | Opens the log |
-| **Compact** | A much smaller window with just EXP/hr, when you'll level, the last 5 minutes, mesos/hr and Start/Pause. The button then says **Full**, to bring everything back. Shift+4 or double-clicking the big number does the same. |
+| **Log icon** | Opens and closes the log |
+| **Compact icon** | A much smaller window with just EXP/hr, when you'll level, the last 5 minutes, **mesos/hr** and Start/Pause, in the same window size. Click it again to bring everything back. Shift+4 or double-clicking the big number does the same. |
+| **Gear icon** | Settings |
 
 ## Hotkeys
 
@@ -71,14 +72,14 @@ They work while MapleStory (or the overlay) is the window in front, so you don't
 |---|---|
 | **Shift+1** | Start / Pause |
 | **Shift+2** | Reset |
-| **Shift+3** | Don't log |
+| **Shift+3** | Log this run on / off |
 | **Shift+4** | Compact / Full |
 
-The status line says what happened, for example "Shift+1: paused." While the hotkeys are on, those keys go to the overlay only, so Shift+1 won't type **!** in the game's chat. If that gets in your way, change them (or turn them off) in ⚙: click one, then press the keys you want. Backspace turns one off.
+The status line says what happened, for example "Shift+1: paused." While the hotkeys are on, those keys go to the overlay only, so Shift+1 won't type **!** in the game's chat. If that gets in your way, change them (or turn them off) in ⚙: click one, then press the keys you want (click it again, or press Esc, to cancel). Backspace turns one off.
 
 ## The log
 
-Click **>** at the top right of the overlay to open the log. It's the table on the right in the close-up picture above.
+Click the **log icon** (top left, next to the status pill) to open the log. It's the table on the right in the close-up picture above.
 
 - **After 5 minutes of non-stop farming**, it adds a line for that map, your level and your party size.
 - **Every 5 more minutes** it updates that line, so the numbers get more accurate the longer you farm.
@@ -87,7 +88,7 @@ Click **>** at the top right of the overlay to open the log. It's the table on t
 - **15-minute runs:** under the log it also counts toward 15 minutes of non-stop farming on one map with the same party size ("15-min run: 7 of 15 min"). A level-up doesn't stop it; a break, a new map or a new party size starts it over. Finished runs are saved separately and, if you said yes, shared with the [best-maps site](#best-maps-for-your-class).
 - **Greyed-out lines** were changed outside the overlay. Every line the overlay writes is sealed, so a line edited or added by hand is easy to spot, and it won't count toward the best-maps site. Deleting a line, or renaming a map in the overlay, is fine.
 - **Taking a break restarts the 5-minute timer.** A break means no EXP for 15 seconds (you can change this in ⚙). Changing maps or party size restarts it too.
-- **Don't want a run logged?** Press **Don't log**. It switches back on its own when that run ends.
+- **Don't want a run logged?** Turn off **Log this run**. It switches back on its own when that run ends.
 - **Solo** means just you. **4ppl** means a party of 4.
 - **?** under Mesos/hr means your inventory wasn't open.
 - **Right-click a line** to:
@@ -116,12 +117,16 @@ Click **>** at the top right of the overlay to open the log. It's the table on t
 **[mcwo.app](https://mcwo.app)** shows which maps give the most EXP/hr and mesos/hr for your class and level, solo or in a party, from real hours farmed by players. Click **Best maps** at the top of the overlay to open it, already filled in for you.
 
 - **Enter your level and whether you're solo or in a party, then pick your class and path.** Paths are named after their 4th job, like Night Lord or Bishop, and include the jobs before it (Shadower is Bandits, Chief Bandits and Shadowers). Under Lv 30 you're still 1st job, so Path is greyed out and you see what every player of your class gets.
-- **Around your level** means within 5 levels either way, and parties of any size count together, so maps fill in sooner.
+- **Around your level** starts at 3 levels either way. If a map doesn't have enough players that close, it widens to 5, then 8 levels, and the row says so ("wider range"). Parties of any size count together.
+- **Each map shows** its EXP/hr and mesos/hr, how many players and hours of farming it's based on, and about how long a level takes there (**% of a level per hour**). The dots on each line are players' typical runs, coloured by how their level compares to yours.
+- **Sort and filter** the list, open **Details** on a map (solo vs party, EXP/hr by level, the trend lately), or switch to the **Leveling ladder** to see which maps to use as you level. **Copy link** shares exactly what you're looking at.
+
+![The best-maps website, with a map's details open](docs/screenshot-site.png)
 
 - **It's built from 15-minute runs:** 15 minutes of non-stop farming on one map with the same party size. The log shows your progress ("15-min run: 7 of 15 min").
 - **Sharing is your choice.** The first time you start the overlay, it asks whether to share your runs. You can change it any time in ⚙.
 - **What's shared:** the map, your level, class and party size, the EXP and mesos you got, and a random ID for your copy of the overlay. Never your character's name.
-- **Keeping it honest:** the site uses the typical (median) run, counts each player once, leaves out runs far from what other players get there, and only ranks a map once 3 different players have farmed it (before that, it's shown greyed out as early data). Every player's typical run is a dot on the chart, so anything odd is easy to spot.
+- **Keeping it honest:** the site uses the typical (median) run, counts each player once, leaves out runs far from what other players get there, a new player's runs only count after 24 hours and 4 runs, and a map is only ranked once 3 different players have farmed it (before that, it's shown greyed out as early data). Every player's typical run is a dot on the chart, so anything odd is easy to spot.
 
 ## How accurate is it?
 
