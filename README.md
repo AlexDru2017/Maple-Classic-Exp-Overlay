@@ -1,6 +1,6 @@
 <h1><img src="docs/icon.png" width="40" align="top"> Maple Classic Exp Overlay</h1>
 
-**A free EXP tracker for MapleStory Classic World.** A small window sits next to the game and shows how fast you're leveling and making mesos, and the [best maps for your class](https://maple-classic-exp-overlay.pages.dev).
+**A free EXP tracker for MapleStory Classic World.** A small window sits next to the game and shows how fast you're leveling and making mesos, and the [best maps for your class](https://mcwo.app).
 
 **[Download it here](../../releases/latest)** · [How to install](#how-to-install)
 
@@ -113,7 +113,7 @@ Click **>** at the top right of the overlay to open the log. It's the table on t
 
 ## Best maps for your class
 
-**[maple-classic-exp-overlay.pages.dev](https://maple-classic-exp-overlay.pages.dev)** shows which maps give the most EXP/hr and mesos/hr for your class and level, solo or in a party, from real hours farmed by players. Click **Best maps** at the top of the overlay to open it, already filled in for you.
+**[mcwo.app](https://mcwo.app)** shows which maps give the most EXP/hr and mesos/hr for your class and level, solo or in a party, from real hours farmed by players. Click **Best maps** at the top of the overlay to open it, already filled in for you.
 
 - **Enter your level and whether you're solo or in a party, then pick your class and path.** Paths are named after their 4th job, like Night Lord or Bishop, and include the jobs before it (Shadower is Bandits, Chief Bandits and Shadowers). Under Lv 30 you're still 1st job, so Path is greyed out and you see what every player of your class gets.
 - **Around your level** means within 5 levels either way, and parties of any size count together, so maps fill in sooner.

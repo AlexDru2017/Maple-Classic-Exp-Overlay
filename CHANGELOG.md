@@ -2,6 +2,9 @@
 
 ## 0.9.10-beta
 
+**New address**
+- The best-maps website is now at **mcwo.app** (the old address keeps working for now). The overlay's Best maps button and sharing use the new one.
+
 **Cleaner map names**
 - A map's name is now put right against the game's own list of maps (from meowdb.com, thank you): OCR slips like "ist Accompaniment" for "1st Accompaniment" or "Boar Il" for "Boar II" become one map, in your log and on the best-maps site. A map that isn't on the list (an event map, a new map) is used as it was read.
 - **The minimap's name can't be seen** (hidden, covered): after 45 seconds the overlay pauses instead of carrying on under the map you were on before, and carries on when it can read the name again. (This is likely why a town like Perion could end up in people's logs.)
