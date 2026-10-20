@@ -238,7 +238,12 @@ for scale in (60, 100, 200):
             app._update_display()
             root.update()
             want = app.theme.px(ui_main.SHAPE_W[shape])
-            fits = fits and abs(app.view.winfo_reqwidth() - want) <= 4 and root.winfo_width() >= want - 4
+            room = min(want, root.winfo_screenwidth())      # a small screen (a CI machine) can't show a wider window
+            ok = abs(app.view.winfo_reqwidth() - want) <= 4 and root.winfo_width() >= room - 4
+            if not ok:
+                print("   width at", scale, "%", shape, ": want", want, "view", app.view.winfo_reqwidth(),
+                      "window", root.winfo_width(), "screen", root.winfo_screenwidth())
+            fits = fits and ok
         except Exception as e:
             print("   error at", scale, "%", shape, ":", type(e).__name__, e)
             shapes_ok = False
