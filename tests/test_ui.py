@@ -259,7 +259,12 @@ app._update_display()
 root.update()
 wide = app.view.strips["wide"]
 shown = [wide.canvas.itemcget(i, "text") for i in wide._vals]
-check("Wide shows last 5 min, mesos/hr and time to the next level", shown[0] == "71,900" and shown[1] and shown[2] not in ("", "\u2014"))
+app.view.show(tiles=None)                                  # (the main view copes with no tiles; so must the strips)
+wide.activate(True)
+check("Wide copes with no tiles at all", wide._vals and wide.canvas.itemcget(wide._vals[0], "text") == "—")
+app._update_display()
+root.update()
+check("Wide shows last 5 min, mesos/hr and time to the next level",shown[0] == "71,900" and shown[1] and shown[2] not in ("", "\u2014"))
 check("...with the level to reach in its heading", wide.canvas.itemcget(wide._caps[3], "text") == "TO LV 36")
 check("Wide has no big hero or tiles on screen", not app.view.hero.winfo_ismapped() and not app.view.tiles_row.winfo_ismapped())
 app.set_shape("bar")

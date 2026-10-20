@@ -101,7 +101,7 @@ SHAPE_BLURBS = {"square": "The narrow card: the big number, the level bar and St
 WHATS_NEW = {"0.9.10-beta": (
     "Compact mode now comes in three shapes: Square, Wide and Bar. Pick one in Settings, under Compact shape.",
     "Map names are matched to the game's own list, so one map is one line in your log.",
-    "If the minimap's name can't be seen, it pauses instead of carrying on under the old map.",
+    "If the minimap's name is covered, it tells you after a few seconds, keeps the log clean, and pauses if it stays hidden.",
     "Towns are no longer logged.",
     "The best-maps website moved to mcwo.app, with a new look and an Include new players box.")}
 # Settings > Size, in %: only these, so the window can't get too small to read or use.

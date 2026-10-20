@@ -604,7 +604,7 @@ class Strip(tk.Frame):
             if not wide:
                 c.coords(self._unit, end + g.px(6), y0 + g.px(31))
         if wide and (everything or "tiles" in changed or "mesos" in changed or "eta_time" in changed or "level" in changed):
-            vals = (m["tiles"].get("Last 5 min", "\u2014"), m["mesos"] or "\u2014", m["eta_time"] or "\u2014")
+            vals = ((m["tiles"] or {}).get("Last 5 min", "\u2014"), m["mesos"] or "\u2014", m["eta_time"] or "\u2014")
             for item, value in zip(self._vals, vals):
                 c.itemconfigure(item, text=value)
             lvl = m["level"]
