@@ -86,6 +86,7 @@ MESOS_PATH = DATA_DIR / "mesos_digits.npz"             # learned as you play...
 MESOS_START_PATH = ASSETS / "mesos_digits.npz"          # ...starting from these
 MESOS_BOX_PATH = ASSETS / "mesos_box.npz"
 MAPS_PATH = ASSETS / "maps.txt"            # the game's map names (see server/tools/make_maps.py)
+MAP_HIDDEN_SECONDS = 3      # the minimap's name unseen this long: say so, and hold back saving to the log
 MAP_BLIND_SECONDS = 45      # the minimap's name box unseen this long: the map may have changed unnoticed
 SCAN_SECONDS = 4            # how often the whole window is checked for the inventory and party
 OUTLINE_SECONDS = 8         # how often the (costly) search for a see-through mesos box may run
@@ -1594,8 +1595,9 @@ class ScreenReader:
         g, now = self.gh, time.monotonic()
         name = note = None
 
+        hidden = self.map_blind_seconds() > MAP_HIDDEN_SECONDS
         if self.map_box is None and now >= self.next_map_search:
-            self.next_map_search = now + 3
+            self.next_map_search = now + (1 if hidden else 3)     # looks harder for a name that has gone missing
             shot = self._hide_own(grab(sct, wx, wy, int(ww * 0.4), int(wh * 0.3)))
             box = find_map_box(shot[0], g) if shot else None
             if box:
@@ -1627,7 +1629,7 @@ class ScreenReader:
                         name = read_map_name(shot[0], g)
                         self.map_look = {"image": shot[0], "text": name}
                         self.map_unread = name is None
-                        self.next_map_read = now + 5          # if unreadable, try again later
+                        self.next_map_read = now + (2 if hidden else 5)   # if unreadable, try again later
                     self.map_print = picture
         return name, note
 
@@ -2377,7 +2379,7 @@ class AutoLog:
             if self.run:
                 self.run["exp"] += amount
 
-    def tick(self, now, map_name, level, party=1, mesos=None, job=None, map_read=None):
+    def tick(self, now, map_name, level, party=1, mesos=None, job=None, map_read=None, hidden=False):
         """Call regularly while tracking. mesos is (mesos gained so far, when last read) from
         the MesoTracker, or None; job is the class; map_read the map name exactly as read.
         Returns the entry when one was logged."""
@@ -2397,8 +2399,8 @@ class AutoLog:
         self.block_party = party
         if self.meso0 is None and mesos and mesos[1] >= self.start - 2:
             self.meso0 = mesos                               # mesos as the stretch began
-        self._run_tick(now, map_name, level, party, mesos, job, map_read)
-        if now - self.start < LOG_BLOCK:
+        self._run_tick(now, map_name, level, party, mesos, job, map_read, hidden)
+        if hidden or now - self.start < LOG_BLOCK:       # (hidden: the map may have changed, so nothing is saved yet)
             return None
         if self.block_exp <= 0:                              # nothing gained after all
             self.start, self.block_exp = now, 0
@@ -2412,7 +2414,7 @@ class AutoLog:
         self.meso0 = mesos if mesos and now - mesos[1] < 10 else None
         return entry
 
-    def _run_tick(self, now, map_name, level, party, mesos, job, map_read):
+    def _run_tick(self, now, map_name, level, party, mesos, job, map_read, hidden=False):
         r = self.run
         if r is None:
             return
@@ -2430,7 +2432,7 @@ class AutoLog:
         r["level"] = level
         if r["meso0"] is None and mesos and mesos[1] >= r["start"] - 2:
             r["meso0"] = mesos
-        if now - r["start"] < RUN_SECONDS:
+        if hidden or now - r["start"] < RUN_SECONDS:
             return
         meso_gain = meso_seconds = 0
         if r["meso0"] and mesos and mesos[1] > r["meso0"][1]:
@@ -2438,7 +2440,7 @@ class AutoLog:
         if r["exp"] > 0:
             self._add_run(r, now - r["start"], meso_gain, meso_seconds)
         self.run = {"start": now, "exp": 0, "map": None}     # straight on into the next run
-        self._run_tick(now, map_name, level, party, mesos, job, map_read)
+        self._run_tick(now, map_name, level, party, mesos, job, map_read, hidden)
 
     def run_progress(self, now):
         """Seconds into the 15-minute run going on, or None."""
@@ -2756,6 +2758,7 @@ class App:
         self._sharing, self._next_share = False, 0.0       # sending runs to the site
         self.job = None                     # the class, from the status bar
         self.map_read = None                # the map name exactly as read
+        self.map_hidden, self.map_back_at = False, None     # the minimap's name out of sight for a few seconds
         self.found_at = None                # when the EXP bar was first read for this level
         self.level_up_at = None
         self.died_at = None
@@ -3851,6 +3854,11 @@ class App:
             self.session.map_seen(self.map_name)
             self._after_pause_check(waiting)
         self.in_town = is_town(self.map_name)
+        hidden = self._name_hidden()
+        if hidden != self.map_hidden:
+            self.map_hidden = hidden
+            if not hidden:
+                self.map_back_at = now          # (says "back" for a few seconds)
         if (self.session.on and self.map_name and self.reader.mode == "window" and tesseract_ok
                 and self.reader.map_blind_seconds() > MAP_BLIND_SECONDS):
             self.session.map_blind()
@@ -3876,6 +3884,11 @@ class App:
             status = r.where
         if self.in_town:
             status += "\nIn a town: nothing is logged here."
+        if self.map_hidden and self.tracker.running:
+            status += (f"\nCan't see the minimap's name. Still tracking; it pauses if this lasts "
+                       f"{MAP_BLIND_SECONDS} seconds.")
+        elif self.map_back_at and now - self.map_back_at < 6 and self.session.on:
+            status += "\nThe minimap's name is back."
         if self.note:
             status += f"\n{self.note}"
         self.status.set(status)
@@ -3915,13 +3928,19 @@ class App:
             return "Paused. Press Resume to carry on."
         return "Ready. Press Start when you begin farming."
 
+    def _name_hidden(self):
+        """True while tracking and the minimap's name hasn't been seen for a few seconds."""
+        return bool(self.session.on and self.map_name and self.reader.mode == "window" and tesseract_ok
+                    and self.reader.map_blind_seconds() > MAP_HIDDEN_SECONDS)
+
     def _log_tick(self, now):
         if not self.tracker.running or self.skip_log or self.in_town:
             return
         m = self.meso
         mesos = (m.gained, m.seen_at) if m.value is not None and now - m.seen_at <= 30 else None
         runs = len(self.autolog.runs)
-        entry = self.autolog.tick(now, self.map_name, self.level, self.party, mesos, self.job, self.map_read)
+        entry = self.autolog.tick(now, self.map_name, self.level, self.party, mesos, self.job, self.map_read,
+                                  hidden=self.map_hidden)
         if len(self.autolog.runs) > runs:
             self.share_runs()                          # a run just finished
         if entry:

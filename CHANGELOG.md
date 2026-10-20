@@ -1,5 +1,12 @@
 # Changelog
 
+## Next
+
+**When the minimap's name is covered**
+- After 3 seconds without the minimap's name, the status line says so ("Can't see the minimap's name. Still tracking...") and says when it is back. A short cover changes nothing in your run; it still pauses after 45 seconds.
+- While the name is hidden, nothing new is saved to the log. If the name comes back on the same map, the hidden time counts. If it comes back on a different map, the stretch that was in progress is dropped (stretches already saved stay as they were), so the new map's EXP is never saved under the old map.
+- It looks for a missing name every second (was every 3), and retries an unreadable one every 2 seconds (was 5).
+
 ## 0.9.10-beta
 
 **Compact shapes and what's new**

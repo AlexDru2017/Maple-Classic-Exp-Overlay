@@ -27,7 +27,7 @@ def new_log():
     return m.AutoLog(15, folder / "log.json", folder / "log.txt"), folder / "log.json"
 
 
-def farm(log, t0, seconds, party=1, map_name="Rocky Road II", level=27, every=3, gap_at=None, gap=0, job=None):
+def farm(log, t0, seconds, party=1, map_name="Rocky Road II", level=27, every=3, gap_at=None, gap=0, job=None, hidden=False):
     """100 EXP every `every` seconds (optionally with a pause); returns (end time, logs written)."""
     t, nxt, logged = t0, t0, []
     while t < t0 + seconds:
@@ -36,7 +36,7 @@ def farm(log, t0, seconds, party=1, map_name="Rocky Road II", level=27, every=3,
             if not paused:
                 log.gain(t, 100)
             nxt = t + every
-        entry = log.tick(t, map_name, level, party, None, job)
+        entry = log.tick(t, map_name, level, party, None, job, hidden=hidden)
         if entry:
             logged.append(round(t - t0))
         t += 0.5
@@ -44,6 +44,36 @@ def farm(log, t0, seconds, party=1, map_name="Rocky Road II", level=27, every=3,
 
 
 # ---- the log
+# ---- the minimap's name is hidden: nothing is saved under a map name that may be stale
+log, _ = new_log()
+t, _ = farm(log, 0, 290)
+t, due = farm(log, t, 50, hidden=True)                       # the 5-minute mark falls inside the hidden stretch
+t, _ = farm(log, t, 10, map_name="The Swamp of Despair I")   # the name is back: a different map
+check("a stretch that comes due while the name is hidden isn't saved under the old map",
+      not due and not log.entries and log.start is not None and log.block_map == "The Swamp of Despair I")
+
+log, _ = new_log()
+t, _ = farm(log, 0, 290)
+t, due = farm(log, t, 50, hidden=True)
+t, later = farm(log, t, 10)                                  # the name is back: the same map
+check("...on the same map it is saved once the name is back, and the hidden time counts",
+      not due and later and len(log.entries) == 1 and log.entries[0]["seconds"] >= 335
+      and log.entries[0]["map"] == "Rocky Road II")
+
+log, _ = new_log()
+t, _ = farm(log, 0, 880)                                     # two 5-minute stretches are saved on the way
+n = len(log.entries)
+t, due = farm(log, t, 40, hidden=True)                       # the 15-minute run comes due while hidden
+t, _ = farm(log, t, 10, map_name="The Swamp of Despair I")
+check("a 15-minute run that comes due while the name is hidden isn't saved if the map turns out different",
+      n == 1 and not log.runs)
+
+log, _ = new_log()
+t, _ = farm(log, 0, 880)
+t, _ = farm(log, t, 40, hidden=True)
+t, _ = farm(log, t, 10)
+check("...but on the same map it is saved once the name is back", len(log.runs) == 1 and log.runs[0]["map"] == "Rocky Road II")
+
 log, path = new_log()
 _, logged = farm(log, 0, 660)
 check(f"logs after 5 min of non-stop EXP, then updates at 10 min ({logged})", logged == [300, 600])
