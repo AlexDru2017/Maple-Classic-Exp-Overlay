@@ -15,6 +15,7 @@
 - **EXP per hour**, for your whole session and for the last 5 minutes
 - **How long until your next level**, right under your EXP/hr (for example "Lv 31 in 36 min")
 - **Mesos per hour**, read from your inventory
+- **Net mesos per hour**, which takes off what your potions cost (see [Net mesos and potions](#net-mesos-and-potions))
 - **A log of every map you farm**: your EXP/hr and mesos/hr there, at which level and class, solo or in a party
 
 You don't type anything in. It reads all of this from your game screen by itself.
@@ -47,7 +48,8 @@ You need Windows 10 or 11. It takes about 2 minutes, and you don't need to insta
 4. **Press Start** and play normally. You only need to press it once:
    - It **pauses by itself** when you get no EXP for 15 seconds or leave the map, and carries on at your next EXP gain. Paused time doesn't count, so EXP/hr only covers your farming.
    - On a different map, the numbers start from zero for that map.
-5. **Want mesos tracked?** Keep your inventory open, on any tab.
+5. **Want mesos tracked?** Open your inventory (any tab) when you start, and now and then while you play. It doesn't have to stay open. If the overlay asks you to open it, do. Mesos you spend or move at a shop, storage or trade are left out, so only mesos you pick up count.
+6. **Want net mesos?** Keep the potions you use on the quick-slot bar. See [Net mesos and potions](#net-mesos-and-potions).
 
 Within a few seconds it shows your level and how much EXP you have. The per-hour numbers fill in once you've gained a little EXP.
 
@@ -95,12 +97,13 @@ Click the **log icon** (top left, next to the status pill) to open the log. It's
 - **Every 5 more minutes** it updates that line, so the numbers get more accurate the longer you farm.
 - **Time** shows how long a line is based on. It grows by 5 minutes with each update.
 - **Class** is read from the status bar (never your character's name). Different classes get separate lines.
-- **15-minute runs:** under the log it also counts toward 15 minutes of non-stop farming on one map with the same party size ("15-min run: 7 of 15 min"). A level-up doesn't stop it; a break, a new map or a new party size starts it over. Finished runs are saved separately and, if you said yes, shared with the [best-maps site](#best-maps-for-your-class).
+- **15-minute runs:** under the log it also counts toward 15 minutes of non-stop farming on one map with the same party size ("15-min run: 7 of 15 min"). A level-up doesn't stop it; a break, a new map or a new party size starts it over. Finished runs are saved separately and, if you said yes, shared with the [best-maps site](#best-maps-for-your-class) (only clean ones, see there).
 - **Greyed-out lines** were changed outside the overlay. Every line the overlay writes is sealed, so a line edited or added by hand is easy to spot, and it won't count toward the best-maps site. Deleting a line, or renaming a map in the overlay, is fine.
 - **Taking a break restarts the 5-minute timer.** A break means no EXP for 15 seconds (you can change this in ⚙). Changing maps or party size restarts it too.
 - **Don't want a run logged?** Turn off **Log this run**. It switches back on its own when that run ends.
 - **Solo** means just you. **4ppl** means a party of 4.
-- **?** under Mesos/hr means your inventory wasn't open.
+- **?** under Mesos/hr means your inventory wasn't looked at.
+- **Net/hr** is mesos/hr minus your potion cost, when potions are counted.
 - **Right-click a line** to:
   - **Copy line**, to paste it into Discord or anywhere else
   - **Rename map**, if it read the name wrong (it remembers the fix for next time)
@@ -115,6 +118,7 @@ Click the **log icon** (top left, next to the status pill) to open the log. It's
 - **Window transparency.** Makes the overlay see-through, up to 40%. (More and it could fade out of sight, with Settings in it.)
 - **Size.** Makes the text and the whole window smaller or bigger, from 60% to 200%. The smallest text stops at a readable size, so it never gets too small to read. It's sized for each screen, so a window moved to a screen with different Windows scaling (like a 5K and a 1440p screen) looks the same size on both.
 - **Compact shape.** Square, Wide or Bar: how compact mode looks. See [Compact shapes](#compact-shapes).
+- **Potions.** Turn net mesos and potion counting on or off, and type your own prices under **Prices**. See [Net mesos and potions](#net-mesos-and-potions).
 - **Hotkeys.** Turn them on or off, and change them. See [Hotkeys](#hotkeys).
 - **Always on top of other windows.** Keeps the overlay above the game. It's on by default.
 - **Check for updates when it starts.** On by default. See [Updates](#updates).
@@ -122,6 +126,17 @@ Click the **log icon** (top left, next to the status pill) to open the log. It's
 - **Open data folder.** Opens the folder where your log and settings are saved.
 - **Check for updates.** Checks right now.
 - **Report a bug.** See below.
+
+## Net mesos and potions
+
+Mesos/hr is what you pick up. **Net mesos/hr** takes off what the potions you drink cost, so you can see which map really pays. Example: 300,000 mesos/hr, minus 16,600 in potions (200 Red Potions x 50 + 30 Blue Potions x 220) = **283,400 net mesos/hr**.
+
+- **Put the potions you use on the quick-slot bar** (the hotkey slots at the bottom right of the game) so the overlay can see their counts. When a count goes down, that's one used. Potions only in your inventory window aren't seen.
+- **It counts only while tracking.** Paused or in town, nothing counts. Picking up or buying more potions is never counted as using them.
+- **Prices are the NPC shop prices.** Potions no NPC sells count as free until you type what you pay, in ⚙ under **Settings > Potions > Prices**. You can change shop prices there too.
+- **Don't want it?** Switch it off under **Settings > Potions**. Nothing is counted and no net is shown.
+- **Your potion data never leaves your PC.** It isn't sent to the best-maps website.
+- **Mesos/hr leaves out shop, storage and trade changes,** and your inventory doesn't have to stay open: open it at the start, now and then, and when the overlay asks (for example after a trip to town).
 
 ## Best maps for your class
 
@@ -135,9 +150,10 @@ Click the **log icon** (top left, next to the status pill) to open the log. It's
 
 ![The best-maps website, with a map's details open](docs/screenshot-site.png)
 
-- **It's built from 15-minute runs:** 15 minutes of non-stop farming on one map with the same party size. The log shows your progress ("15-min run: 7 of 15 min").
+- **It's built from clean 15-minute runs:** 15 minutes of non-stop farming on one map with the same party size. The log shows your progress ("15-min run: 7 of 15 min"). For the site, 15 seconds without EXP ends a run (whatever your log's setting), and a run where a shop, storage or trade window was open is never shared.
+- **Mesos only when they can be trusted:** a run is sent with mesos only if you looked at your inventory at the start and within 30 seconds after the end. Otherwise it is sent with EXP only. If you pause right after a run, the overlay may ask you to open the inventory.
 - **Sharing is your choice.** The first time you start the overlay, it asks whether to share your runs. You can change it any time in ⚙.
-- **What's shared:** the map, your level, class and party size, the EXP and mesos you got, and a random ID for your copy of the overlay. Never your character's name.
+- **What's shared:** the map, your level, class and party size, the EXP and mesos you got (EXP only if the mesos couldn't be trusted), and a random ID for your copy of the overlay. Never your character's name, and never anything about potions.
 - **Keeping it honest:** the site uses the typical (median) run, counts each player once, leaves out runs far from what other players get there, a new player's runs only count after 24 hours and 4 runs, and a map is only ranked once 3 different players have farmed it (before that, it's shown greyed out as early data). Every player's typical run is a dot on the chart, so anything odd is easy to spot.
 
 ## How accurate is it?
@@ -188,8 +204,9 @@ Every version is tested against thousands of misread numbers, and against real s
 
 - **Your log, your notes and your settings stay on your PC**, in `%APPDATA%\MapleEXP` (`~/Library/Application Support/MapleEXP` on a Mac). Notes are part of your log file: they are never sent anywhere, and the overlay's tests check that.
 - **A copy of your log is kept for each day** (the last 7 days), in the `backups` folder next to it, so if anything ever goes wrong there's a recent one. To go back to one, close the overlay and copy it over `exp_log.json`.
+- **Potions stay here too.** Your potion counts, prices and costs are never sent anywhere.
 - **The update check** (on by default, can be turned off in ⚙) asks GitHub for the newest version and what's new in it. Nothing about you is sent.
-- **15-minute runs are only shared if you said yes.** Each one is the map, when you farmed it, your level, class and party size, the EXP and mesos you got, the overlay's version, and a random ID made by your copy of the overlay. Never your character's name, your game account or your Windows user name.
+- **15-minute runs are only shared if you said yes.** Each one is the map, when you farmed it, your level, class and party size, the EXP and mesos you got (EXP only if the mesos couldn't be trusted), the overlay's version, and a random ID made by your copy of the overlay. Never your character's name, your game account or your Windows user name.
 - **The website keeps** those runs. To limit spam it also keeps a scrambled code made from your internet address with a secret key, which changes every day and can't be turned back into the address. Your address itself isn't kept.
 - **Bug reports** only go to GitHub if you click Submit there yourself.
 

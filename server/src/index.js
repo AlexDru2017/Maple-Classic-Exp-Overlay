@@ -44,6 +44,11 @@ const MAX_PER_IP_DAY = 400;
 const MAX_INSTALLS_PER_IP_DAY = 6;  // copies of the overlay sharing from one connection a day (a party)
 const MAX_BODY = 200_000;           // bytes in one post (50 runs are about 25,000)
 const DAYS_BACK = 60;               // how old a run can be when it's sent (and up to 2 days ahead)
+const RECENT_DAYS = 60;             // the map figures and the ladder use runs received this recently
+// Overlays older than MESOS_VERSION counted mesos at shops and trades: from MESOS_RULE_FROM (UTC, "" = not yet)
+// their runs are taken with EXP only. Mesos already stored stay.
+const MESOS_VERSION = "0.9.11";
+const MESOS_RULE_FROM = "2026-10-29T00:00:00Z";      // one week after the 0.9.11-beta release
 // How long answers are kept (see cached()): new runs show up on the site within a few minutes.
 const EDGE_SECONDS = 60;            // in Cloudflare's cache, where the visitor is
 const KEEP = { stats: 120, latest: 120, options: 600, ladder: 21600 };   // (the ladder changes slowly, and it reads a lot)   // in the database, for everyone
@@ -201,8 +206,9 @@ export function checkRun(r, now = Date.now()) {
   if (expHr > 5e6 || !expPossible(levelStart, levelEnd, exp)) return { why: "impossible EXP for those levels" };
   const cap = pctCap(levelStart), pct = pctPerHour({ exp_hr: expHr, level_start: levelStart, level_end: levelEnd });
   if (cap && pct > cap) return { why: "impossible EXP for that level" };
-  // Mesos/hr only when the mesos were seen for at least 10 minutes of the run.
-  const mesosHr = mesosSeconds >= 600 ? Math.max(0, mesos) / mesosSeconds * 3600 : null;
+  // Mesos/hr only when the mesos were seen for at least 10 minutes of the run, and nothing about them is odd.
+  const trusted = mesos >= 0 && mesosSeconds <= seconds && !oldMesos(r.version, now);
+  const mesosHr = trusted && mesosSeconds >= 600 ? mesos / mesosSeconds * 3600 : null;
   if (mesosHr !== null && mesosHr > MAX_MESOS_HR) return { why: "impossible mesos/hr" };
   return {
     run: {
@@ -522,6 +528,22 @@ export function pctPerHour(r) {
 
 const soloOf = (r) => r.party === 1;
 
+/** [0, 9, 11] for "0.9.11-beta"; [] when it isn't a version. */
+const versionKey = (v) => (typeof v === "string" && v.match(/^\d+(\.\d+)*/)?.[0].split(".").map(Number)) || [];
+
+function olderThan(a, b) {
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) < (b[i] || 0);
+  }
+  return false;
+}
+
+/** A run from an overlay that counted shop and trade mesos, received once that rule is on. */
+const oldMesos = (version, now) => MESOS_RULE_FROM !== "" && now >= Date.parse(MESOS_RULE_FROM)
+  && olderThan(versionKey(version), versionKey(MESOS_VERSION));
+
+const recentCutoff = (now) => new Date(now - RECENT_DAYS * 864e5).toISOString();
+
 /**
  * The best maps for a class and level. Each map's numbers come from the players at the fewest
  * levels either side of yours (RADII: 3, then 5, then 8) that give it MIN_PLAYERS players, so a
@@ -536,8 +558,8 @@ async function findMaps(env, name, path, jobs, level, party, now, withNew = fals
             (i.runs >= ?${n + 5} AND i.first_seen <= ?${n + 6}) AS confirmed
      FROM runs r JOIN installs i ON i.install = r.install
      WHERE ${VETTED(n + 3, n + 4)} AND r.job IN (${jobs.map((_, i) => `?${i + 3}`).join(", ")})
-       AND r.level_start BETWEEN ?1 AND ?2`
-  ).bind(level - widest, level + widest, ...jobs, v.runs, v.cutoff, real.runs, real.cutoff).all();
+       AND r.level_start BETWEEN ?1 AND ?2 AND r.received >= ?${n + 7}`
+  ).bind(level - widest, level + widest, ...jobs, v.runs, v.cutoff, real.runs, real.cutoff, recentCutoff(now)).all();
   const rows = onlyListed(results).map((r) => ({ ...r, pct_hr: pctPerHour(r) }));
   const mine = rows.filter((r) => (party === "solo") === soloOf(r));
   const theirs = rows.filter((r) => (party === "solo") !== soloOf(r));
@@ -622,9 +644,9 @@ async function getLadder(url, env, ctx, now) {
               (i.runs >= ?${n + 4} AND i.first_seen <= ?${n + 5}) AS confirmed
        FROM runs r JOIN installs i ON i.install = r.install
        WHERE ${VETTED(n + 2, n + 3)} AND r.job IN (${jobs.map((_, i) => `?${i + 2}`).join(", ")})
-         AND r.party ${party === "solo" ? "= 1" : ">= 2"}
+         AND r.party ${party === "solo" ? "= 1" : ">= 2"} AND r.received >= ?${n + 6}
        ORDER BY r.received DESC LIMIT ?1`
-    ).bind(LADDER_ROWS, ...jobs, v.runs, v.cutoff, real.runs, real.cutoff).all();
+    ).bind(LADDER_ROWS, ...jobs, v.runs, v.cutoff, real.runs, real.cutoff, recentCutoff(now)).all();
     const bands = new Map();
     for (const r of onlyListed(results)) {
       const from = Math.floor(r.level_start / LADDER_BAND) * LADDER_BAND;
@@ -679,8 +701,9 @@ async function getLatest(env, now) {
   const { results: others } = maps.length ? await env.DB.prepare(
     `SELECT r.install, r.map, r.level_start, r.party, r.exp_hr FROM runs r JOIN installs i ON i.install = r.install
      WHERE ${VETTED(maps.length + 3, maps.length + 4)} AND r.map IN (${maps.map((_, i) => `?${i + 3}`).join(", ")})
-       AND r.level_start BETWEEN ?1 AND ?2`
-  ).bind(Math.min(...levels) - LEVEL_WINDOW, Math.max(...levels) + LEVEL_WINDOW, ...maps, v.runs, v.cutoff).all() : { results: [] };
+       AND r.level_start BETWEEN ?1 AND ?2 AND r.received >= ?${maps.length + 5}`
+  ).bind(Math.min(...levels) - LEVEL_WINDOW, Math.max(...levels) + LEVEL_WINDOW, ...maps, v.runs, v.cutoff,
+         recentCutoff(now)).all() : { results: [] };
   const usual = (r) => {
     const like = others.filter((o) => o.map === r.map && (o.party >= 2) === (r.party >= 2) &&
       Math.abs(o.level_start - r.level_start) <= LEVEL_WINDOW);

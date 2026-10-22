@@ -17,7 +17,7 @@ SHAPES = ("square", "wide", "bar")
 SHAPE_W = {"square": W, "wide": 560, "bar": 720}
 
 # state -> (dot colour, glows)
-STRIP_KEYS = ("rate", "pct", "level", "eta", "eta_time", "mesos", "tiles", "state", "state_text", "message")
+STRIP_KEYS = ("rate", "pct", "level", "eta", "eta_time", "mesos", "net", "tiles", "state", "state_text", "message")
 STATES = {"waiting": ("#6c7280", False), "ready": ("#ffcf4a", False), "tracking": ("#5fe39a", True),
           "paused": ("#ffb27a", False), "alert": ("#ff7a5c", True)}
 
@@ -259,8 +259,9 @@ class Hero(tk.Canvas):
         # compact mode has no tiles, so mesos/hr sits under the number (value, then its unit)
         self._mval = self.create_text(0, 0, anchor="nw", text="", fill=TEXT, font=theme.font("bold", 12), state="hidden")
         self._munit = self.create_text(0, 0, anchor="nw", text="mesos / hr", fill=TEXT_DIM, font=theme.font("semibold", 10), state="hidden")
+        self._nval = self.create_text(0, 0, anchor="nw", text="", fill=STATES["tracking"][0], font=theme.font("bold", 12), state="hidden")
         self._photos, self._chip_text = {}, None
-        self._m = dict(rate=None, delta=None, spark=(), pct=None, eta="", chip=None, mesos="")
+        self._m = dict(rate=None, delta=None, spark=(), pct=None, eta="", chip=None, mesos="", net="")
         self._layout()
         self.redraw(everything=True)
 
@@ -324,13 +325,17 @@ class Hero(tk.Canvas):
             self.itemconfigure(self._spark, image=self._photos["spark"], state="normal")
         elif every and self.compact:
             self.itemconfigure(self._spark, state="hidden")
-        if every or "mesos" in changed:
+        if every or "mesos" in changed or "net" in changed:
             show = self.compact and bool(m["mesos"])
             self.itemconfigure(self._mval, text=m["mesos"], state="normal" if show else "hidden")
             self.itemconfigure(self._munit, state="normal" if show else "hidden")
             if show:
                 bbox = self.bbox(self._mval)
                 self.coords(self._munit, bbox[2] + g.px(6), g.px(96) + g.px(2))
+                if m["net"]:                        # net mesos/hr, after the mesos/hr
+                    self.coords(self._nval, self.bbox(self._munit)[2] + g.px(10), g.px(96))
+            self.itemconfigure(self._nval, text=f"\u00b7  net {m['net']}" if m["net"] else "",
+                               state="normal" if show and m["net"] else "hidden")
         if every or "pct" in changed:
             frac = round((m["pct"] or 0) / 100 * 500) / 500          # (in steps you can't see, so the picture is reused)
             self._photos["bar"] = g.photo(g.bar(g.px(INNER - 36), g.px(8), frac, pad=g.px(6) // 1))
@@ -361,6 +366,9 @@ class Hero(tk.Canvas):
                 self.coords(self._chip_t, g.px(INNER - 14) - w / 2, g.px(24))
 
 
+TILE_SHORT = {"Last 5 min": "5 min", "Mesos / hr": "Mesos", "Net / hr": "Net"}      # for tiles too narrow for the full label
+
+
 class Tile(tk.Canvas):
     """A small panel with one number."""
 
@@ -370,7 +378,9 @@ class Tile(tk.Canvas):
         super().__init__(parent, width=g.px(width), height=g.px(62), bg=bg, highlightthickness=0, bd=0)
         self._photo = g.photo(g.panel(g.px(width), g.px(62), 13, "#191c25", "#13151b", 0.09))
         self.create_image(0, 0, anchor="nw", image=self._photo)
-        self.create_text(g.px(13), g.px(12), anchor="nw", text=label.upper(), fill=TEXT_DIM, font=theme.font("semibold", 9))
+        cap = self.create_text(g.px(13), g.px(12), anchor="nw", text=label.upper(), fill=TEXT_DIM, font=theme.font("semibold", 9))
+        if self.bbox(cap)[2] > g.px(width) - g.px(6) and label in TILE_SHORT:      # a narrow tile (small Size): the short label
+            self.itemconfigure(cap, text=TILE_SHORT[label].upper())
         self._v = self.create_text(g.px(13), g.px(29), anchor="nw", text="—", fill=TEXT, font=theme.font("bold", 17))
 
     def set(self, value):
@@ -380,6 +390,11 @@ class Tile(tk.Canvas):
                 font = self.t.font("bold", size)
                 if font.measure(value) <= room:
                     break
+            else:                                              # still too long (a narrow tile): 99,999,999 becomes 100.0M
+                digits = value.replace(",", "")
+                if digits.lstrip("-").isdigit() and abs(int(digits)) >= 10000:
+                    n = int(digits)
+                    value = f"{n / 1e6:.1f}M" if abs(n) >= 999_500 else f"{n / 1e3:.0f}k"
             self.itemconfigure(self._v, text=value, font=font)
 
 
@@ -486,7 +501,7 @@ class Strip(tk.Frame):
         self.columnconfigure(0, minsize=g.px(self.W))
         self._photos, self._gphotos, self._digits = {}, {}, []
         self._start = None
-        self._m = dict(rate=None, pct=None, level=None, eta="", eta_time="", mesos="\u2014", tiles={}, state="waiting", state_text="")
+        self._m = dict(rate=None, pct=None, level=None, eta="", eta_time="", mesos="\u2014", net="", tiles={}, state="waiting", state_text="")
         x0, y0 = g.px(SIDE), g.px(self.top)
         self._card = c.create_image(x0, y0, anchor="nw")
         self._photos["card"] = g.photo(g.hero_panel(g.px(self.CW), g.px(self.card_h), 16))
@@ -506,6 +521,8 @@ class Strip(tk.Frame):
                 self._caps.append(c.create_text(x, y0 + g.px(56), anchor="nw", text=cap, fill=dim, font=theme.font("semibold", 9)))
                 if i:
                     self._vals.append(c.create_text(x, y0 + g.px(72), anchor="nw", text="\u2014", fill=text, font=theme.font("bold", 18)))
+            self._net = c.create_text(x0 + g.px(colw * 2 + 18), y0 + g.px(94), anchor="nw", text="", fill=STATES["tracking"][0],
+                                      font=theme.font("semibold", 10))
             self.pill = Pill(c, theme, bg)
             c.create_window(g.px(SIDE), g.px(27), anchor="w", window=self.pill)
         else:
@@ -514,6 +531,7 @@ class Strip(tk.Frame):
             self._mval = c.create_text(x0 + g.px(192), y0 + g.px(28), anchor="w", text="\u2014", fill=text, font=theme.font("bold", 17))
             self._munit = c.create_text(0, y0 + g.px(28), anchor="w", text="mesos/hr", fill=dim, font=theme.font("semibold", 10))
             self._eta = c.create_text(x0 + g.px(372), y0 + g.px(28), anchor="w", text="", fill="#e9c15a", font=theme.font("bold", 13))
+            self._net = c.create_text(0, y0 + g.px(31), anchor="w", text="", fill=STATES["tracking"][0], font=theme.font("semibold", 10))
             self._div = [c.create_line(0, y0 + g.px(14), 0, y0 + g.px(42), fill="#232733") for _ in range(2)]
             self.pill = None
         # buttons, from the right: settings, compact (back to full), Start/Pause
@@ -585,7 +603,14 @@ class Strip(tk.Frame):
         c.coords(self._div[0], x, y0 + g.px(14), x, y0 + g.px(42))
         c.coords(self._mval, x + gap, y)
         c.coords(self._munit, c.bbox(self._mval)[2] + g.px(6), y2)
-        x = c.bbox(self._munit)[2] + gap
+        x = c.bbox(self._munit)[2]
+        if m["net"]:                                              # net mesos/hr, right after the mesos/hr
+            c.itemconfigure(self._net, text=f"net {m['net']}")
+            c.coords(self._net, x + g.px(8), y2)
+            x = c.bbox(self._net)[2]
+        else:
+            c.itemconfigure(self._net, text="")
+        x += gap
         c.coords(self._div[1], x, y0 + g.px(14), x, y0 + g.px(42))
         c.itemconfigure(self._eta, text=m["eta"])
         c.coords(self._eta, x + gap, y)
@@ -603,6 +628,8 @@ class Strip(tk.Frame):
             end = self._number(m["rate"] if live else "\u2014", live, 26, x0 + g.px(18 if wide else 36), base)
             if not wide:
                 c.coords(self._unit, end + g.px(6), y0 + g.px(31))
+        if wide and (everything or "net" in changed):
+            c.itemconfigure(self._net, text=f"net {m['net']}" if m["net"] else "")
         if wide and (everything or "tiles" in changed or "mesos" in changed or "eta_time" in changed or "level" in changed):
             vals = ((m["tiles"] or {}).get("Last 5 min", "\u2014"), m["mesos"] or "\u2014", m["eta_time"] or "\u2014")
             for item, value in zip(self._vals, vals):
@@ -615,7 +642,7 @@ class Strip(tk.Frame):
             c.itemconfigure(self._eta, text=m["eta"])
             pct = m["pct"]
             c.itemconfigure(self._pct, text=f"{pct:.1f}%" if pct is not None else "")
-        if not wide and (everything or "rate" in changed or "mesos" in changed or "eta" in changed):
+        if not wide and (everything or "rate" in changed or "mesos" in changed or "eta" in changed or "net" in changed):
             self._flow()
         if everything or "pct" in changed:
             frac = round((m["pct"] or 0) / 100 * 500) / 500
@@ -684,9 +711,9 @@ class MainView(tk.Frame):
 
         self.tiles_row = tk.Frame(self, bg=bg)
         self.tiles_row.grid(row=2, column=0, padx=g.px(SIDE), pady=pad(0, 6), sticky="we")
-        tw = (INNER - 16) // 3
+        tw = (INNER - 24) // 4
         self.tiles = {}
-        for i, name in enumerate(("Last 5 min", "Mesos / hr", "Elapsed")):
+        for i, name in enumerate(("Last 5 min", "Mesos / hr", "Net / hr", "Elapsed")):
             t = Tile(self.tiles_row, theme, name, tw, bg)
             t.grid(row=0, column=i, padx=(0 if i == 0 else g.px(8), 0))
             self.tiles[name] = t
@@ -695,7 +722,7 @@ class MainView(tk.Frame):
                                size=12, weight="semibold", command=self._toggle_details, bg=bg)
         self.more_btn.grid(row=3, column=0, padx=g.px(SIDE), pady=pad(0, 4))
         self.details_open = details
-        self.details = Details(self, theme, ("% / hr", "Gained", "Current", "Mesos", "Mesos / 5 min"), bg)
+        self.details = Details(self, theme, ("% / hr", "Gained", "Current", "Mesos", "Mesos / 5 min", "Potion cost", "Net mesos / hr", "Left out"), bg)
         self.details.grid(row=4, column=0, padx=g.px(SIDE), pady=pad(0, 8))
         if not details:
             self.details.grid_remove()
@@ -727,7 +754,7 @@ class MainView(tk.Frame):
     # ---- showing things
     def show(self, **m):
         """rate, delta, spark, pct, eta (hero); tiles, details (dicts); state, state_text, message."""
-        hero = {k: m[k] for k in ("rate", "delta", "spark", "pct", "eta", "mesos") if k in m}
+        hero = {k: m[k] for k in ("rate", "delta", "spark", "pct", "eta", "mesos", "net") if k in m}
         if "spark" in hero:
             hero["spark"] = tuple(hero["spark"])
         if hero:

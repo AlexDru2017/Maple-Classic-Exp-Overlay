@@ -510,5 +510,81 @@ call("/api/runs", {"install": hostile, "runs": [run(t, 50000, level=60, map_name
 body = json.dumps(call("/api/stats?class=Thief&path=Shadower&level=60&party=solo", later=25))
 check("a name with HTML in it has its angle brackets removed", "<img" not in body and "<script" not in body)
 
+# ---- mesos the server can't trust are stored without mesos/hr (EXP still counts)
+import re
+from datetime import datetime, timezone
+
+source = open(os.path.join(HERE, "src", "index.js"), encoding="utf-8").read()
+RULE_FROM = re.search(r'const MESOS_RULE_FROM = "([^"]*)"', source).group(1)
+MESOS_VERSION = re.search(r'const MESOS_VERSION = "([^"]*)"', source).group(1)
+
+
+def when(hours_ahead, minute=0):
+    """A start time `hours_ahead` hours from now (UTC), as the overlay writes it."""
+    t = datetime.now(timezone.utc) + timedelta(hours=hours_ahead, minutes=minute)
+    return t.strftime("%Y-%m-%dT%H:%M")
+
+
+def stored(hours_ahead, minute, who, **kw):
+    """Sends one run (as if `hours_ahead` hours from now) and returns its (mesos_hr, exp_hr) as stored."""
+    started = when(hours_ahead - 1, minute)
+    r = call("/api/runs", {"install": who, "runs": [dict(run(started, 50000), **kw)]}, later=hours_ahead)
+    rows = sql(f"SELECT mesos_hr, exp_hr FROM runs WHERE install = '{who}' AND started = '{started}'")
+    return (rows[0]["mesos_hr"], rows[0]["exp_hr"]) if r.get("received") == 1 and rows else ("not stored", r)
+
+
+who = install()
+mesos_hr, exp_hr = stored(48, 0, who)
+check(f"an ordinary run keeps its mesos/hr ({mesos_hr})", mesos_hr is not None and abs(mesos_hr - 30000) < 10)
+mesos_hr, exp_hr = stored(48, 15, who, mesos=-5000)
+check(f"negative mesos: no mesos/hr, the EXP still counts ({mesos_hr}, {exp_hr})", mesos_hr is None and exp_hr > 0)
+mesos_hr, exp_hr = stored(48, 30, who, mesos_seconds=1200)
+check(f"more mesos seconds than run seconds: no mesos/hr ({mesos_hr})", mesos_hr is None and exp_hr > 0)
+mesos_hr, _ = stored(48, 45, who, mesos=0, mesos_seconds=0)
+check("an EXP-only run has no mesos/hr", mesos_hr is None)
+if RULE_FROM:
+    rule = datetime.fromisoformat(RULE_FROM.replace("Z", "+00:00"))
+    to_rule = (rule - datetime.now(timezone.utc)).total_seconds() / 3600
+    old = install()
+    before, _ = stored(to_rule - 24, 0, old, version="0.9.10-beta")
+    check(f"before {RULE_FROM[:10]}, an older overlay's mesos still count ({before})", before is not None)
+    after, exp_hr = stored(to_rule + 24, 0, old, version="0.9.10-beta")
+    check(f"from then on, an overlay older than {MESOS_VERSION} gives no mesos/hr ({after}), its EXP still counts",
+          after is None and exp_hr > 0)
+    current, _ = stored(to_rule + 24, 15, old, version=f"{MESOS_VERSION}-beta")
+    newer, _ = stored(to_rule + 24, 30, old, version="1.0.0")
+    unknown, _ = stored(to_rule + 24, 45, old, version="?")
+    check(f"...{MESOS_VERSION} and newer keep theirs ({current}, {newer}), an unknown version doesn't ({unknown})",
+          current is not None and newer is not None and unknown is None)
+else:
+    print("(skipped: MESOS_RULE_FROM isn't set)")
+
+
+def players_at(map_name, level, hours_ahead, job="Fighter", n=3, **kw):
+    for _ in range(n):
+        call("/api/runs", {"install": install(), "runs": [dict(run(when(hours_ahead - 6, 15 * i), 45000, level=level,
+                                                                  map_name=map_name, job=job), **kw) for i in range(4)]},
+             later=hours_ahead)
+
+
+# EXP-only runs stay out of the mesos averages
+players_at("Ant Tunnel III", 44, 49)
+players_at("Ant Tunnel III", 44, 49, mesos=0, mesos_seconds=0)
+d = call("/api/stats?class=Warrior&path=Hero&level=44&party=solo", later=49 + 25)
+m = {x["map"]: x for x in d["maps"]}.get("Ant Tunnel III", {})
+check(f"players without mesos don't pull the map's mesos/hr down ({m.get('mesos_hr')}, {m.get('players')} players)",
+      m.get("players") == 6 and m.get("mesos_hr") is not None and abs(m["mesos_hr"] - 30000) < 100)
+
+# the map figures and the ladder use the last 60 days only
+players_at("The Burnt Land I", 38, -62 * 24, job="Page")
+players_at("The Burnt Land II", 38, 49, job="Page")
+d = call("/api/stats?class=Warrior&path=Paladin&level=38&party=solo", later=49 + 25)
+names = {x["map"] for x in d["maps"] + d["early"]}
+check(f"runs received over 60 days ago are left out of the maps ({sorted(names)})",
+      "The Burnt Land II" in names and "The Burnt Land I" not in names)
+ladder = call("/api/ladder?class=Warrior&path=Paladin&party=solo", later=49 + 25)
+names = {mm["map"] for b in ladder.get("bands", []) for mm in b["maps"]}
+check(f"...and out of the ladder ({sorted(names)})", "The Burnt Land II" in names and "The Burnt Land I" not in names)
+
 print("\nALL PASSED" if not failures else f"\n{failures} FAILED")
 sys.exit(1 if failures else 0)

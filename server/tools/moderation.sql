@@ -49,3 +49,12 @@ DELETE FROM runs WHERE install = 'PASTE_ID';
 SELECT r.map, r.first_seen, COUNT(DISTINCT p.install) AS players FROM map_review r JOIN map_players p ON p.map = r.map GROUP BY r.map ORDER BY players DESC LIMIT 50;
 --     A real new map: add its name to server/tools/make_maps.py's EXTRA list and rerun it (then deploy). Junk: nothing to do,
 --     it never shows (3 players on 2 days are needed). To remove its runs: DELETE FROM runs WHERE map = 'PASTE_MAP';
+
+-- 11. SUSPICIOUS MESOS already stored (read-only; decide on any cleanup separately). Old overlays counted mesos at shops
+--     and trades, and a misread can give a wild number. Since 0.9.11 the server stores such runs without mesos/hr.
+--  a. NEGATIVE MESOS (stored with 0 mesos/hr before 0.9.11, which pulled map figures down):
+SELECT install, map, level_start, ROUND(mesos) AS mesos, ROUND(mesos_seconds) AS mesos_seconds, ROUND(mesos_hr) AS mesos_hr, version, received FROM runs WHERE mesos < 0 ORDER BY received DESC LIMIT 50;
+--  b. MORE MESOS SECONDS THAN RUN SECONDS (can't happen in a real run):
+SELECT install, map, level_start, ROUND(seconds) AS seconds, ROUND(mesos_seconds) AS mesos_seconds, ROUND(mesos_hr) AS mesos_hr, version, received FROM runs WHERE mesos_seconds > seconds ORDER BY received DESC LIMIT 50;
+--  c. MESOS/HR OVER 3x THE MAP'S MEDIAN (maps with 5+ runs with mesos; all levels together), most extreme first:
+WITH m AS (SELECT map, mesos_hr, ROW_NUMBER() OVER (PARTITION BY map ORDER BY mesos_hr) AS k, COUNT(*) OVER (PARTITION BY map) AS n FROM runs WHERE mesos_hr IS NOT NULL), med AS (SELECT map, AVG(mesos_hr) AS median, MAX(n) AS n FROM m WHERE k IN ((n + 1) / 2, (n + 2) / 2) GROUP BY map) SELECT r.install, r.map, r.level_start, ROUND(r.mesos_hr) AS mesos_hr, ROUND(med.median) AS map_median, med.n AS map_runs, r.version, r.received FROM runs r JOIN med ON med.map = r.map WHERE med.n >= 5 AND med.median > 0 AND r.mesos_hr > 3 * med.median ORDER BY r.mesos_hr / med.median DESC LIMIT 50;

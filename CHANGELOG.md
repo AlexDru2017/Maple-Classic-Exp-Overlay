@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.9.11-beta
+
+**Mesos/hr you can trust**
+- Mesos you spend or move at an NPC shop, storage or a trade are left out of mesos/hr (the status line says what was left out). Only mesos you pick up count.
+- The inventory doesn't have to stay open: the first look sets the start, a later look adds what you earned since, and mesos/hr holds still while it is closed.
+- After a trip to town, open the inventory when it asks, so what you earned before the trip is kept.
+- Your log shows a stretch's mesos from the first to the last look at the inventory, however far apart.
+
+**Potion cost and net mesos/hr: what you really make**
+- Mesos/hr says what you pick up. **Net mesos/hr** takes off what the potions and food you drink cost, so you can see which map really pays. Example: 300,000 mesos/hr, and in that hour 200 Red Potions (50 each) and 30 Blue Potions (220 each) = 16,600 in potions, so net is **283,400 mesos/hr**.
+- **Keep the potions you use on the quick-slot bar**, the hotkey slots at the bottom right of the game, so their counts show. The overlay reads that bar every 3 seconds: when a count goes down (326 to 325), that's one used. Potions that are only in your inventory window aren't seen. Skills, empty slots and other items (stars, scrolls, pet food) are ignored.
+- **It counts only while tracking is on** and EXP is coming in. Paused or in town, nothing counts. Buying or looting more of a potion (its count going up) is never a use. Reset starts the count again from zero.
+- **Prices** are the NPC shop prices (Red Potion 50, Orange 150, White 350, Blue 220, Elixir 3,000...). Potions no NPC sells (Mana Elixir, Power Elixir, Sap of Ancient Tree, Drake's Blood...) count as free until you type what you pay for them: **Settings, Potions, Prices**. If you set a shop potion you used to 0, net shows a dash and the status line asks for a price.
+- **Where you see it:** a Net / hr tile in the full view (next to Last 5 min, Mesos / hr and Elapsed), Potion cost and Net mesos / hr in Details, a Net/hr column in your log, and a small "net" in the Square, Wide and Bar shapes. It shows the cost in mesos, never a count of potions.
+- Don't want it? Switch it off in **Settings, Potions**: potions aren't counted and no net is shown.
+- Potion data stays on your computer: nothing about it is sent to the best-maps website.
+
+**Clean runs for the best-maps website**
+- A run counts for the website only after 15 minutes on one map without a break: 15 seconds without EXP ends it, whatever your log's gap setting (your log still uses your setting).
+- A run where a shop, storage or trade window was open is kept in your own records and never shared.
+- A run is sent with mesos only when the inventory was looked at when it started and within 30 seconds after it ended. Otherwise it is sent with EXP only. Mesos that look impossible (below zero, over 20M an hour, or a reading that later snapped back) are never sent.
+- If you pause right after a run while it waits for that look, it asks: "Open the inventory now so your run is logged for the website." It waits 7 seconds.
+- The website now ignores mesos it can't trust (from older overlay versions, a week after this release), and its map figures use the last 60 days.
+
 ## 0.9.10-beta
 
 **When the minimap's name is covered**

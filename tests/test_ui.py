@@ -13,6 +13,7 @@ DATA = Path(tempfile.mkdtemp())
 os.environ["MAPLE_EXP_DATA"] = str(DATA)                    # never touch your real data
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import maple_exp as m  # noqa: E402
+assert Path(os.environ["MAPLE_EXP_DATA"]) == m.DATA_DIR, "tests must run on their own temp data folder, never on real data"
 
 failures = 0
 
@@ -80,7 +81,7 @@ def type_note(text):
 solo, group = row("Ant Tunnel I"), row("Wild Boar Land II", group=True)
 check("the log has a solo line and one shared party line", solo and group)
 check("the Note column is there, empty to begin with",
-      "note" in tree["columns"] and tree.item(solo, "values")[8] == "" and tree.item(group, "values")[8] == "")
+      "note" in tree["columns"] and tree.item(solo, "values")[9] == "" and tree.item(group, "values")[9] == "")
 check("with no line selected, the note box can't be typed in", str(box.cget("state")) == "disabled")
 
 # a solo line
@@ -91,7 +92,7 @@ type_note("Good drops, bring pots!")
 check("what's typed isn't saved at once (it waits for a pause)", on_disk()[("Ant Tunnel I", 1)] is None)
 pump(1.3)
 check("...but a moment later it's saved in the log file", on_disk()[("Ant Tunnel I", 1)] == "Good drops, bring pots!")
-check("...and the line gets its mark", tree.item(solo, "values")[8] == m.NOTE_MARK and "saved" in app.note_title.cget("text"))
+check("...and the line gets its mark", tree.item(solo, "values")[9] == m.NOTE_MARK and "saved" in app.note_title.cget("text"))
 
 # moving to another line saves the one left, and shows the other's note
 type_note(" More")
@@ -104,13 +105,13 @@ type_note("Pt of 4-5 works.\nKS-ing.")
 select(solo)
 check("a note on a shared party line goes on each party size", on_disk()[("Wild Boar Land II", 4)] == on_disk()[("Wild Boar Land II", 5)]
       == "Pt of 4-5 works.\nKS-ing.")
-check("...and shows on the shared line", tree.item(group, "values")[8] == m.NOTE_MARK)
+check("...and shows on the shared line", tree.item(group, "values")[9] == m.NOTE_MARK)
 tree.item(group, open=True)
 app._sync_group(group)
 child = tree.get_children(group)[0]
 select(child)
 check("opening it, each party size shows the same note", box.get("1.0", "end-1c") == "Pt of 4-5 works.\nKS-ing."
-      and tree.item(child, "values")[8] == m.NOTE_MARK)
+      and tree.item(child, "values")[9] == m.NOTE_MARK)
 
 # the log refreshes by itself every few minutes: that must not disturb a note being typed
 select(solo)
@@ -127,7 +128,7 @@ check("...and saved it first", on_disk()[("Ant Tunnel I", 1)] == before)
 app.autolog.rename(app.autolog.entries[[e["map"] for e in app.autolog.entries].index("Ant Tunnel I")], "Ant Tunnel One")
 app._fill_log()
 pump(0.2)
-check("renaming a map keeps its note", on_disk()[("Ant Tunnel One", 1)] == before and tree.item(row("Ant Tunnel One"), "values")[8] == m.NOTE_MARK)
+check("renaming a map keeps its note", on_disk()[("Ant Tunnel One", 1)] == before and tree.item(row("Ant Tunnel One"), "values")[9] == m.NOTE_MARK)
 check("...and the box goes empty (that line is gone under its old name)", str(box.cget("state")) == "disabled")
 
 # typing needs the hotkeys out of the way: Shift+1 is "!"
@@ -275,6 +276,69 @@ check("Wide gives way to Bar when the shape changes in compact mode", bar.winfo_
 check("Bar shows mesos/hr and the level to reach", bar.canvas.itemcget(bar._mval, "text") not in ("", "\u2014")
       and "Lv 36" in bar.canvas.itemcget(bar._eta, "text"))
 check("Bar has no status line while tracking...", not bar.message.winfo_ismapped())
+# net mesos/hr in the compact shapes
+app.cfg["potions_on"] = True
+app.session.potions.used = {"Red Potion": 20}
+net = app._net(5620.0)[0]
+app._update_display()
+root.update()
+cv, hero = bar.canvas, app.view.hero
+check(f"Bar shows net mesos/hr after mesos/hr, clear of the level text ({cv.itemcget(bar._net, 'text')})",
+      cv.itemcget(bar._net, "text") == f"net {net}" and cv.bbox(bar._net)[0] >= cv.bbox(bar._munit)[2]
+      and cv.bbox(bar._net)[2] < cv.bbox(bar._eta)[0])
+app.set_shape("wide")
+app._update_display()
+root.update()
+wc = wide.canvas
+check("Wide shows it under the mesos/hr value", wc.itemcget(wide._net, "text") == f"net {net}"
+      and wc.bbox(wide._net)[1] >= wc.bbox(wide._vals[1])[3] - app.theme.px(4)
+      and wc.bbox(wide._net)[3] <= app.theme.px(wide.top + wide.card_h))
+app.set_shape("square")
+app._update_display()
+root.update()
+check("Square shows it on the mesos/hr line", hero.itemcget(hero._nval, "state") == "normal"
+      and hero.itemcget(hero._nval, "text").endswith(f"net {net}") and hero.bbox(hero._nval)[0] >= hero.bbox(hero._munit)[2])
+app.cfg["potions_on"] = False
+app._update_display()
+app.set_shape("wide")
+app._update_display()
+app.set_shape("bar")
+app._update_display()
+root.update()
+check("with potions off none of them shows a net", hero.itemcget(hero._nval, "state") == "hidden"
+      and wide.canvas.itemcget(wide._net, "text") == "" and bar.canvas.itemcget(bar._net, "text") == "")
+app.cfg["potions_on"], app.cfg["potion_prices"] = True, {"Red Potion": 0}     # net can't be worked out
+for shape in ("wide", "bar", "square"):
+    app.set_shape(shape)
+    app._update_display()
+root.update()
+check("with no net to show (a potion priced 0) the shapes look as without one", hero.itemcget(hero._nval, "state") == "hidden"
+      and wide.canvas.itemcget(wide._net, "text") == "" and bar.canvas.itemcget(bar._net, "text") == "")
+app.cfg["potions_on"], app.cfg["potion_prices"] = False, {}
+app.set_shape("bar")
+app._update_display()
+# Full mode: net mesos/hr is a tile, four across, without a wider window
+app.set_compact(False)
+app.cfg["potions_on"] = True
+app.session.potions.used = {"Red Potion": 20}
+app._update_display()
+root.update()
+tile = app.view.tiles["Net / hr"]
+check(f"Full mode has a Net / hr tile with the net ({tile.itemcget(tile._v, 'text')})", tile.itemcget(tile._v, "text") == app._net(5620.0)[0])
+check("...four tiles side by side, none cut off and none beyond the window",
+      list(app.view.tiles) == ["Last 5 min", "Mesos / hr", "Net / hr", "Elapsed"]
+      and all(t.winfo_x() + t.winfo_width() <= app.view.tiles_row.winfo_width() + 2 for t in app.view.tiles.values())
+      and abs(app.view.winfo_reqwidth() - app.theme.px(ui_main.W)) <= 4)
+app.cfg["potions_on"] = False
+app._update_display()
+check("with potions off the tile shows a dash", tile.itemcget(tile._v, "text") == "—")
+app.cfg["potions_on"] = True
+app.session.potions.used = {}
+app.set_compact(True)
+app.cfg["potions_on"] = True
+app.session.potions.reset()
+app._update_display()
+
 app._state = lambda: ("alert", "Can't read the EXP bar")
 app.status.set("Can't find the EXP bar.")
 app._update_display()
@@ -297,6 +361,46 @@ check("the shape is saved", json.loads((DATA / "config.json").read_text(encoding
 app.set_shape("square")
 app._set_start("Start")
 
+# Settings has a What's new button that shows this version's notes again
+shown = []
+real_whats_new = app._whats_new
+app._whats_new = lambda notes, then: shown.append(notes)
+app.show_whats_new()
+check("Settings > What's new shows this version's notes again", shown == [m.WHATS_NEW[m.VERSION]])
+app._whats_new = real_whats_new
+
+# the two pages: Next shows the potion page (with its pictures), and the window fits the screen
+before = set(app.root.winfo_children())
+app._whats_new(m.WHATS_NEW["0.9.11-beta"], None)
+root.update()
+win = [c for c in app.root.winfo_children() if c not in before and c.winfo_class() == "Toplevel"][0]
+
+
+def widgets(w):
+    out = [w]
+    for c in w.winfo_children():
+        out += widgets(c)
+    return out
+
+
+def labels(w):
+    return [c.cget("text") for c in widgets(w) if c.winfo_class() == "Label" and not c.cget("image")]
+
+
+def button(w, text):
+    return [c for c in widgets(w) if isinstance(c, ui_main.Button) and c.text == text]
+
+
+check("the first page has a Next button, not Got it", button(win, "Next") and not button(win, "Got it")
+      and any("what you really make" in t for t in labels(win)))
+button(win, "Next")[0].command()
+root.update()
+pictures = len([c for c in widgets(win) if c.winfo_class() == "Label" and c.cget("image")])
+check(f"Next shows the potion page with a Got it button, and both pictures on a screen with room ({pictures})",
+      "How potion cost works" in labels(win) and button(win, "Got it") and not button(win, "Next")
+      and (pictures == 2 or win.winfo_screenheight() < 1000))
+check("...and the window fits on the screen", win.winfo_reqheight() <= win.winfo_screenheight() - 60)
+win.destroy()
 # first launch: a new install picks a shape, an update shows what's new, and each only once
 calls = []
 app._shape_picker = lambda then: calls.append("picker") or then()
@@ -528,6 +632,59 @@ if app.hotkeys.supported:
     app.settings_win = None
     check("closing Settings leaves hotkeys working", getattr(app.hotkeys, "_paused", True) is False)
 
+# ---- potion prices in Settings
+app.cfg["potion_prices"] = {}
+app.open_settings()
+sw = app.settings_win
+sw.update()
+app.open_potion_prices()
+pw = app.prices_win
+pw.update()
+table = app._potion_table()
+want = sorted(i["name"] for i in table.prices.values() if i.get("kind") == "consumable")
+check(f"every item the bar counts is listed with a box for its price ({len(app._price_vars)} of {len(want)})",
+      sorted(app._price_vars) == want)
+app._price_vars["Red Potion"].set("70")
+check("a price typed in is saved and used", app.cfg["potion_prices"] == {"Red Potion": 70}
+      and app._prices().get("Red Potion") == 70 and json.loads(m.CONFIG_PATH.read_text())["potion_prices"] == {"Red Potion": 70})
+app._price_vars["Red Potion"].set("7x")
+check("something that isn't a number leaves the saved price alone", app.cfg["potion_prices"] == {"Red Potion": 70})
+app._price_vars["Red Potion"].set("²")
+app._price_vars["Red Potion"].set("12345678901")
+check("...nor do digits that aren't plain 0-9, or a price too big to be real", app.cfg["potion_prices"] == {"Red Potion": 70})
+app._price_vars["Red Potion"].set("")
+check("clearing the box brings the shipped price back", app.cfg["potion_prices"] == {} and app._prices().get("Red Potion") == 50)
+app._price_vars["Red Potion"].set("0")
+check("a price of 0 is kept as the player's own", app.cfg["potion_prices"] == {"Red Potion": 0} and app._prices().get("Red Potion") == 0)
+app._price_vars["Red Potion"].set("")
+app._potions_on.set(False)
+sw.update()
+check("the Potions switch is saved", app.cfg["potions_on"] is False)
+app._potions_on.set(True)
+sw.update()
+pw.destroy()
+sw.destroy()
+app.settings_win = app.prices_win = None
+
+# ---- net mesos/hr: mesos/hr minus what the potions cost per hour
+real_per_hour = app.meso.per_hour
+app.meso.per_hour = lambda el: 100000
+app.cfg["potions_on"], app.cfg["potion_prices"] = True, {}
+app.session.potions.used = {"Red Potion": 20, "Sap of Ancient Tree": 5}
+check("net mesos/hr is the mesos/hr less the potion cost per hour (20 Red at 50 in an hour)",
+      app._net(3600) == ("99,000", None))
+check("...over half an hour the cost per hour doubles", app._net(1800) == ("98,000", None))
+app.cfg["potion_prices"] = {"Red Potion": 0}
+check("a price of 0 on a used NPC-sold potion makes net a dash and asks for a price",
+      app._net(3600) == ("—", "Set a price for Red Potion"))
+app.cfg["potion_prices"] = {"Sap of Ancient Tree": 0}
+check("an item no NPC sells at 0 doesn't", app._net(3600) == ("99,000", None))
+app.cfg["potions_on"] = False
+check("with potions off there's no net to show", app._net(3600) == ("—", None))
+app.cfg["potions_on"], app.cfg["potion_prices"] = True, {}
+app.session.potions.reset()
+app.meso.per_hour = real_per_hour
+
 # ---- towns aren't logged; a minimap that can't be seen pauses
 blank = m.Reading(*([None] * len(m.Reading._fields)))
 app._handle(blank._replace(where="Reading", map="Perion"))
@@ -546,6 +703,17 @@ check("a minimap name unseen for a while pauses it", app.session.waiting == "bli
 app.reader.map_seen_at = m.time.monotonic()
 app.session.on, app.session.waiting = False, None
 m.tesseract_ok = real_ok
+
+# ---- paused while a finished run waits for an inventory look: the status asks for one
+now = m.time.monotonic()
+app.meso.reset()                                            # (no recent look left over from the tests above)
+app.autolog.looks, app.autolog.epoch = [], app.meso.resets
+app.autolog.pending = {"start": now - 902, "chain": now - 902, "end": now - 2, "started": "-", "paused_at": None}
+app.session.on, app.session.waiting = False, None
+app.tracker.running = False
+app._handle(blank._replace(where="Reading"))
+check("paused while a run waits for a look: the status asks for the inventory", m.RUN_ALERT in app.status.get())
+app.autolog.pending = None
 
 check("the typeface is the bundled one, or it fell back cleanly", app._own_fonts in (True, False) and bool(app.theme.fam["extra"]))
 app.close()

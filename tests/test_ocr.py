@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 import maple_exp as m  # noqa: E402
+assert Path(os.environ["MAPLE_EXP_DATA"]) == m.DATA_DIR, "tests must run on their own temp data folder, never on real data"
 import ocr  # noqa: E402
 
 failures = 0
