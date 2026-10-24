@@ -171,6 +171,40 @@ for shape in ("square", "wide", "bar"):
     app.set_compact(False)
     pump(1.0)
 
+# the log's Details window zooms with its own size too
+import tkinter.font as tkfont  # noqa: E402
+entry = {"date": "2026-10-24", "map": "Ant Tunnel II", "level": 34, "party": 1, "exp": 10000, "seconds": 3600,
+         "mesos": 5000, "mesos_seconds": 3600, "potion_cost": 1000, "potion_seconds": 3600}
+dwin = app._details([entry])
+if dwin is not None:
+    pump(0.8)
+    dw0, dh0 = dwin.winfo_width(), dwin.winfo_height()
+    first = [w for w in dwin.winfo_children()[0].winfo_children() if w.winfo_class() == "Label"][0]
+    f0 = int(tkfont.Font(font=first.cget("font")).cget("size"))
+    check("the Details window starts at zoom 1", dwin.zoom_state["z"] == 1.0)
+    dwin.geometry(f"{int(dw0 * 1.6)}x{int(dh0 * 1.6)}")
+    pump(1.0)
+    while dwin.zoom_state["job"]:
+        pump(0.1)
+    check(f"bigger Details window: zoom {dwin.zoom_state['z']}", 1.5 <= dwin.zoom_state["z"] <= 1.7)
+    first = [w for w in dwin.winfo_children()[0].winfo_children() if w.winfo_class() == "Label"][0]
+    f1 = int(tkfont.Font(font=first.cget("font")).cget("size"))
+    check(f"...and its text grew ({f0} -> {f1})", abs(f1) >= abs(f0) * 1.4)
+    check("...and everything still fits in the window",
+          dwin.winfo_reqwidth() <= dwin.winfo_width() + 4 and dwin.winfo_reqheight() <= dwin.winfo_height() + 4)
+    if SHOTS:
+        pump(0.3)
+        with mss.mss() as sct:
+            img = sct.grab({"left": dwin.winfo_rootx(), "top": dwin.winfo_rooty(), "width": dwin.winfo_width(),
+                            "height": dwin.winfo_height()})
+        Image.frombytes("RGB", img.size, img.bgra, "raw", "BGRX").save(SHOTS / "10_details_zoomed.png")
+    dwin.geometry(f"{int(dw0 * 0.8)}x{int(dh0 * 0.8)}")
+    pump(1.0)
+    while dwin.zoom_state["job"]:
+        pump(0.1)
+    check(f"smaller Details window: zoom {dwin.zoom_state['z']}", 0.7 <= dwin.zoom_state["z"] <= 0.9)
+    dwin.destroy()
+
 # limits
 app.set_zoom(10)
 check(f"the zoom stops at the largest ({app._zoom})", app._zoom == m.ZOOM_MAX)
