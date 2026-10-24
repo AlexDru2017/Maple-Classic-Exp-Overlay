@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import exp_messages as em  # noqa: E402
+from maple_overlay.vision import exp_messages as em  # noqa: E402
 
 failures = 0
 

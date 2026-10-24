@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import session_stats as ss  # noqa: E402
+from maple_overlay.core import session_stats as ss  # noqa: E402
 
 failures = 0
 

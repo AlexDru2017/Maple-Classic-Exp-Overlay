@@ -12,7 +12,7 @@ from pathlib import Path
 
 os.environ["MAPLE_EXP_DATA"] = tempfile.mkdtemp()           # never touch your real data
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import maple_exp as m  # noqa: E402
+import appmod as m  # noqa: E402
 assert Path(os.environ["MAPLE_EXP_DATA"]) == m.DATA_DIR, "tests must run on their own temp data folder, never on real data"
 
 failures = 0
@@ -241,7 +241,7 @@ check("an OS the overlay doesn't run on is turned down clearly", unsupported)
 check("the game isn't found when it isn't running (no crash looking)",
       m.PLATFORM.find_game_window() is None or m.PLATFORM.client_rect(m.PLATFORM.find_game_window()) is not None)
 if sys.platform == "win32":
-    from platforms import windows
+    from maple_overlay.platforms import windows
     pressed = []
     hk = m.PLATFORM.create_hotkeys(pressed.append)
     hk.in_front = lambda: True                               # as if the game were in front
@@ -257,7 +257,7 @@ if sys.platform == "win32":
     _time.sleep(0.3)
     check("hotkeys are off while another program is in front", pressed == ["start"])
 if sys.platform == "darwin":
-    from platforms import macos
+    from maple_overlay.platforms import macos
     W = macos.MacWindow
     check("on macOS the game is told apart from browsers and the overlay itself",
           macos.is_game(W(1, 10, "wine64-preloader", "MapleStory", 0, (0, 0, 800, 600), True), 99)
@@ -445,7 +445,8 @@ check(f"what's sent to the stats site has the run and no note ({sorted(fields)})
       len(sent) == 1 and "MY-PRIVATE-NOTE" not in body and "note" not in fields and len(json.loads(body)["runs"]) >= 1)
 check("runs never carry a note, even with notes on the log lines",
       all("note" not in r for r in log.runs) and "MY-PRIVATE-NOTE" not in json.dumps(log.runs))
-src = inspect.getsource(m)
+# (the program is a package now: every file in it is looked at, not only the one that was maple_exp.py)
+src = "\n".join(f.read_text(encoding="utf-8") for f in sorted((Path(__file__).resolve().parent.parent / "maple_overlay").rglob("*.py")))
 check("privacy guard: the overlay reaches the internet in exactly these places (a new one needs a look at what it sends)",
       src.count("urlopen(") == 2 and src.count("webbrowser.open(") == 3 and "requests." not in src and "socket." not in src)
 check("what's sent never reads the log's lines, and the bug report never includes notes",
@@ -1371,7 +1372,7 @@ for read, want in {"Tree Dungeon Forest Up North Vil": "Tree Dungeon Forest Up N
     check(f"'{read}' reads as '{want}' ({got})", got == want)
 
 # ---- potion use: a slot's count going down while tracking runs
-import potions  # noqa: E402
+from maple_overlay.vision import potions  # noqa: E402
 
 
 def bar(*items):
@@ -1566,14 +1567,14 @@ check("nothing about potions is sent to the stats site", len(sent) == 1 and "pot
 pe = {"date": "2026-10-08", "map": "Rocky Road II", "level": 27, "party": 1, "class": "Bandit", "exp": 120000,
       "seconds": 3600, "mesos": 32713, "mesos_seconds": 3600, "potion_cost": 10000, "potions": {"Red Potion": 200}}
 check(f"a log line with a cost says its net mesos/hr ({m.format_entry(pe)})", "32,713mesos/hr - 22,713net/hr" in m.format_entry(pe))
-check("...and the table has a Net/hr cell", m.log_row(pe)[7:9] == ("32,713", "22,713"))
+check("...and the table has a Net/hr cell", m.log_row(pe)[9:11] == ("32,713", "22,713"))
 plain = {k: v for k, v in pe.items() if k not in ("potion_cost", "potions")}
-check("a line without a cost has no net", "net/hr" not in m.format_entry(plain) and m.log_row(plain)[8] == "")
-check("...a cost with no mesos reading has an unknown net", m.log_row({**pe, "mesos": 0, "mesos_seconds": 0})[8] == "?")
+check("a line without a cost has no net", "net/hr" not in m.format_entry(plain) and m.log_row(plain)[10] == "")
+check("...a cost with no mesos reading has an unknown net", m.log_row({**pe, "mesos": 0, "mesos_seconds": 0})[10] == "?")
 second = {**pe, "level": 28, "seconds": 1800, "mesos": 10000, "mesos_seconds": 1800, "potion_cost": 2000}
 row = m.group_row([{**pe, "party": 4}, {**second, "party": 5}])
-check(f"a map's party sizes together: net is over all their time ({row[8]})",
-      row[8] == f"{(32713 + 10000 - 12000) / 5400 * 3600:,.0f}")
+check(f"a map's party sizes together: net is over all their time ({row[10]})",
+      row[10] == f"{(32713 + 10000 - 12000) / 5400 * 3600:,.0f}")
 
 # ---- mesos in the log from sparse looks: the log gets every look, however old, and takes the
 # mesos gained between the first and the last look of each stretch
@@ -1656,8 +1657,8 @@ check("...and keeps its seal", log.sealed(e))
 plain = {"date": "2026-10-08", "map": "Rocky Road II", "level": 27, "party": 1, "class": "Bandit", "exp": 1,
          "seconds": 1800, "mesos": 9000, "mesos_seconds": 1800}
 costly = dict(plain, seconds=3600, mesos=36000, mesos_seconds=3600, potion_cost=3600)
-check(f"a group of lines with and without a cost: the cost is per hour of the lines that had one ({m.group_row([costly, plain])[8]})",
-      m.group_row([costly, plain])[8] == f"{45000 / 5400 * 3600 - 3600:,.0f}")
+check(f"a group of lines with and without a cost: the cost is per hour of the lines that had one ({m.group_row([costly, plain])[10]})",
+      m.group_row([costly, plain])[10] == f"{45000 / 5400 * 3600 - 3600:,.0f}")
 
 # ---- clean runs for the website: a run with a shop, storage or trade window, or a doubtful
 # mesos number, never takes mesos to the site (the local log keeps them)

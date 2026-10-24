@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import log_details as ld  # noqa: E402
+from maple_overlay.logs import log_details as ld  # noqa: E402
 
 failures = 0
 

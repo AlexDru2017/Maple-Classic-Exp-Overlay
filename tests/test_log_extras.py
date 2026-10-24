@@ -4,7 +4,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import maple_exp as m  # noqa: E402
+import appmod as m  # noqa: E402
 
 failures = 0
 
