@@ -1046,6 +1046,57 @@ tr = m.ExpTracker()
 tr.set_level(30, "typed")
 tr.observe_percent(50.0, 30, "badge")
 check("...and one that agrees with a typed one too", tr.level_source == "badge")
+# ---- found by the audit
+check("a big estimated number is shortened instead of overflowing, and a small one isn't",
+      m.approx_num(99_999_999, True) == chr(0x2248) + "100.00M" and m.approx_num(1_234_567, True) == chr(0x2248) + "1,234,567"
+      and m.approx_num(5000, False) == "5,000" and m.approx_num(None, True) == "\u2014")
+tr = pct_tracker(10, 90.0)
+for p in (95.0, 95.0):
+    tr.observe_percent(p, 10, "badge")
+for _ in range(2):
+    tr.observe_percent(2.0, 11, "badge")
+gained = tr.gained
+tr.set_level(50, "typed")
+for _ in range(3):
+    tr.observe_percent(10.0, 50, "typed")
+check(f"changing the level by hand right after a level-up counts nothing (gained {tr.gained}, was {gained})",
+      tr.levels == 1 and tr.gained == gained)
+tr = pct_tracker(10, 90.0)
+for p in (95.0, 95.0):
+    tr.observe_percent(p, 10, "badge")
+for _ in range(2):
+    tr.observe_percent(2.0, 11, "badge")
+tr.forget_level()
+try:
+    for _ in range(3):
+        tr.observe_percent(5.0, 12, "badge")
+    tr.observe([(1000, 5.0)], True)
+    survived = True
+except TypeError:
+    survived = False
+check("forgetting the level right after a level-up never crashes the next readings", survived)
+tr = pct_tracker(10, 96.0)
+for p in (98.0, 98.0):
+    tr.observe_percent(p, 10, "badge")
+for _ in range(45):
+    tr.observe_percent(3.0, None, None)
+note = ""
+for _ in range(3):
+    note = tr.observe_percent(3.0, 11, "badge")[1]
+check(f"a wrap the badge only explains late (after the wait) starts the new level, no 'level changed' for ever (Lv {m.level_for_req(tr.req)}, {note!r})",
+      m.level_for_req(tr.req) == 11 and "level changed" not in note)
+tr = pct_tracker(30, 99.79)
+tr.observe_percent(0.3, 31, "badge")
+tr.observe_percent(0.3, None, None)
+res = tr.observe_percent(0.3, 31, "badge")
+check(f"a badge that drops out for a look in between still confirms a level-up ({res}, levels {tr.levels})",
+      res == (True, "LEVEL UP!") and tr.levels == 1)
+tr = pct_tracker(30, 99.79)
+tr.observe_percent(0.3, 31, "badge")
+tr.observe_percent(0.3, 30, "badge")
+tr.observe_percent(0.3, 31, "badge")
+check("...but the old level shown in between does cancel it", tr.levels == 0)
+
 tr = m.ExpTracker()
 check("a typed level that has no EXP table is refused", tr.set_level(100, "typed") is False and tr.req is None)
 check("a typed level is used like a read one (Lv 30, 'typed')",
@@ -1135,6 +1186,19 @@ check("an untrusted reading doesn't set the level", tr.req is None)
 check("'1 [71.68%]' (digits cut off) fits no level, so it isn't trusted", not m.fits_exp_table(1, 71.68))
 
 check("this version has a What's new entry (it is shown once after updating)", m.VERSION in m.WHATS_NEW)
+
+# ---- the window tests open their windows on the second screen, never on the main one
+from screens import pick_second  # noqa: E402
+SCREENS = [{"left": 5120, "top": 679, "width": 2560, "height": 1440}, {"left": 0, "top": 0, "width": 5120, "height": 2880}]
+check("the second screen is the one that isn't the main screen (the one holding the origin)",
+      pick_second(SCREENS) == SCREENS[0] and pick_second(SCREENS[::-1]) == SCREENS[0])
+check("with one screen only there is no second one", pick_second(SCREENS[1:]) is None and pick_second([]) is None)
+THIRD = {"left": -1920, "top": 0, "width": 1920, "height": 1080}
+check("with several others, a 1440p screen is preferred", pick_second([THIRD] + SCREENS) == SCREENS[0])
+os.environ["MAPLE_TEST_SCREEN"] = "100,200,1280,720"
+check("MAPLE_TEST_SCREEN (left,top,width,height) picks the screen by hand",
+      pick_second(SCREENS) == {"left": 100, "top": 200, "width": 1280, "height": 720})
+del os.environ["MAPLE_TEST_SCREEN"]
 
 # ---- pausing by itself (a fake clock, so these run instantly)
 clock = [10000.0]

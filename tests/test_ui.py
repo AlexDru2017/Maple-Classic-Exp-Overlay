@@ -14,6 +14,11 @@ os.environ["MAPLE_EXP_DATA"] = str(DATA)                    # never touch your r
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import maple_exp as m  # noqa: E402
 assert Path(os.environ["MAPLE_EXP_DATA"]) == m.DATA_DIR, "tests must run on their own temp data folder, never on real data"
+from screens import keep_windows_there, second_screen, stray_windows  # noqa: E402
+SCREEN = second_screen()                    # every window these tests open goes on the second screen, not the main one
+keep_windows_there(SCREEN)
+POS = [SCREEN["left"] + 60, SCREEN["top"] + 60] if SCREEN else [60, 60]
+print("windows open on the second screen:" if SCREEN else "only one screen found: windows open where the system puts them.", SCREEN or "")
 
 failures = 0
 
@@ -45,7 +50,7 @@ seed = m.AutoLog(15, m.LOG_PATH, m.LOG_TEXT_PATH)
 t = farm(seed, 0, 310, party=1, map_name="Ant Tunnel I")
 t = farm(seed, t + 60, 310, party=4, map_name="Wild Boar Land II", level=30)
 t = farm(seed, t + 60, 310, party=5, map_name="Wild Boar Land II", level=30)
-m.save_config({**m.DEFAULTS, "log_open": True, "pos": [60, 60], "hotkeys_on": False, "check_updates": False,
+m.save_config({**m.DEFAULTS, "log_open": True, "pos": POS, "hotkeys_on": False, "check_updates": False,
                "share_runs": False})
 
 root = m.tk.Tk()
@@ -172,7 +177,7 @@ check("every line is still as the overlay wrote it (notes don't break the seal)"
 
 # ---- the design: every size, every state, and awkward values never break the window
 root = m.tk.Tk()
-m.save_config({**m.DEFAULTS, "hotkeys_on": False, "check_updates": False, "share_runs": False, "pos": [60, 60]})
+m.save_config({**m.DEFAULTS, "hotkeys_on": False, "check_updates": False, "share_runs": False, "pos": POS})
 app = m.App(root, m.DigitTemplates.load())
 t, meso = app.tracker, app.meso
 sizes_ok, widths = True, {}
@@ -782,6 +787,52 @@ app.reader.name_print = print_of("Pip2")
 app._handle(with_level)
 check("two in a row are: it starts over and says so, and the old level isn't kept",
       app.tracker.req is None and "another character" in app.status.get() and app.reader.level is None)
+# ---- found by the audit
+app.reset()
+app.pct_note = "level changed: Reset to start again on the new level"
+app.reset()
+check("Reset clears an old 'level changed' note", app.pct_note == "")
+app.pct_note = "level changed: Reset to start again on the new level"
+app._handle(blank._replace(where="Reading", candidates=[(47850, 50.0)], confident=True))
+check("a bar with its number clears it too", app.pct_note == "")
+app.reset()
+app.reader.level_failures, app.reader.level = m.LEVEL_FAILS_FOR_FALLBACK, None
+app.session.start(m.time.monotonic())
+app._handle(pct)
+real_ask2 = m.simpledialog.askinteger
+m.simpledialog.askinteger = lambda *a, **k: 31
+app.type_level()
+m.simpledialog.askinteger = real_ask2
+check("typing the level in doesn't stop a session that is running", app.session.on and app.tracker.req == 108480
+      and app.tracker.level_source == "typed")
+app.reset()
+# the number with a tilde in front fits the big number and the tile at every size, even when huge
+fit_ok, fit_notes = True, []
+t.estimated = True
+for scale in m.UI_SCALES:
+    app.cfg["ui_scale"] = scale
+    app._apply_ui_scale()
+    t.rate = lambda: 99999999.0
+    t.rolling_rate = lambda: 99999999.0
+    app.set_compact(False)
+    app._update_display()
+    root.update()
+    limit = app.theme.gfx.px(ui_main.INNER - 14)
+    shown = [app.view.hero.bbox(i) for i in app.view.hero._digits if app.view.hero.itemcget(i, "state") == "normal"]
+    hero_right = max((box[2] for box in shown if box), default=0)
+    tile = app.view.tiles["Last 5 min"]
+    x0, y0, x1, y1 = tile.bbox(tile._v)
+    if x1 > tile.winfo_width() + 1:
+        fit_ok = False
+        fit_notes.append(f"{scale}% tile ends {x1} of {tile.winfo_width()}")
+    if hero_right and hero_right > limit:
+        fit_ok = False
+        fit_notes.append(f"{scale}% big number ends {hero_right} of {limit}")
+check(f"a huge estimate fits the tile (and the big number) at every size ({'; '.join(fit_notes) or 'ok'})", fit_ok)
+t.estimated = False
+app.cfg["ui_scale"] = 100
+app._apply_ui_scale()
+
 # carrying the level over when the number goes: only for the same character (a print that matches)
 exact = blank._replace(where="Reading", candidates=[(47850, 50.0)], confident=True)
 
@@ -820,6 +871,8 @@ except TypeError:
     check("the status doesn't crash before the first EXP reading (found_at unset)", False)
 app.reset()
 
+if SCREEN:
+    check(f"every window the tests opened is on the second screen (strays: {stray_windows(SCREEN)})", not stray_windows(SCREEN))
 check("the typeface is the bundled one, or it fell back cleanly", app._own_fonts in (True, False) and bool(app.theme.fam["extra"]))
 app.close()
 

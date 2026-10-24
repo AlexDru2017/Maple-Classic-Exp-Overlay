@@ -27,7 +27,6 @@ import queue
 import re
 import secrets
 import shutil
-import subprocess
 import sys
 import threading
 import time
@@ -1439,7 +1438,7 @@ class ScreenReader:
                 self._look_at_name(sct, rect)
                 if reading.percent_only:        # no EXP number to tell the level from: the badge has to
                     self._read_level(sct, rect)
-        return reading._replace(level=(self.level, "badge") if self.level and reading.percent_only else None)
+        return reading._replace(level=(self.level, "badge") if self.level and reading.percent_only and self.mode == "window" else None)
 
     def map_blind_seconds(self):
         """How long the minimap's name box hasn't been visible (0 if it never was: no map to lose)."""
@@ -1537,8 +1536,8 @@ class ScreenReader:
         look = {}
         try:
             seen = level_ocr.read_level(shot[0], wx + ax - shot[1], wy + ay - shot[2], g, TESS, look) if shot else None
-        except (ocr.TesseractError, subprocess.TimeoutExpired, OSError) as e:
-            look["why"] = f"Tesseract failed: {e}"
+        except Exception as e:              # (Tesseract failing or timing out, or anything unexpected: not a level, back off)
+            look["why"] = f"the level read failed: {e}"
             seen = None
         self.level_look = look
         if seen is None:
@@ -2071,7 +2070,9 @@ class ExpTracker:
         real EXP differ by rounding, so the next reading starts a fresh baseline (not a gain)."""
         if self._format not in (None, kind):
             self.exp = self.pct = self._pending = self._before_death = None
-            self._pending_lvl = None
+            self._pending_lvl = self._level_start = None
+            self._recent.clear()                  # (the other format's numbers are off by rounding)
+            self._wrap_reads = 0
         self._format = kind
 
     def observe_percent(self, pct, level=None, source=None):
@@ -2091,7 +2092,7 @@ class ExpTracker:
         if level is not None and level == cur and source:
             self.level_source = source           # (a level read from the badge beats a carried or typed one)
         # A % that wrapped around (the level went up, or a misread): only the next level, read, says which.
-        wrapped = self.exp is not None and self._format == "percent" and self.pct - pct > 30
+        wrapped = self.exp is not None and self.pct is not None and self._format == "percent" and self.pct - pct > 30
         if level is not None and level != cur:
             if wrapped and level == cur + 1:
                 last = self._pending_lvl
@@ -2108,11 +2109,14 @@ class ExpTracker:
             self._use_level(level, source)      # nothing counted yet: the newer reading wins
             cur = level
         elif wrapped:
-            self._pending_lvl = None
+            if level is not None:                 # (a look where the badge wasn't read doesn't cancel a level-up seen before it)
+                self._pending_lvl = None
             self._wrap_reads += 1
             if self._wrap_reads < self.WRAP_WAIT_READS:
                 return False, "percentage wrapped: waiting to read the new level"
-            self.exp = self.pct = None            # nothing explained it for a minute: the new % is the new start
+            self.forget_level()                   # nothing explained it for a minute: the level is unknown again, and the
+            self._wrap_reads = 0                  # next one read (even a new one) is taken as it is, with a fresh start
+            return False, "waiting to read your level"
         self._wrap_reads = 0
         self._pending_lvl = None
         self._switch_format("percent")
@@ -2122,7 +2126,7 @@ class ExpTracker:
     def _use_level(self, level, source):
         """Starts estimating from this level (a fresh baseline: nothing is counted for the change)."""
         self.req, self._req_exact, self.level_source = EXP_TABLE[level - 1], True, source
-        self.exp = self.pct = self._pending = self._pending_lvl = None
+        self.exp = self.pct = self._pending = self._pending_lvl = self._level_start = None
 
     @property
     def percent_mode(self):
@@ -2139,7 +2143,7 @@ class ExpTracker:
     def forget_level(self):
         """Another character, or a level that can't be trusted: nothing to estimate from until read again."""
         self.req, self._req_exact, self._table_level, self.level_source = None, False, None, None
-        self.exp = self.pct = self._pending = self._pending_lvl = None
+        self.exp = self.pct = self._pending = self._pending_lvl = self._level_start = None
         self._seen.clear()
 
     def _observe(self, candidates, confident=False):
@@ -3432,6 +3436,14 @@ def fmt_short(n):
         if abs(n) >= div:
             return f"{n / div:.2f}{suffix}"
     return f"{n:,.0f}"
+
+
+def approx_num(n, estimated):
+    """A number as shown: with an approx sign in front when it was worked out from a % alone. A very big one is
+    shortened (99,999,999 -> 100.00M) so the sign never makes it run out of its box."""
+    if n is None or not estimated:
+        return fmt_num(n)
+    return APPROX + (fmt_num(n) if abs(n) < 10_000_000 else fmt_short(n))
 
 
 def fmt_eta(seconds):
@@ -4807,7 +4819,7 @@ class App:
                 ok, note = self._observe_percent(r, now)
             else:
                 ok, note = self.session.observe(r.candidates, r.confident, now)
-                self.level_wait = False
+                self.level_wait, self.pct_note = False, ""
                 self._char_print = self.reader.name_print if self.reader.name_print is not None else self._char_print
             self.rejected = 0 if ok or self.level_wait else self.rejected + 1
             if self.rejected >= 10:                 # keeps not adding up: find the EXP bar again
@@ -4902,8 +4914,8 @@ class App:
                                         parent=parent or self.root, minvalue=1, maxvalue=len(EXP_TABLE))
         if level is None or not self._can_type_level():      # (cancelled, or the badge was read while it was open)
             return
-        self.reset()
-        self.tracker.set_level(level, "typed")
+        self.tracker.set_level(level, "typed")      # (nothing was counted without a level, so a session that runs carries on)
+        self.level_wait, self.pct_note = False, ""
         self._char_print = self.reader.name_print
         self.status.set(f"Using Lv {level} as you typed it. EXP is estimated from the % until the badge can be read.")
 
@@ -5052,14 +5064,14 @@ class App:
         net = self._net(el)[0]
         est = lambda text: APPROX + text if t.estimated and text and text != "\u2014" else text     # (worked out from a % alone)
         self.view.show(
-            rate=est(fmt_num(rate)) if rate is not None else None,
+            rate=approx_num(rate, t.estimated) if rate is not None else None,
             delta=(rolling / rate - 1) if rate and rolling else None,
             spark=list(self._trend), pct=shown[1] if shown else None,
             eta=f"Lv {level + 1} in {eta}" if level and eta else f"Lv {level}" if level else "",
             level=level or None, eta_time=eta or "",
             mesos=fmt_num(m.per_hour(el)),
             net=net if self.cfg["potions_on"] and net != "\u2014" else "",
-            tiles={"Last 5 min": est(fmt_num(rolling)), "Mesos / hr": fmt_num(m.per_hour(el)),
+            tiles={"Last 5 min": approx_num(rolling, t.estimated), "Mesos / hr": fmt_num(m.per_hour(el)),
                    "Net / hr": net, "Elapsed": fmt_dur(el)},
             details={"% / hr": f"{rate / t.req * 100:.2f}%" if rate and t.req else "\u2014",
                      "Gained": est(f"{fmt_short(t.gained)}{f'  (+{t.levels} lvl)' if t.levels else ''}"),
@@ -5125,6 +5137,7 @@ class App:
         self.autolog.reset_clock()
         self._char_print = self._char_seen = self.other_char_at = None      # (what was known about the character is over too)
         self._char_diff, self._same_char = 0, False
+        self.pct_note, self.level_wait = "", False
         self.skip_log = False
         self._show_skip_log()
         self._set_start("Start")

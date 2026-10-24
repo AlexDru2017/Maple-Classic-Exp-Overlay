@@ -727,11 +727,34 @@ for name, size in (("exp_win-1024x768", (1024, 768)), ("exp_win-1280x720", (1280
           f"({sum(x.percent_only and x.confident for x in looks)}/6)",
           all(x.percent_only and x.confident and x.candidates == [(None, 71.68)] for x in looks) and r.misses == 0)
 
+# something unexpected inside the badge read can't cost the whole look, and backs off like any failed read
+class Breaks:
+    def read_lines(self, images, chars=None):
+        raise ValueError("something nobody expected")
+
+
+clock2 = [500.0]
+real_mono2 = m.time.monotonic
+real_tess2, real_ok2 = m.TESS, m.tesseract_ok
+m.time.monotonic = lambda: clock2[0]
+try:
+    r, screen2, rect2 = level_reader(32, 11, Breaks())
+    try:
+        r._read_level(screen2, rect2)
+        raised = False
+    except Exception:
+        raised = True
+    check("an unexpected error in the badge read is a failed read: nothing raised, backed off, failure counted",
+          not raised and r.level_failures == 1 and r.next_level_read > clock2[0])
+finally:
+    m.time.monotonic, m.TESS, m.tesseract_ok = real_mono2, real_tess2, real_ok2
+
 # Select area has no game window, so no badge to find: typing the level in is open at once, and it says why
 from pics import percent_only  # noqa: E402,F811
 bar = percent_only(cv2.imread(str(FRAMES / "exp_win-1280x720.png")))
 r = m.ScreenReader(m.DigitTemplates.load())
 r.use_region({"left": 0, "top": 0, "width": bar.shape[1], "height": bar.shape[0]})
+r.level = 37                                      # (read earlier in window mode: a selected area has no badge of its own)
 got = r.read(FakeScreen(bar))
 check("a %-only bar in a selected area is read, with no level, and typing one in is open at once",
       got.percent_only and got.level is None and r.level_failures >= m.LEVEL_FAILS_FOR_FALLBACK
