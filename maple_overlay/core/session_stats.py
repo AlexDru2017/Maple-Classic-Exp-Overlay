@@ -31,7 +31,7 @@ class Bucket:
 
     def __init__(self):
         self.seconds, self.exp, self.mesos = 0.0, 0, 0
-        self.own = self.bonus = 0       # the part of `exp` whose split the game's messages confirmed
+        self.own = self.bonus = self.other = 0       # (own: your kills, other: a party member's kills) the part of `exp` whose split the game's messages confirmed
 
     def per_hour(self, value):
         return value / self.seconds * 3600 if self.seconds >= 10 and value is not None else None
@@ -109,6 +109,7 @@ class SessionStats:
             b.mesos += x.mesos
             b.own += x.own
             b.bonus += x.bonus
+            b.other += x.other
         return b
 
     def total(self):
@@ -119,6 +120,7 @@ class SessionStats:
         b.mesos += self.solo.mesos
         b.own += self.solo.own
         b.bonus += self.solo.bonus
+        b.other += self.solo.other
         return b
 
     def rows(self):
@@ -126,10 +128,10 @@ class SessionStats:
         has been played, each size follows underneath."""
         party = self.party_all()
         rows = [("Solo", self.solo), ("Party", party)]
-        if party.own or party.bonus:                # (only once the messages have explained some of it)
-            for label, value in (("   You", party.own), ("   Party bonus", party.bonus),
-                                 ("   Not split", party.exp - party.own - party.bonus)):
-                if label.strip() == "Not split" and value <= 0:
+        if party.own or party.bonus or party.other:           # (only once the messages have explained some of it)
+            for label, value in (("   Solo", party.own), ("   Party bonus", party.bonus), ("   Other", party.other),
+                                 ("   Not split", party.exp - party.own - party.bonus - party.other)):
+                if label.strip() in ("Other", "Not split") and value <= 0:
                     continue
                 part = Bucket()
                 part.seconds, part.exp, part.mesos = party.seconds, value, None   # (mesos: not split)
@@ -217,17 +219,20 @@ class SessionStats:
         # split when the oldest lines add up to it exactly (a gain may hold several kills).
         # (a line or two left over from a kill whose gain was never seen may sit in front: a few starts are tried)
         for start in range(min(4, len(self._pending))):
-            total = own = bonus = 0
+            total = own = bonus = other = 0
             for n, (kind, value, _) in enumerate(self._pending[start:], start=1):
                 total += value
                 if kind == "own":
                     own += value
+                elif kind == "other":
+                    other += value
                 else:
                     bonus += value
                 if total == self._owed:
                     bucket.own += own
                     bucket.bonus += bonus
-                    self._debug(f"matched own={own} bonus={bonus} skipped={start}")
+                    bucket.other += other
+                    self._debug(f"matched own={own} bonus={bonus} other={other} skipped={start}")
                     if self.on_split:
                         self.on_split(own, bonus)
                     del self._pending[:start + n]
