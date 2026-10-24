@@ -4,6 +4,7 @@
 
 **Bigger window, tidier code**
 - **Drag the window's edge to make everything bigger or smaller together:** text, buttons, pictures, the log and the Solo / Party table, from 60% to 300%. A change of a few percent is ignored, and the window goes back to the tracker's own shape. With the log open, the log takes the extra width and the height sets the zoom. It works in all three compact shapes too. The zoom is remembered, and Settings > Size still works on top of it.
+- **The log's Details window zooms the same way:** drag its edge and its text, spacing, pace chart and buttons grow or shrink together.
 - **Solo / Party table:** it shows **Mesos** (the total) and **EXP %** (each row's share of 100%) in place of the two per-hour columns.
 - **Code layout:** the program moved from one big `maple_exp.py` and a few loose files into the `maple_overlay/` package (`core`, `vision`, `logs`, `ui`, `platforms`). `maple_exp.py` is now just the file you run, and nothing changes in how the overlay works or what it saves. See `docs/ARCHITECTURE.md`.
 - New test `tests/test_ui_size.py` drives the real window at several sizes (it needs a screen, so it isn't run by GitHub).
