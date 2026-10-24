@@ -5653,7 +5653,7 @@ class App:
                               "You / Party bonus: from the game's EXP messages, shown only for the EXP they add up to "
                               "exactly (the rest is Not split).",
                  wraplength=th.px(330), justify="left", **dim).pack(anchor="w", pady=(0, th.px(4)))
-        heads = ["", "Time", "EXP", "EXP/hr", "Mesos/hr", "%"]
+        heads = ["", "Time", "EXP", "EXP %", "Mesos"]
         for c, name in enumerate(heads):
             tk.Label(table, text=name, anchor="e", **dim).grid(row=0, column=c, sticky="e", padx=(th.px(10) if c else 0, 0))
         made = []
@@ -5663,8 +5663,8 @@ class App:
                 made.pop().destroy()
             total = st.exp
             for r, (name, b) in enumerate(st.rows(), start=1):
-                vals = [name, fmt_dur(b.seconds), fmt_num(b.exp), self._per_hour(b.exp, b.seconds),
-                        "\u2014" if b.mesos is None else self._per_hour(b.mesos, b.seconds), f"{b.exp / total * 100:.0f}%" if total else "\u2014"]
+                vals = [name, fmt_dur(b.seconds), fmt_num(b.exp), f"{b.exp / total * 100:.0f}%" if total else "\u2014",
+                        "\u2014" if b.mesos is None else fmt_num(b.mesos)]
                 for c, v in enumerate(vals):
                     lab = tk.Label(table, text=v, anchor="w" if c == 0 else "e", **val)
                     lab.grid(row=r, column=c, sticky="w" if c == 0 else "e", padx=(th.px(10) if c else 0, 0), pady=th.px(2))
