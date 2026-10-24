@@ -2185,23 +2185,32 @@ class App:
         table = tk.Frame(parent, bg=BG)
         table.pack(fill="x", pady=(th.px(8), th.px(4)))
         tk.Label(parent, text="Solo = while you were alone in the party list. Party = while you were in a party. "
-                              "You / Party bonus: from the game's EXP messages, shown only for the EXP they add up to "
-                              "exactly (the rest is Not split).",
+                              "Under Party, from the game's EXP messages (only for the EXP they add up to exactly): "
+                              "Solo = EXP of your own kills (white message), Party bonus = what the party added "
+                              "(yellow, \"Bonus EXP for PARTY\"), Other = EXP of a party member's kill "
+                              "(yellow \"You received EXP\"). The rest is Not split. "
+                              "% of level = how much of the level's EXP bar it is. % of total = its share of the Total EXP.",
                  wraplength=th.px(330), justify="left", **dim).pack(anchor="w", pady=(0, th.px(4)))
-        heads = ["", "Time", "EXP", "EXP %", "Mesos"]
+        heads = ["", "Time", "EXP", "% of level", "% of total", "Mesos"]
         for c, name in enumerate(heads):
             tk.Label(table, text=name, anchor="e", **dim).grid(row=0, column=c, sticky="e", padx=(th.px(10) if c else 0, 0))
         made = []
+        colors = {"Solo": FG, "Party bonus": "#F2C94C", "Other": "#B79F45"}      # (the sub-rows under Party; white / yellow like the game's lines)
 
         def refresh():
             while made:
                 made.pop().destroy()
-            total = st.exp
+            total, req = st.exp, self.tracker.req
+            approx = "\u2248" if self.tracker.levels else ""                  # (a level-up in between: the bar's size changed)
             for r, (name, b) in enumerate(st.rows(), start=1):
-                vals = [name, fmt_dur(b.seconds), fmt_num(b.exp), f"{b.exp / total * 100:.0f}%" if total else "\u2014",
+                of_level = f"{approx}{b.exp / req * 100:.2f}%" if req else "\u2014"
+                vals = [name, fmt_dur(b.seconds), fmt_num(b.exp), of_level,
+                        f"{b.exp / total * 100:.0f}%" if total else "\u2014",
                         "\u2014" if b.mesos is None else fmt_num(b.mesos)]
+                color = colors.get(name.strip()) if name.startswith(" ") else None
                 for c, v in enumerate(vals):
-                    lab = tk.Label(table, text=v, anchor="w" if c == 0 else "e", **val)
+                    look = dict(val, fg=color) if color and c in (0, 2, 3, 4) else val
+                    lab = tk.Label(table, text=v, anchor="w" if c == 0 else "e", **look)
                     lab.grid(row=r, column=c, sticky="w" if c == 0 else "e", padx=(th.px(10) if c else 0, 0), pady=th.px(2))
                     made.append(lab)
         return refresh
