@@ -1,7 +1,8 @@
 """The game's EXP messages: "You received EXP (+7)" and "Bonus EXP for PARTY (+2)".
 
-Both are yellow lines in the message area at the bottom right of the game. The first is what you
-earned from the kill, the second what the party added on top. The EXP bar already says how much
+They are lines in the message area at the bottom right of the game. "You received EXP" is WHITE when
+you made the kill (kind "own") and YELLOW when a party member did (kind "other"); "Bonus EXP for PARTY"
+is yellow: what the party added on top. The EXP bar already says how much
 EXP came in; these lines say how that splits. A split is only believed when it adds up to the
 bar's gain exactly (split_gain), so a misread digit can never put a wrong number in the table.
 
@@ -12,7 +13,7 @@ import re
 import cv2
 import numpy as np
 
-OWN, BONUS = "own", "bonus"
+OWN, BONUS, OTHER = "own", "bonus", "other"
 
 # Yellow text: OpenCV hue 18-40, saturated, bright. (The party list's stars are yellow too; they are
 # tiny and carry no text, so the line test and the text test drop them.)
@@ -91,7 +92,7 @@ def read_lines(bgr, read_text):
     for b, text in zip(boxes, texts):
         got = parse(text)
         if got:
-            found.append((got[0], got[1], b[1]))
+            found.append((OTHER if got[0] == OWN else got[0], got[1], b[1]))     # (read from the yellow pixels only)
     return found
 
 
@@ -235,11 +236,12 @@ _PAREN_R_G = _GLYPH_ARRAYS[")"]
 
 def read_messages(bgr):
     """The EXP and mesos message lines in a picture of the message area, read without OCR: [(kind, value, y)]
-    (kind is "own", "bonus" or "mesos"), top to bottom. Every glyph and each line's label is compared with what
+    (kind is "own" (white), "other" (a yellow "received" line), "bonus" or "mesos"), top to bottom. Every glyph and each line's label is compared with what
     the game draws; whatever doesn't match exactly enough is not read, never guessed."""
     found = {}
     h, w = bgr.shape[:2]
-    for mask in text_masks(bgr):
+    for n, mask in enumerate(text_masks(bgr)):
+        yellow = n == 0                                   # (the first mask is the yellow pixels)
         strip = mask[:, int(w * RIGHT_PART):].astype(np.float32)
         res = cv2.matchTemplate(strip, _PAREN_R_G.astype(np.float32), cv2.TM_SQDIFF)
         ys, xs = np.where(res <= 2)
@@ -247,7 +249,7 @@ def read_messages(bgr):
             xr = int(w * RIGHT_PART) + x + 3
             got = _read_at(mask, xr, y)
             if got and not any(abs(y - fy) <= 3 for fy in found):
-                found[y] = got
+                found[y] = (OTHER if yellow and got[0] == OWN else got[0], got[1])   # (yellow "received" = a party member's kill)
     return [(k, v, y) for y, (k, v) in sorted(found.items())]
 
 
@@ -299,21 +301,23 @@ class LineTracker:
 
 
 def split_gain(lines, gain, max_lines=8):
-    """What the lines say about a gain of `gain` EXP on the bar: (own, bonus) or None.
+    """What the lines say about a gain of `gain` EXP on the bar: (own, bonus, other) or None.
 
     Walks the lines from the newest (bottom) up, adding their values, until the sum is exactly `gain`;
     then those lines are what happened since the last look. One kill is "received N" (the line above
     its bonus), so N + M is its whole gain. If no run of lines adds up to `gain` exactly the split
     is not believed."""
-    total = own = bonus = 0
+    total = own = bonus = other = 0
     for kind, value, _ in list(reversed(lines))[:max_lines]:
         total += value
         if kind == OWN:
             own += value
+        elif kind == OTHER:
+            other += value
         else:
             bonus += value
         if total == gain:
-            return own, bonus
+            return own, bonus, other
         if total > gain:
             return None
     return None
