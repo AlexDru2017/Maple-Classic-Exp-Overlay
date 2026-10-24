@@ -129,9 +129,9 @@ class SessionStats:
         party = self.party_all()
         rows = [("Solo", self.solo), ("Party", party)]
         if party.own or party.bonus or party.other:           # (only once the messages have explained some of it)
-            for label, value in (("   Solo", party.own), ("   Party bonus", party.bonus), ("   Other", party.other),
-                                 ("   Not split", party.exp - party.own - party.bonus - party.other)):
-                if label.strip() in ("Other", "Not split") and value <= 0:
+            for label, value in (("   Solo", party.own), ("   Party bonus", party.bonus), ("   Party kills", party.other),
+                                 ("   Other", party.exp - party.own - party.bonus - party.other)):
+                if label.strip() in ("Party kills", "Other") and value <= 0:
                     continue
                 part = Bucket()
                 part.seconds, part.exp, part.mesos = party.seconds, value, None   # (mesos: not split)
