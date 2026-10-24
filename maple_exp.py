@@ -49,7 +49,10 @@ from PIL import Image, ImageDraw, ImageFont, ImageTk
 import level_ocr
 import ocr
 import potions
+import exp_messages
+import log_details
 import report
+import session_stats
 from platforms import create_platform, hotkey_text, parse_hotkey
 from report import Health, Recent
 from ui_gfx import INK, TEXT_DIM
@@ -78,12 +81,14 @@ CONFIG_PATH = DATA_DIR / "config.json"
 ERROR_LOG_PATH = DATA_DIR / "errors.log"
 TEMPLATE_PATH = ASSETS / "digits.npz"
 ICON_PATH = ASSETS / "icon.ico"
-POLL_SECONDS = 1.5          # how often to read the EXP bar
+RATE_HZ_DEFAULT, RATE_HZ_MIN, RATE_HZ_MAX = 7, 1, 20      # how many times a second the screen is read (Settings > Data collection rate)
+UI_HZ_DEFAULT, UI_HZ_MIN, UI_HZ_MAX = 1, 1, 20            # how many times a second the numbers on screen are redrawn (Settings > Display refresh rate)
 ROLLING_WINDOW = 300        # seconds used for the "last 5 min" rate
 MESO_GAP = 120              # seconds without a mesos look after which a rise is believed, however big
 SEARCH_STRIP = 0.22         # bottom part of the game window searched for the EXP text
 LOG_PATH = DATA_DIR / "exp_log.json"
 LOG_TEXT_PATH = DATA_DIR / "exp_log.txt"
+SESSION_LOG_PATH = DATA_DIR / "session_log.csv"       # one line per event (start, pause, map, party, level up...), opens in Excel
 LOG_BLOCK = 300             # seconds of non-stop EXP gain behind each log update
 MESOS_PATH = DATA_DIR / "mesos_digits.npz"             # learned as you play...
 MESOS_START_PATH = ASSETS / "mesos_digits.npz"          # ...starting from these
@@ -100,7 +105,7 @@ POTION_FULL_LOOK = 15       # every this many reads the bar is looked for over i
 OUTLINE_SECONDS = 8         # how often the (costly) search for a see-through mesos box may run
 LEVEL_RECHECK_SECONDS = 30  # a level read from the badge is looked at again this often (it only changes at a level-up)
 LEVEL_FAILS_FOR_FALLBACK = 3    # badge reads that failed in a row before typing the level in is offered
-DEFAULTS = {"gap_seconds": 15, "transparency": 0, "topmost": True,
+DEFAULTS = {"rate_hz": RATE_HZ_DEFAULT, "ui_hz": UI_HZ_DEFAULT, "gap_seconds": 15, "transparency": 0, "topmost": True,
             "check_updates": True, "skip_version": "", "ui_scale": 100, "compact": False, "hotkeys_on": True,
             "details": False, "compact_shape": "square", "seen_version": "",
             "potions_on": True, "potion_prices": {}}
@@ -215,6 +220,8 @@ def load_config():
         value = cfg.get(key)
         if type(value) is not type(default) or (key == "gap_seconds" and not 1 <= value <= 3600):
             cfg[key] = default
+    cfg["rate_hz"] = min(RATE_HZ_MAX, max(RATE_HZ_MIN, cfg["rate_hz"]))
+    cfg["ui_hz"] = min(UI_HZ_MAX, max(UI_HZ_MIN, cfg["ui_hz"]))
     cfg["transparency"] = min(MAX_TRANSPARENCY, max(0, cfg["transparency"]))
     cfg["potion_prices"] = potions.clean_prices(cfg["potion_prices"])
     if cfg["compact_shape"] not in SHAPES:
@@ -231,6 +238,7 @@ def load_config():
                   k in ("left", "top") or v[k] > 0) for k in ("left", "top", "width", "height")),
               "log_columns": lambda v: isinstance(v, dict), "log_columns_pt": lambda v: isinstance(v, dict),
               "log_open": lambda v: type(v) is bool,
+              "party_view": lambda v: v in ("closed", "docked", "floating"),
               "share_runs": lambda v: type(v) is bool}       # missing: not asked yet
     for key, ok in checks.items():
         if key in cfg and cfg[key] is not None and not ok(cfg[key]):
@@ -1366,6 +1374,9 @@ class ScreenReader:
         self.next_outline = 0.0     # the earliest time to search for a see-through mesos box again
         self.party_area = None      # where the party list was last seen, on screen
         self.next_scan = 0.0
+        self.msg_rect = None                    # the game window, for the message reader (its own thread, see App._message_worker)
+        self.msg_queue, self._msg_tracker = deque(), exp_messages.LineTracker()     # new message lines [(kind, value)] waiting for the App
+        self.sample_dir, self.sample_at, self.samples_saved = None, 0.0, 0     # (collecting EXP message pictures, see collect_samples)
         self.own_rect = None        # this app's window, which screenshots can't see through
         self.look_again_requested = False
         self.exp_anchor = None      # where the EXP number starts, relative to the game window
@@ -1763,8 +1774,53 @@ class ScreenReader:
         if window:
             notes.append(f"{WINDOW_NAMES[window]} window open.")
         bar = self._read_potion_bar(sct, rect, notes) if now >= self.next_bar else None
+        self.msg_rect = rect
+        if self.sample_dir:
+            self._save_message_sample(sct, rect, now)
         return reading._replace(mesos=mesos, mesos_image=image, mesos_boxes=boxes, party=party,
                                 mesos_at=moved, window=window, bar=bar, note=" ".join(notes) or None)
+
+    def read_new_messages(self, sct):
+        """One look at the message area from the message thread: the lines that appeared since the last look are
+        added to msg_queue as (kind, value)."""
+        rect = self.msg_rect
+        if not rect:
+            return
+        cur = self._read_messages(sct, rect)
+        if cur is None:
+            return
+        self.msg_queue.extend(self._msg_tracker.update(cur, time.monotonic()))
+
+    def _read_messages(self, sct, rect):
+        """The "You received EXP (+N)" / "Bonus EXP for PARTY (+N)" lines now on screen, oldest first, as
+        [(kind, value, y)], or None if the screen can't be read. Read from the pixels directly (exp_messages)."""
+        wx, wy, ww, wh = rect
+        try:
+            shot = grab(sct, wx + int(0.55 * ww), wy + int(0.35 * wh), int(0.45 * ww), int(0.55 * wh))
+            return exp_messages.read_messages(shot[0]) if shot else None
+        except Exception as e:
+            log_error("reading the EXP messages", e)
+            self.msg_rect = None                                # (not retried: the split is only an extra)
+            return None
+
+    def _save_message_sample(self, sct, rect, now):
+        """While collecting: saves a picture of the game's message area (bottom right) whenever it holds yellow
+        lines (EXP messages), at most one every 2 seconds and 300 in all. The pictures are the digits' examples
+        for reading "You received EXP (+N)" / "Bonus EXP for PARTY (+N)" exactly."""
+        if now - self.sample_at < 2 or self.samples_saved >= 300:
+            return
+        wx, wy, ww, wh = rect
+        shot = grab(sct, wx + int(0.55 * ww), wy + int(0.35 * wh), int(0.45 * ww), int(0.55 * wh))
+        if not shot or not exp_messages.find_lines(exp_messages.yellow_mask(shot[0])):
+            return
+        self.sample_at = now
+        try:
+            self.sample_dir.mkdir(parents=True, exist_ok=True)
+            self.samples_saved += 1
+            cv2.imwrite(str(self.sample_dir / f"msg_{time.strftime('%H%M%S')}_{self.samples_saved:03d}.png"), shot[0])
+        except Exception as e:
+            log_error("saving an EXP message sample", e)
+            self.sample_dir = None
 
     def _read_potion_bar(self, sct, rect, notes):
         """The potions and food on the potion bar as a tuple of potions.Slot (empty: none, or it
@@ -2501,6 +2557,33 @@ class MesoTracker:
         self._snap_back(value, now)
         self.value = value
 
+    def add_text(self, amount, elapsed, now=None, running=True):
+        """Mesos picked up, from the game's "You have gained mesos (+N)" line. Counted only while tracking, after the
+        inventory has set the start, and not while a shop, storage or trade window is open. The next look at the
+        inventory corrects any line that wasn't seen: what it finds beyond this count is added then. True if counted,
+        otherwise why not (a text)."""
+        if self.value is None:
+            # No inventory look yet: count the lines from now anyway. The first look only sets the start (what was
+            # picked up before it isn't counted twice), and every later one corrects what the lines missed.
+            if not running or self.window or amount <= 0:
+                return "not tracking" if not running else "a window is open" if self.window else "zero"
+            if self.start is None:
+                self.start = elapsed
+                self.samples.append((elapsed, self.gained))
+            self._earn(amount, elapsed)
+            self.read_elapsed = elapsed
+            return True
+        why = ("not tracking" if not self.counting else "a shop/storage/trade window is open" if self.window else
+               "waiting for the inventory (stale)" if self.stale else None)
+        if amount <= 0 or why:
+            return why or "zero"
+        self.value += amount
+        self._earn(amount, elapsed)
+        self.read_elapsed = elapsed             # (the rates follow the lines, not only the inventory looks)
+        if now is not None:
+            self.seen_at = now                  # (the log can trust these mesos like a look at the inventory)
+        return True
+
     def _snap_back(self, value, now):
         """A count that goes back to the one before it (A, B, A) with no window seen meanwhile
         is a snap back: grinding can't do that, so B was a misread. When B was shown is kept
@@ -2750,8 +2833,8 @@ def notes_of(entries):
 
 
 def log_row(e, part=False):
-    """The log table's cells for an entry: Date, Map, Lv, Class, Party, Time, EXP/hr, Mesos/hr,
-    Net/hr, Note. `part`: one party size under a merged party line, so just its own numbers."""
+    """The log table's cells for an entry: Date, Map, Lv, Class, Party, Time, EXP, Mesos (the totals),
+    EXP/hr, Mesos/hr, Net/hr, Note. `part`: one party size under a merged party line, so just its own numbers."""
     d = date.fromisoformat(e["date"])
     day = f"{MONTHS[d.month - 1]} {d.day}" + ("" if d.year == date.today().year else f" '{d.year % 100:02d}")
     level = e["level"] if e["level"] is not None else "?"
@@ -2761,10 +2844,13 @@ def log_row(e, part=False):
     ms = e.get("mesos_seconds", 0)
     mesos = f"{e['mesos'] / ms * 3600:,.0f}" if ms else ("?" if tracked else "")
     note = NOTE_MARK if note_of(e) else ""
+    exp_all = f"{APPROX if e.get('estimated') else ''}{e['exp']:,}"          # the totals: what was gained in all
+    mesos_all = f"{e['mesos']:,}" if ms else ("?" if tracked else "")
     if part:
-        return "", "", "", "", party, fmt_logged(e["seconds"], short=True), exp, mesos, net_text(e), note
-    return (day, e["map"], level, e.get("class") or "", party, fmt_logged(e["seconds"], short=True), exp, mesos,
-            net_text(e), note)
+        return ("", "", "", "", party, fmt_logged(e["seconds"], short=True), exp_all, mesos_all, exp, mesos,
+                net_text(e), note)
+    return (day, e["map"], level, e.get("class") or "", party, fmt_logged(e["seconds"], short=True), exp_all, mesos_all,
+            exp, mesos, net_text(e), note)
 
 
 def party_groups(entries):
@@ -2786,6 +2872,14 @@ def merged(entries):
         m["estimated"] = True                    # (one estimated part makes the whole line an estimate)
     for k in ("exp", "seconds", "mesos", "mesos_seconds"):
         m[k] = sum(e.get(k) or 0 for e in entries)
+    for k in EXTRA_KEYS:
+        if any(k in e for e in entries):
+            m[k] = sum(e.get(k) or 0 for e in entries)
+    if any("blocks" in e for e in entries):
+        m["blocks"] = [b for e in entries for b in e.get("blocks", [])][-BLOCKS_KEPT:]
+    if any("lvl_total" in e for e in entries):
+        last = max((e for e in entries if "lvl_total" in e), key=lambda e: e.get("updated", 0))
+        m["lvl_total"], m["remaining"] = last["lvl_total"], last.get("remaining")
     if any("potion_cost" in e for e in entries):
         m["potion_cost"] = sum(e.get("potion_cost") or 0 for e in entries)
         m["potion_seconds"] = sum(e.get("potion_seconds", e["seconds"]) for e in entries if "potion_cost" in e)
@@ -2799,7 +2893,7 @@ def group_row(entries, is_open=False):
     row = list(log_row(merged(entries)))
     sizes = [e["party"] for e in entries]
     row[4] = f"{sizes[0]}–{sizes[-1]}ppl {'▾' if is_open else '▸'}"
-    row[9] = NOTE_MARK if notes_of(entries) else ""
+    row[11] = NOTE_MARK if notes_of(entries) else ""
     return tuple(row)
 
 
@@ -2808,6 +2902,8 @@ def _numbers(name):
     return re.findall(r"\b(?:[IVX]+|\d+)\b", name)
 
 
+EXTRA_KEYS = ("kills", "own_exp", "bonus_exp", "mesos_drops", "mesos_text", "deaths", "levels", "x_seconds")   # per-stretch counters added to a log line (see AutoLog._add)
+BLOCKS_KEPT = 300   # the 5-minute stretches kept on a log line, for the pace chart in its Details window
 LOG_VERSION = 4     # 2: mesos/hr from the mesos tracker; 3: class, seals and runs; 4: potion cost
                     # (a line's personal "note" needed no new version: it's one more optional field,
                     # which older versions leave alone and keep)
@@ -2975,6 +3071,7 @@ class AutoLog:
     # ---- tracking
     def reset_clock(self):
         self.start = self.last_gain = self.block_map = self.block_party = self.meso0 = self.pot0 = None
+        self.x0 = None                                   # the extras (kills, deaths...) as the stretch began
         self.block_exp = 0
         self.run = None                                  # the 15-minute run going on, if any
         self.chain = None                                # when the runs going on straight after each other began
@@ -2999,13 +3096,15 @@ class AutoLog:
                 self.run["exp"] += amount
 
     def tick(self, now, map_name, level, party=1, mesos=None, job=None, map_read=None, hidden=False, potions=None,
-             window_at=None, misreads=(), meso_epoch=0, estimated=False):
+             window_at=None, misreads=(), meso_epoch=0, estimated=False, extras=None):
         """Call regularly while tracking. mesos is the MesoTracker's last look (mesos gained so
         far, when read), however old, or None: a stretch's mesos are those gained between its
         first and last look (a run's: see _site_mesos). job is the class; map_read the map name exactly as read;
         potions ({name: used so far}, their cost so far) or None when potions aren't counted.
         window_at, misreads and meso_epoch: see MesoTracker.for_log. estimated: the EXP now coming in is
         estimated from a % alone (the line and run say so, and such a run is never shared).
+        extras: counters so far (EXTRA_KEYS: kills, deaths...) plus "lvl_total" / "remaining" (the EXP the level
+        needs, and what is left of it); a stretch's are the change over it.
         Returns the entry when one was logged."""
         self._note_look(mesos, meso_epoch)
         self._misreads = misreads
@@ -3029,6 +3128,8 @@ class AutoLog:
         self.block_party = party
         if self.meso0 is None and mesos and mesos[1] >= self.start - 2:
             self.meso0 = mesos                               # mesos as the stretch began
+        if self.x0 is None and extras is not None:
+            self.x0 = dict(extras)                           # kills, deaths... as the stretch began
         if self.pot0 is None and potions is not None:
             self.pot0 = (dict(potions[0]), potions[1])       # potions used as the stretch began
         self._run_tick(now, map_name, level, party, job, map_read, hidden, window_at, estimated)
@@ -3046,11 +3147,23 @@ class AutoLog:
             used = {n: c - self.pot0[0].get(n, 0) for n, c in potions[0].items() if c > self.pot0[0].get(n, 0)}
         entry = self._add(self.block_map or "Unknown map", level, party, self.block_exp,
                           now - self.start, meso_gain, meso_seconds, job, map_read or self.block_map, cost, used,
-                          self.block_estimated)
+                          self.block_estimated, self._extras_since(extras, now - self.start))
         self.start, self.block_exp, self.block_estimated = now, 0, False       # the next 5 minutes start now
+        self.x0 = dict(extras) if extras is not None else None
         self.meso0 = mesos if mesos and now - mesos[1] < 10 else None
         self.pot0 = (dict(potions[0]), potions[1]) if potions is not None else None
         return entry
+
+    def _extras_since(self, extras, seconds):
+        """What the extras counted over the stretch that just ended ({} when they weren't given)."""
+        if extras is None or self.x0 is None:
+            return {}
+        out = {k: max(0, extras.get(k, 0) - self.x0.get(k, 0)) for k in EXTRA_KEYS if k != "x_seconds"}
+        out["x_seconds"] = seconds
+        for k in ("lvl_total", "remaining"):
+            if extras.get(k):
+                out[k] = extras[k]
+        return out
 
     def _run_tick(self, now, map_name, level, party, job, map_read, hidden=False, window_at=None, estimated=False):
         r = self.run
@@ -3236,7 +3349,7 @@ class AutoLog:
         return None if self.start is None else max(0.0, LOG_BLOCK - (now - self.start))
 
     def _add(self, map_name, level, party, exp, seconds, mesos, meso_seconds, job=None, map_read=None,
-             potion_cost=None, potions=None, estimated=False):
+             potion_cost=None, potions=None, estimated=False, extras=None):
         def add():
             key = (date.today().isoformat(), map_name, level, party, job)
             for e in self.entries:
@@ -3257,6 +3370,7 @@ class AutoLog:
                         e["potions"] = used
                     if estimated:
                         e["estimated"] = True                # (not sealed: it only says how the EXP was got)
+                    self._add_extras(e, extras, exp, seconds)
                     if "seal" in e:
                         self._reseal(e, ok)
                     break
@@ -3268,11 +3382,25 @@ class AutoLog:
                     e["potion_cost"], e["potions"], e["potion_seconds"] = potion_cost, dict(potions or {}), seconds
                 if estimated:
                     e["estimated"] = True
+                self._add_extras(e, extras, exp, seconds)
                 self._reseal(e, True)
                 self.entries.append(e)
             e["updated"] = time.time()
             return e
         return self._change(add)
+
+    @staticmethod
+    def _add_extras(e, extras, exp, seconds):
+        """The stretch's extra counters go on the line (they are not sealed: they only describe it), and the stretch
+        itself is kept as one point of the line's pace chart."""
+        blocks = list(e.get("blocks") or [])
+        blocks.append([exp, round(seconds, 1)])
+        e["blocks"] = blocks[-BLOCKS_KEPT:]
+        for k, v in (extras or {}).items():
+            if k in ("lvl_total", "remaining"):
+                e[k] = v
+            elif k in EXTRA_KEYS:
+                e[k] = e.get(k, 0) + v
 
     def _add_run(self, r, seconds, mesos, meso_seconds, local=None):
         run = {"date": date.fromtimestamp(r["wall"]).isoformat(),
@@ -3527,7 +3655,7 @@ FONTS = {"small": ("Manrope", 9, "normal", False), "text": ("Manrope", 10, "norm
 FONT_FILES = ("Manrope.ttf", "ManropeSemiBold.ttf", "ManropeBold.ttf", "ManropeExtraBold.ttf")
 FALLBACK_FONT = {"Manrope": "Segoe UI", "Manrope SemiBold": "Segoe UI Semibold", "Manrope Bold": "Segoe UI Semibold",
                  "Manrope ExtraBold": "Segoe UI Semibold"}
-LOG_HINT = "Click a line to write a note about it. Right-click to copy, rename or delete it."
+LOG_HINT = "Click a line to write a note about it. Right-click for details, to copy, rename or delete it."
 
 
 class App:
@@ -3549,6 +3677,15 @@ class App:
         self.started, self.cpu0 = time.monotonic(), time.process_time()
         self.recent, self.health = Recent(40, self.started), Health()      # for bug reports
         self.autolog = AutoLog(self.cfg["gap_seconds"])
+        self.stats = session_stats.SessionStats(session_stats.CsvLog(str(SESSION_LOG_PATH), on_error=log_error))
+        self.stats.on_debug = self._split_debug
+        self.life = dict.fromkeys(EXTRA_KEYS, 0)        # counters since the app started, for the log (see AutoLog.tick extras)
+        self.stats.on_split = lambda own, bonus: self.life.update(own_exp=self.life["own_exp"] + own,
+                                                                  bonus_exp=self.life["bonus_exp"] + bonus)
+        self._stat_wins = {}                # the Session window, by name
+        self.party_view = "closed"          # Solo / Party: "closed", "docked" (in the main window) or "floating"
+        self.party_panel = self.party_win = self._party_refresh = self._party_job = None
+        self._party_at = None
         self.map_name = None
         self.potion_bar = ()                # what the potion bar showed at the last look: potions.Slot tuple
         self.in_town = False                # on a town map: nobody farms there, so nothing is logged
@@ -3617,10 +3754,13 @@ class App:
             root.after(delay, lambda: PLATFORM.style_window(root, INK, TEXT_DIM))
 
         self._build_log_panel()
+        root.bind("<Configure>", lambda e: self._party_place() if e.widget is root else None, add="+")
         if self.cfg["compact"]:
             self.set_compact(True)
         elif self.cfg.get("log_open"):
             self.toggle_log()
+        if self.cfg.get("party_view") in ("docked", "floating"):
+            self.root.after(300, lambda: self.set_party_view(self.cfg["party_view"], remember=False))
 
         if not templates:
             self.status.set("Some of the program's files are missing, so EXP reading is less "
@@ -3631,8 +3771,10 @@ class App:
 
         self._worker_thread = threading.Thread(target=self._worker, daemon=True)
         self._worker_thread.start()
-        root.after(200, self._pump)
-        root.after(500, self._refresh)
+        self._message_thread = threading.Thread(target=self._message_worker, daemon=True)
+        self._message_thread.start()
+        root.after(self._tick_ms(0.5), self._pump)
+        root.after(self._ui_ms(), self._refresh)
         if self.cfg["check_updates"]:
             self.check_updates()                       # only now, when it starts
         root.after(1500, self._first_run)              # (once: the compact shape or what's new, then the sharing question)
@@ -3645,7 +3787,7 @@ class App:
             self.view.destroy()
         self.theme = Theme(self.root, self._px_per_pt * 0.75, ASSETS / "fonts", self._own_fonts, PLATFORM.font)
         callbacks = dict(settings=self.open_settings, compact=lambda: self.set_compact(not self.compact),
-                         log=self.toggle_log, start=self.toggle, reset=self.reset, logging=self._logging_clicked,
+                         log=self.toggle_log, party=self.toggle_party, start=self.toggle, reset=self.reset, logging=self._logging_clicked,
                          best=self.open_best_maps, menu=self._open_menu, details=self._details_changed)
         self.view = self.main = MainView(self.root, self.theme, callbacks, details=bool(self.cfg.get("details")))
         self.view.grid(row=0, column=0, sticky="n")
@@ -3669,6 +3811,10 @@ class App:
     def _open_menu(self, anchor):
         PopupMenu(self.theme, anchor, [
             ("Follow the game" if self.reader.mode == "region" else "Select area", None, self.toggle_area),
+            ("Session window", None, lambda: self.open_stat_window("session")),
+            ("Solo / Party", None, self.toggle_party),
+            ("Open session log (CSV)", None, self.open_session_log),
+            ("Stop collecting EXP messages" if self.reader.sample_dir else "Collect EXP message samples", None, self.toggle_samples),
             ("View capture", None, self.view_capture)])
 
     def _logging_clicked(self, on):
@@ -3703,6 +3849,7 @@ class App:
                    ("lv", "Lv", "99", "center"), ("class", "Class", "Crossbowman", "w"),
                    ("party", "Party", "2–6ppl ▸", "center"),
                    ("time", "Time", "12h 30m", "center"),
+                   ("exp_total", "EXP", "8,888,888", "e"), ("mesos_total", "Mesos", "88,888,888", "e"),
                    ("exp", "EXP/hr", "888,888", "e"), ("mesos", "Mesos/hr", "888,888", "e"),
                    ("net", "Net/hr", "888,888", "e"), ("note", "Note", NOTE_MARK, "center"))
         # Saved widths are in points, so they look the same on screens with different scaling
@@ -3756,6 +3903,7 @@ class App:
         p.columnconfigure(0, weight=1)
         p.rowconfigure(2, weight=1)
         tree.bind("<Button-3>", self._log_menu)
+        tree.bind("<Double-Button-1>", self._log_details_click)
         tree.bind("<<TreeviewSelect>>", self._log_selected)
         tree.bind("<Button-1>", self._log_click)
         tree.bind("<<TreeviewOpen>>", lambda e: tree.after_idle(self._sync_group, tree.focus()))
@@ -3771,7 +3919,7 @@ class App:
         root = self.root
         if self.log_open:
             # With the log open the window can be resized (e.g. for long map names).
-            self.log_panel.grid(row=0, column=1, sticky="nsew", padx=(0, 12), pady=(10, 8))
+            self.log_panel.grid(row=0, column=1, rowspan=2, sticky="nsew", padx=(0, 12), pady=(10, 8))
             root.update_idletasks()
             root.minsize(self.main.winfo_reqwidth() + 150, self.main.winfo_reqheight())
             root.resizable(True, True)
@@ -3794,6 +3942,8 @@ class App:
         line, and Start/Pause, in a much smaller window. The Compact button (it says Full in
         compact mode), Shift+4, or double-clicking the big number switches it."""
         self.compact = self.cfg["compact"] = on
+        if self.party_view == "docked":
+            (self.party_panel.grid_remove if on else self.party_panel.grid)() if self.party_panel else None
         if on and self.log_open:
             self.toggle_log(remember=False)                 # out of the way, but remembered
         self.view.set_compact(on, self.cfg["compact_shape"])
@@ -4011,7 +4161,7 @@ class App:
             what = "hide" if self.log_tree.item(sel[0], "open") else "see"
             self.log_hint.set(f"{entries[0]['map']}: parties of {sizes}, over {fmt_logged(sum(e['seconds'] for e in entries))} "
                               f"of non-stop EXP gain in all.{hours} Click it to {what} each party size. "
-                              f"Right-click to copy, rename or delete.")
+                              f"Right-click for details, to copy, rename or delete.")
             return
         e = self.shown.get(sel[0]) if sel else None
         if e:
@@ -4023,7 +4173,14 @@ class App:
             hours = (f" Includes {runs} full {RUN_SECONDS // 60}-minute run{'s' * (runs != 1)} of non-stop farming."
                      if runs else "")
             self.log_hint.set(f"{e['map']}: measured over {fmt_logged(e['seconds'])} of non-stop EXP gain."
-                              f"{hours} Right-click to copy, rename or delete.")
+                              f"{hours} Right-click for details, to copy, rename or delete.")
+
+    def _log_details_click(self, event):
+        """Double-click on a line: its Details window."""
+        iid = self.log_tree.identify_row(event.y)
+        entries = self.groups[iid][1] if iid in self.groups else [self.shown[iid]] if iid in self.shown else None
+        if entries and self.log_tree.identify_region(event.x, event.y) == "cell":
+            self.root.after(10, lambda: self._details(entries))
 
     def _log_menu(self, event):
         """Right-click: copy, rename or delete a line (a merged party row: all its party sizes)."""
@@ -4034,11 +4191,72 @@ class App:
         self.log_tree.selection_set(iid)
         many = len(entries) > 1
         menu = tk.Menu(self.root, tearoff=0)
+        menu.add_command(label="Details...", command=lambda: self._details(entries))
+        menu.add_separator()
         menu.add_command(label="Copy lines" if many else "Copy line", command=lambda: self._copy(entries))
         menu.add_command(label="Rename map...", command=lambda: self._rename(entries))
         menu.add_command(label=f"Delete all {len(entries)} party sizes" if many else "Delete entry",
                          command=lambda: self._delete(entries))
         menu.tk_popup(event.x_root, event.y_root)
+
+    def _details(self, entries):
+        """The Details window for a log line (or a map's party sizes shown as one line): totals, rates, potions, and
+        how it compares with your other logs on the map. Numbers come from the log alone (log_details.py)."""
+        th = self.theme
+        sections = log_details.line_sections(entries) + log_details.compare_sections(entries, self.autolog.entries)
+        win = tk.Toplevel(self.root)
+        first = entries[0]
+        win.title(f"Details \u00b7 {first['map']}")
+        win.configure(bg=BG)
+        win.transient(self.root)
+        win.attributes("-topmost", bool(self.cfg["topmost"]))
+        for delay in (0, 150, 800):
+            win.after(delay, lambda: PLATFORM.style_window(win, INK, TEXT_DIM) if win.winfo_exists() else None)
+        body = tk.Frame(win, bg=BG)
+        body.pack(padx=th.px(20), pady=th.px(16))
+        dim = dict(bg=BG, fg=DIM, font=th.font("regular", 11))
+        val = dict(bg=BG, fg=FG, font=th.font("semibold", 11))
+        r = 0
+        for title, rows in sections:
+            tk.Label(body, text=title, bg=BG, fg=ACCENT, font=th.font("bold", 12), anchor="w").grid(
+                row=r, column=0, columnspan=2, sticky="w", pady=(th.px(10) if r else 0, th.px(3)))
+            r += 1
+            for label, value in rows:
+                tk.Label(body, text=label, anchor="w", **dim).grid(row=r, column=0, sticky="w")
+                tk.Label(body, text=str(value), anchor="e", justify="right", **val).grid(
+                    row=r, column=1, sticky="e", padx=(th.px(28), 0))
+                r += 1
+        bars = log_details.pace(entries)[-60:]
+        if len(bars) >= 2:                                   # the pace chart: EXP per hour of each 5-minute stretch
+            tk.Label(body, text="Pace (EXP per hour, each 5 minutes)", bg=BG, fg=ACCENT, font=th.font("bold", 12),
+                     anchor="w").grid(row=r, column=0, columnspan=2, sticky="w", pady=(th.px(10), th.px(3)))
+            cw, ch = th.px(420), th.px(90)
+            cv = tk.Canvas(body, width=cw, height=ch, bg=LIST_BG, highlightthickness=0)
+            cv.grid(row=r + 1, column=0, columnspan=2, sticky="w")
+            top = max(bars) or 1
+            step = cw / len(bars)
+            for i, v in enumerate(bars):
+                h = max(1, (ch - th.px(6)) * v / top)
+                cv.create_rectangle(i * step + 1, ch - h, (i + 1) * step - 1, ch, fill=ACCENT, width=0)
+            cv.create_text(cw - 4, 8, text=f"{top:,.0f}", fill=DIM, anchor="e", font=th.font("regular", 9))
+            r += 2
+        note = notes_of(entries)
+        if note:
+            tk.Label(body, text="Note", bg=BG, fg=ACCENT, font=th.font("bold", 12), anchor="w").grid(
+                row=r, column=0, columnspan=2, sticky="w", pady=(th.px(10), th.px(3)))
+            tk.Label(body, text=note, wraplength=th.px(420), justify="left", anchor="w", **val).grid(
+                row=r + 1, column=0, columnspan=2, sticky="w")
+        bar = tk.Frame(win, bg=BG)
+        bar.pack(fill="x", padx=th.px(20), pady=(0, th.px(16)))
+
+        def copy():
+            self.root.clipboard_clear()
+            self.root.clipboard_append(log_details.as_text(sections))
+        Button(bar, th, text="Copy", kind="secondary", width=90, height=34, radius=10, size=12, command=copy,
+               bg=BG).pack(side="left")
+        Button(bar, th, text="Close", kind="ghost", width=90, height=34, radius=10, size=12, command=win.destroy,
+               bg=BG).pack(side="right")
+        win.bind("<Escape>", lambda e: win.destroy())
 
     def _copy(self, entries):
         text = "\n".join(format_entry(e) for e in entries)
@@ -4157,6 +4375,39 @@ class App:
                command=lambda: gap_by(5), bg=BG).pack(side="left")
         tk.Label(gap_step, text="s", bg=BG, fg=DIM, font=th.font("regular", 11)).pack(side="left", padx=(px(6), 0))
         tk.Label(body, text="Pausing also restarts the 5-minute log timer.", **dim).pack(anchor="w", pady=(px(5), 0))
+
+        self._section(body, "Speed")
+
+        def hz_row(key, label, lo, hi, default, note, first=False):
+            var = tk.StringVar(value=str(self.cfg[key]))
+            row = tk.Frame(body, bg=BG)
+            row.pack(fill="x", pady=(0 if first else px(8), 0))
+            tk.Label(row, text=label, **text).pack(side="left")
+            step = tk.Frame(row, bg=BG)
+            step.pack(side="right")
+
+            def by(delta):
+                try:
+                    now_ = int(var.get())
+                except ValueError:
+                    now_ = self.cfg[key]
+                now_ = min(hi, max(lo, now_ + delta))
+                var.set(str(now_))
+                self.cfg[key] = now_                    # (used at once: the loops look it up every time)
+                save_config(self.cfg)
+            Button(step, th, text="\u2212", kind="secondary", width=38, height=34, radius=10, size=15,
+                   command=lambda: by(-1), bg=BG).pack(side="left")
+            tk.Label(step, textvariable=var, width=4, bg=BG, fg=FG, font=th.font("bold", 12)).pack(side="left")
+            Button(step, th, text="+", kind="secondary", width=38, height=34, radius=10, size=15,
+                   command=lambda: by(1), bg=BG).pack(side="left")
+            tk.Label(step, text="Hz", bg=BG, fg=DIM, font=th.font("regular", 11)).pack(side="left", padx=(px(6), 0))
+            tk.Label(body, text=f"{note} Default {default} Hz, {lo} to {hi}.", wraplength=wrap, justify="left",
+                     **dim).pack(anchor="w", pady=(px(3), 0))
+        hz_row("rate_hz", "Data collection rate", RATE_HZ_MIN, RATE_HZ_MAX, RATE_HZ_DEFAULT,
+               "How often the screen is read. Faster catches more of the game's messages but uses more processor.",
+               first=True)
+        hz_row("ui_hz", "Display refresh rate", UI_HZ_MIN, UI_HZ_MAX, UI_HZ_DEFAULT,
+               "How often the numbers in this window are redrawn. The data is collected at its own rate.")
 
         self._section(body, "Window")
         transparency = tk.IntVar(value=int(self.cfg["transparency"]))
@@ -4489,6 +4740,25 @@ class App:
             return None
 
     # ---- background capture loop
+    def _period(self):
+        """Seconds between two readings of the screen: 1 / the reading speed set in Settings (read each time, so a change
+        applies at once)."""
+        try:
+            return 1.0 / min(RATE_HZ_MAX, max(RATE_HZ_MIN, int(self.cfg["rate_hz"])))
+        except Exception:
+            return 1.0 / RATE_HZ_DEFAULT
+
+    def _tick_ms(self, factor):
+        """Milliseconds between two runs of the loop that takes in the readings: it follows the data collection rate."""
+        return int(min(1000, max(40, self._period() * 1000 * factor)))
+
+    def _ui_ms(self):
+        """Milliseconds between two redraws of the numbers on screen (Settings > Display refresh rate)."""
+        try:
+            return int(1000 / min(UI_HZ_MAX, max(UI_HZ_MIN, int(self.cfg["ui_hz"]))))
+        except Exception:
+            return int(1000 / UI_HZ_DEFAULT)
+
     def _worker(self):
         with mss.mss() as sct:
             while not self.stop_evt.is_set():
@@ -4500,8 +4770,20 @@ class App:
                     log_error("reading the screen", e)
                     self.health.failed(e)
                     self.q.put(("error", f"{type(e).__name__}: {e}"))
-                self.stop_evt.wait(max(0.1, POLL_SECONDS - (time.monotonic() - t0)))
+                self.stop_evt.wait(max(0.02, self._period() - (time.monotonic() - t0)))
             self.health.alive = False
+
+    def _message_worker(self):
+        """Reads the game's message lines (EXP, party bonus, mesos) as often as the screen is read (Settings >
+        Reading speed): they scroll away in a few seconds."""
+        try:
+            with mss.mss() as sct:
+                while not self.stop_evt.is_set():
+                    t0 = time.monotonic()
+                    self.reader.read_new_messages(sct)
+                    self.stop_evt.wait(max(0.02, self._period() - (time.monotonic() - t0)))
+        except Exception as e:
+            log_error("reading the messages", e)
 
     # ---- sharing runs
     def open_best_maps(self):
@@ -4764,8 +5046,12 @@ class App:
         except Exception as e:
             self._oops("handling a reading", e)
         finally:
+            try:
+                self._feed_stats()                      # (at the data rate: the numbers follow the readings, not the redraws)
+            except Exception as e:
+                self._oops("updating the session numbers", e)
             if not self.stop_evt.is_set():
-                self.root.after(200, self._pump)
+                self.root.after(self._tick_ms(0.5), self._pump)
 
     def _handle(self, r):
         t, now = self.tracker, time.monotonic()
@@ -4978,8 +5264,12 @@ class App:
         if self.cfg["potions_on"]:
             used = self.session.potions.used
             potions_now = (dict(used), self.session.potions.cost(self._prices().mapping()))
+        t = self.tracker
+        extras = dict(self.life, deaths=t.deaths, levels=t.levels)
+        if t.req and t.exp is not None:
+            extras.update(lvl_total=int(t.req), remaining=max(0, int(t.req - t.exp)))
         entry = self.autolog.tick(now, self.map_name, self.level, self.party, job=self.job, map_read=self.map_read,
-                                  hidden=self.map_hidden, potions=potions_now,
+                                  hidden=self.map_hidden, potions=potions_now, extras=extras,
                                   estimated=self.tracker.estimated and self.tracker.percent_mode, **self.meso.for_log())
         if len(self.autolog.runs) > runs:
             self.share_runs()                          # a run just finished
@@ -4996,7 +5286,7 @@ class App:
             self._oops("updating the window", e)
         finally:
             if not self.stop_evt.is_set():
-                self.root.after(500, self._refresh)
+                self.root.after(self._ui_ms(), self._refresh)
 
     def _state(self):
         """A word for the status pill: where things stand."""
@@ -5225,6 +5515,255 @@ class App:
         else:
             how = "Class. Not read yet (it's tried every few seconds once the EXP bar is found)"
         return (look or {}).get("image"), (look or {}).get("boxes", []), how
+
+    # ---- Session and Solo / Party windows (numbers from session_stats.py; nothing here changes the tracking)
+    def _split_debug(self, text):
+        """What the EXP split saw (lines read, gains, matches), appended to split_debug.log in the settings folder.
+        Small, and cut down to the last part when it passes 1 MB."""
+        path = DATA_DIR / "split_debug.log"
+        try:
+            if path.exists() and path.stat().st_size > 1_000_000:
+                path.write_text(path.read_text(encoding="utf-8", errors="replace")[-200_000:], encoding="utf-8")
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(f"{time.strftime('%H:%M:%S')} {text}\n")
+        except Exception:
+            self.stats.on_debug = None
+
+    def _feed_stats(self):
+        t, m = self.tracker, self.meso
+        new = []
+        while self.reader.msg_queue:                                    # (the message thread's new lines)
+            try:
+                new.append(self.reader.msg_queue.popleft())
+            except IndexError:
+                break
+        # Mesos come from the game's "You have gained mesos (+N)" lines once the inventory has set the start.
+        for kind, amount in new:
+            if kind == "own":
+                self.life["kills"] += 1                                 # (each "You received EXP" is one kill)
+            elif kind == "mesos":
+                self.life["mesos_drops"] += 1
+                self.life["mesos_text"] += amount
+            if kind == "mesos":
+                why = self.meso.add_text(amount, t.elapsed(), time.monotonic(), t.running)
+                self._split_debug(f"mesos +{amount}: " + ("counted" if why is True else f"not counted ({why})"))
+        new = [n for n in new if n[0] != "mesos"]
+        self.stats.update(t.running, self.party, t.gained, m.gained, t.levels, t.deaths, self.map_name, self.level,
+                          new_lines=new)
+
+    def toggle_samples(self):
+        """Menu: saves pictures of the game's EXP messages to the program's samples folder (up to 300), so the
+        exact digit reading for them can be built. Nothing is sent anywhere."""
+        r = self.reader
+        if r.sample_dir:
+            r.sample_dir = None
+            self.status.set(f"Stopped. {r.samples_saved} pictures were saved in the samples folder.")
+            return
+        r.sample_dir, r.samples_saved = HOME_DIR / "samples", 0
+        self.status.set("Collecting EXP message pictures into the samples folder while yellow messages show. "
+                        "Farm for 5 to 10 minutes in a party, then stop it from the same menu.")
+
+    def open_session_log(self):
+        if not SESSION_LOG_PATH.exists():
+            messagebox.showinfo("Session log", "Nothing has been logged yet.\n\nThe file is made when you press Start.",
+                                parent=self.root)
+            return
+        PLATFORM.show_file(SESSION_LOG_PATH)
+
+    def open_stat_window(self, kind):
+        """The Session window (a floating window; brought forward if it's open). The Solo / Party view has
+        its own methods below: it can sit inside the main window or float next to it."""
+        if kind == "party":
+            return self.toggle_party()
+        old = self._stat_wins.get(kind)
+        if old is not None and old.winfo_exists():
+            old.lift()
+            return
+        th, st = self.theme, self.stats
+        win = tk.Toplevel(self.root)
+        win.title("Session")
+        win.configure(bg=BG)
+        win.attributes("-topmost", bool(self.cfg["topmost"]))
+        win.resizable(False, False)
+        for delay in (0, 150, 800):
+            win.after(delay, lambda: PLATFORM.style_window(win, INK, TEXT_DIM) if win.winfo_exists() else None)
+        body = tk.Frame(win, bg=BG)
+        body.pack(padx=th.px(18), pady=th.px(16))
+        dim = dict(bg=BG, fg=DIM, font=th.font("regular", 11))
+        val = dict(bg=BG, fg=FG, font=th.font("semibold", 12))
+        cells = {}
+        names = ["Time", "EXP", "EXP / hr", "Mesos", "Mesos / hr", "Levels gained", "Deaths", "Map", "Party now"]
+        for i, name in enumerate(names):
+            tk.Label(body, text=name, anchor="w", **dim).grid(row=i, column=0, sticky="w", pady=th.px(3))
+            cells[name] = tk.Label(body, text="", anchor="e", **val)
+            cells[name].grid(row=i, column=1, sticky="e", padx=(th.px(24), 0), pady=th.px(3))
+
+        def refresh():
+            cells["Time"].config(text=fmt_dur(st.seconds))
+            cells["EXP"].config(text=fmt_num(st.exp))
+            cells["EXP / hr"].config(text=self._per_hour(st.exp, st.seconds))
+            cells["Mesos"].config(text=fmt_num(st.mesos))
+            cells["Mesos / hr"].config(text=self._per_hour(st.mesos, st.seconds))
+            cells["Levels gained"].config(text=str(st.levels))
+            cells["Deaths"].config(text=str(st.deaths))
+            cells["Map"].config(text=st.map or "\u2014")
+            cells["Party now"].config(text="Solo" if st.now_party <= 1 else f"{st.now_party} players")
+        tk.Label(win, text="Counts only while tracking. Reset Session clears just this window: your main numbers "
+                           "and the log are not touched.", wraplength=th.px(420), justify="left", **dim).pack(
+            anchor="w", padx=th.px(18), pady=(0, th.px(8)))
+        bar = tk.Frame(win, bg=BG)
+        bar.pack(fill="x", padx=th.px(18), pady=(0, th.px(16)))
+        for text, cmd in (("Reset Session", self._reset_session_stats), ("Open log (CSV)", self.open_session_log)):
+            Button(bar, th, text=text, kind="secondary", width=150, height=36, radius=10, size=12, command=cmd,
+                   bg=BG).pack(side="left", padx=(0, th.px(8)))
+
+        def loop():
+            if not win.winfo_exists() or self.stop_evt.is_set():
+                return
+            try:
+                refresh()
+            except Exception as e:
+                log_error("updating the stats window", e)
+            win.after(self._ui_ms(), loop)
+        self._stat_wins[kind] = win
+        loop()
+
+    @staticmethod
+    def _per_hour(value, seconds):
+        return fmt_num(value / seconds * 3600) if seconds >= 10 else "\u2014"
+
+    # ---- Solo / Party: a panel in the main window ("docked"), or a window that floats beside it and moves
+    # with it ("floating"). The same table either way; "closed" hides it.
+    def _party_table(self, parent):
+        """The table (and its note and buttons) in `parent`. Returns the function that refreshes it."""
+        th, st = self.theme, self.stats
+        dim = dict(bg=BG, fg=DIM, font=th.font("regular", 11))
+        val = dict(bg=BG, fg=FG, font=th.font("semibold", 11))
+        top = tk.Frame(parent, bg=BG)
+        top.pack(fill="x")
+        tk.Label(top, text="Solo / Party", bg=BG, fg=FG, font=th.font("bold", 13)).pack(side="left")
+        where = "Pop out" if self.party_view == "docked" else "Dock"
+        Button(top, th, text=where, kind="ghost", width=70, height=28, radius=9, size=11,
+               command=self._party_move, bg=BG).pack(side="right")
+        Button(top, th, text="Reset Session", kind="ghost", width=110, height=28, radius=9, size=11,
+               command=self._reset_session_stats, bg=BG).pack(side="right", padx=(0, th.px(4)))
+        table = tk.Frame(parent, bg=BG)
+        table.pack(fill="x", pady=(th.px(8), th.px(4)))
+        tk.Label(parent, text="Solo = while you were alone in the party list. Party = while you were in a party. "
+                              "You / Party bonus: from the game's EXP messages, shown only for the EXP they add up to "
+                              "exactly (the rest is Not split).",
+                 wraplength=th.px(330), justify="left", **dim).pack(anchor="w", pady=(0, th.px(4)))
+        heads = ["", "Time", "EXP", "EXP/hr", "Mesos/hr", "%"]
+        for c, name in enumerate(heads):
+            tk.Label(table, text=name, anchor="e", **dim).grid(row=0, column=c, sticky="e", padx=(th.px(10) if c else 0, 0))
+        made = []
+
+        def refresh():
+            while made:
+                made.pop().destroy()
+            total = st.exp
+            for r, (name, b) in enumerate(st.rows(), start=1):
+                vals = [name, fmt_dur(b.seconds), fmt_num(b.exp), self._per_hour(b.exp, b.seconds),
+                        "\u2014" if b.mesos is None else self._per_hour(b.mesos, b.seconds), f"{b.exp / total * 100:.0f}%" if total else "\u2014"]
+                for c, v in enumerate(vals):
+                    lab = tk.Label(table, text=v, anchor="w" if c == 0 else "e", **val)
+                    lab.grid(row=r, column=c, sticky="w" if c == 0 else "e", padx=(th.px(10) if c else 0, 0), pady=th.px(2))
+                    made.append(lab)
+        return refresh
+
+    def toggle_party(self):
+        self.set_party_view("closed" if self.party_view != "closed" else "docked")
+
+    def _party_move(self):
+        mode = "floating" if self.party_view == "docked" else "docked"
+        self.root.after(10, lambda: self.set_party_view(mode))       # (not from inside the button that is about to go)
+
+    def set_party_view(self, mode, remember=True):
+        """mode: "closed", "docked" (a panel under the tracker) or "floating" (a window beside it)."""
+        self._party_close()
+        if mode == "docked" and self.compact:
+            mode = "floating"                            # (compact mode has no room for a panel)
+        self.party_view = mode
+        th = self.theme
+        if mode == "docked":
+            panel = self.party_panel = tk.Frame(self.root, bg=BG)
+            panel.grid(row=1, column=0, sticky="ew", padx=th.px(16), pady=(0, th.px(12)))     # (under the tracker only: the log keeps the whole right side)
+            self._party_refresh = self._party_table(panel)
+        elif mode == "floating":
+            win = self.party_win = tk.Toplevel(self.root)
+            win.title("Solo / Party")
+            win.configure(bg=BG)
+            win.transient(self.root)                     # stays with the main window: above it, closed with it, no taskbar button
+            win.attributes("-topmost", bool(self.cfg["topmost"]))
+            win.resizable(False, False)
+            for delay in (0, 150, 800):
+                win.after(delay, lambda: PLATFORM.style_window(win, INK, TEXT_DIM) if win.winfo_exists() else None)
+            body = tk.Frame(win, bg=BG)
+            body.pack(padx=th.px(16), pady=th.px(14))
+            self._party_refresh = self._party_table(body)
+            self._party_at = None
+            win.protocol("WM_DELETE_WINDOW", lambda: self.set_party_view("closed"))
+            win.after(30, self._party_place)
+        self.view.party_btn.set(kind="secondary" if mode != "closed" else "ghost")
+        self.root.update_idletasks()
+        if not self.compact:
+            self.root.geometry("" if not self.log_open else self.root.geometry())
+        if remember:
+            self.cfg["party_view"] = mode
+            save_config(self.cfg)
+        self._party_tick()
+
+    def _party_close(self):
+        for name in ("party_panel", "party_win"):
+            w = getattr(self, name, None)
+            if w is not None:
+                try:
+                    w.destroy()
+                except tk.TclError:
+                    pass
+                setattr(self, name, None)
+        self._party_refresh = None
+
+    def _party_place(self):
+        """The floating view sits just right of the main window and follows it."""
+        win = getattr(self, "party_win", None)
+        if win is None or not win.winfo_exists():
+            return
+        r = self.root
+        win.update_idletasks()
+        w, h = win.winfo_reqwidth(), win.winfo_reqheight()
+        sw, sh = r.winfo_screenwidth(), r.winfo_screenheight()      # (of the screen the main window is on)
+        x, y = r.winfo_rootx() + r.winfo_width() + 8, r.winfo_rooty()
+        if x + w > sw:                                              # no room on the right: put it on the left...
+            x = r.winfo_rootx() - w - 8
+        if x < 0:                                                   # ...and if that doesn't fit either, on the screen's edge
+            x = max(0, sw - w)
+        y = max(0, min(y, sh - h - 40))
+        if getattr(self, "_party_at", None) != (x, y):              # (only when the main window moved or changed size)
+            self._party_at = (x, y)
+            win.geometry(f"+{x}+{y}")
+        win.lift()
+
+    def _party_tick(self):
+        if getattr(self, "_party_job", None):
+            try:
+                self.root.after_cancel(self._party_job)
+            except (tk.TclError, ValueError):
+                pass
+            self._party_job = None
+        if self.party_view == "closed" or self.stop_evt.is_set():
+            return
+        try:
+            if self._party_refresh:
+                self._party_refresh()
+            self._party_place()
+        except Exception as e:
+            log_error("updating the Solo / Party view", e)
+        self._party_job = self.root.after(self._ui_ms(), self._party_tick)
+
+    def _reset_session_stats(self):
+        self.stats.reset()
+        self.status.set("Session reset. Only the Session and Solo / Party numbers were cleared.")
 
     def view_capture(self):
         r, mr = self.last_capture, self.last_mesos
