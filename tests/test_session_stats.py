@@ -157,8 +157,13 @@ s10 = split_run([(0, []), (0, [("own", 8, 1)]), (8, [("own", 8, 1)])], party=1)
 check("solo is never split", (s10.solo.own, s10.solo.bonus) == (0, 0))
 s11 = split_run([(0, []), (0, A), (10, A), (15, A)] + [(15, A)] * 20)
 names = [r[0].strip() for r in s11.rows()]
-check("the table shows You, Party bonus and Not split", names == ["Solo", "Party", "You", "Party bonus", "Not split", "Total"]
+check("the table shows Solo, Party bonus and Not split", names == ["Solo", "Party", "Solo", "Party bonus", "Not split", "Total"]
       and dict((r[0].strip(), r[1].exp) for r in s11.rows())["Not split"] == 5)
+C = [("other", 10, 1), ("bonus", 3, 2)]
+s12 = split_run([(0, []), (0, C), (13, C)] + [(13, C)] * 5)
+b = s12.party_all()
+check("a party member's kill goes to Other", (b.exp, b.own, b.bonus, b.other) == (13, 0, 3, 10))
+check("the table shows Other", dict((r[0].strip(), r[1].exp) for r in s12.rows()).get("Other") == 10)
 
 print("\nALL PASSED" if not failures else f"\n{failures} FAILED")
 sys.exit(1 if failures else 0)

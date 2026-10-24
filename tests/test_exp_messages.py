@@ -51,8 +51,19 @@ noise = np.random.default_rng(1).integers(0, 255, img.shape, dtype=np.uint8)
 check("noise reads as nothing", em.read_messages(noise) == [])
 check("an empty picture reads as nothing", em.read_messages(np.zeros((422, 614, 3), np.uint8)) == [])
 
-check("split: own + bonus equals the gain", em.split_gain([("own", 8, 1), ("bonus", 2, 2)], 10) == (8, 2))
+check("split: own + bonus equals the gain", em.split_gain([("own", 8, 1), ("bonus", 2, 2)], 10) == (8, 2, 0))
 check("split: a sum that doesn't match is refused", em.split_gain([("own", 8, 1), ("bonus", 3, 2)], 10) is None)
+check("split: a party member's kill is Other", em.split_gain([("other", 10, 1), ("bonus", 3, 2)], 13) == (0, 3, 10))
+img2 = np.zeros((422, 614, 3), np.uint8)
+draw(img2, "own", 19, 324)                                  # white: your own kill
+draw(img2, "own", 10, 338, color=(0, 230, 230))             # yellow: a party member's kill
+draw(img2, "bonus", 3, 352, color=(0, 230, 230))
+import cv2  # noqa: E402
+real = cv2.imread(str(Path(__file__).resolve().parent / "frames" / "messages_own_other.png"))
+check("a real screenshot: white 'received' is yours, yellow is a party member's",
+      [(k, v) for k, v, _ in em.read_messages(real)] == [("mesos", 7), ("own", 19), ("bonus", 6), ("other", 10), ("bonus", 3)])
+check("a yellow 'received' line is Other, a white one Own",
+      em.read_messages(img2) == [("own", 19, 324), ("other", 10, 338), ("bonus", 3, 352)])
 check("new lines: scrolled screen", em.new_lines([("own", 8), ("bonus", 2)], [("bonus", 2), ("own", 5)]) == [("own", 5)])
 check("new lines: same pair twice", em.new_lines([("own", 8), ("bonus", 2)],
                                                  [("own", 8), ("bonus", 2), ("own", 8), ("bonus", 2)]) == [("own", 8), ("bonus", 2)])
