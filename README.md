@@ -119,6 +119,7 @@ Click the **log icon** (top left, next to the status pill) to open the log. It's
 - **Size.** Makes the text and the whole window smaller or bigger, from 60% to 200%. The smallest text stops at a readable size, so it never gets too small to read. It's sized for each screen, so a window moved to a screen with different Windows scaling (like a 5K and a 1440p screen) looks the same size on both.
 - **Compact shape.** Square, Wide or Bar: how compact mode looks. See [Compact shapes](#compact-shapes).
 - **Potions.** Turn net mesos and potion counting on or off, and type your own prices under **Prices**. See [Net mesos and potions](#net-mesos-and-potions).
+- **Level fallback.** Only for an EXP bar that shows just a percentage, when your level can't be read from the badge: type your level here. See [How accurate is it?](#how-accurate-is-it).
 - **Hotkeys.** Turn them on or off, and change them. See [Hotkeys](#hotkeys).
 - **Always on top of other windows.** Keeps the overlay above the game. It's on by default.
 - **Check for updates when it starts.** On by default. See [Updates](#updates).
@@ -165,6 +166,7 @@ It double-checks everything it reads before counting it:
 - **Sudden jumps:** an EXP jump or a level-up has to be confirmed before it counts. A mesos amount that looks like an extra or missing digit is ignored.
 - **Dying:** the EXP you lose isn't taken off your EXP/hr. It says how much you lost, then carries on from there.
 - **When in doubt, it waits.** If it can't read something clearly, it skips it instead of guessing.
+- **A bar with only a percentage:** past about Lv 57 the game stops showing the EXP number. The overlay then reads your level from the orange **LV** badge and works EXP out from it, so those numbers are estimates and show a ≈. If the badge can't be read it uses your level from before (only for the same character), or you can type it in Settings. These estimates are never shared with the best-maps website.
 
 Every version is tested against thousands of misread numbers, and against real screenshots of the game pasted over many different backgrounds at different window sizes.
 

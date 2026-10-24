@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.9.12-beta
+
+**Hotfix: an EXP bar that shows only a percentage**
+- Players at high levels (about Lv 57 and up, where a level needs a million EXP or more) reported that the overlay found no EXP bar. From there the game shows only the percentage, like `EXP. [58.47%]`, with no EXP number, and the overlay needed the number. It reads that bar now.
+- Your level comes from the orange **LV** badge on the status bar. EXP is then worked out from your level's EXP and the percentage, so EXP/hr, last 5 minutes, gained and current are estimates, and show a ≈ in front (in your log too).
+- If the badge can't be read, it keeps your level from before the number went away, but only for the same character: it compares a small picture of the name row, which only lives in memory. It never reads, saves or sends your character's name.
+- If that fails too, **Settings, Level fallback** lets you type your level. It lasts for this session only.
+- Estimates stay on your PC: a run made from a percentage alone is never shared with the best-maps website.
+- Fixed an error in the status line before the first EXP reading.
+
 ## 0.9.11-beta
 
 **Mesos/hr you can trust**

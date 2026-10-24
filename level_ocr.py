@@ -13,9 +13,19 @@ from collections import Counter
 import cv2
 import numpy as np
 
-VOTES = 4                    # of the 6 digit pictures, this many must read the same level
+SQUARE_RATIO = 0.87         # the badge's width over its height, for each digit's orange square
+VOTES = 4                    # of the 6 digit pictures of the first look, this many must read the same level
 SIZES = (64, 80)             # heights, in px, the digits are blown up to (grey picture)
 MASK_SIZES = (48, 64, 80, 96)    # ...and the black-and-white picture
+# A blurry badge (a compressed stream, a small window) isn't settled by those six. Then a wide set reads it many
+# more ways, and one level has to win clearly: at least WIDE_VOTES readings and twice any other level's (only
+# readings with the right number of digits, and a 1 only where the digit is narrow, count at all).
+WIDE_MARGINS = (0.04, 0.10, 0.18)        # how much of the badge's edge is cut off the digits' picture
+WIDE_SIZES = (48, 64, 80, 96)
+WIDE_KINDS = ("grey", "t80", "t100", "t130", "t160", "otsu", "usm", "usm_otsu")   # grey, black-and-white at a
+WIDE_VOTES = 4                           # few thresholds, Otsu's, and sharpened first (undoing some blur)
+NARROW = 0.50                            # a digit whose ink is under this share of its square's width is a 1 (measured on
+                                         # real frames, also shrunk to 720p: every 1 was 0.31-0.42, no other digit under 0.56)
 
 
 def find_badge(bgr, x0, cy, gh):
@@ -46,34 +56,79 @@ def find_badge(bgr, x0, cy, gh):
     return row.copy(), (min(x, int(5 * gh)), min(y, pad), w, h)
 
 
-def has_label(row, box, gh):
-    """Is there an "LV." left of the box: white letters about as tall as the digits, a letter or two wide?
-    (Checked by shape, not by reading it: at small window sizes the letters are too few pixels to read,
-    and touch each other.)"""
+def label_span(row, box, gh):
+    """How wide the "LV" letters left of the box are, in digit heights (0 if there are none): white letters about as
+    tall as the digits. The game's measure about 2.4; other orange icons with a mark beside them 1.3-1.7."""
     bx = box[0]
     hsv = cv2.cvtColor(row[:, :max(1, bx - round(0.25 * gh))], cv2.COLOR_BGR2HSV)
     white = ((hsv[..., 1] < 100) & (hsv[..., 2] >= 170)).astype(np.uint8)
     white = cv2.morphologyEx(white, cv2.MORPH_CLOSE, np.ones((2, 2), np.uint8))
     _, _, stats, _ = cv2.connectedComponentsWithStats(white, connectivity=8)
     letters = [(x, w) for x, _, w, h, _ in stats[1:] if 0.9 * gh <= h <= 2.2 * gh and w <= 2.5 * gh]
-    return bool(letters) and max(x + w for x, w in letters) - min(x for x, _ in letters) >= gh
+    return (max(x + w for x, w in letters) - min(x for x, _ in letters)) / gh if letters else 0.0
 
 
-def _pictures(row, box, gh):
-    """The digit pictures, black text on white, for Tesseract (None if the box has no inside)."""
-    _, by, w, h = box
-    bx = box[0]
-    margin = max(1, round(h * 0.1))
-    # Blue separates the white strokes from the orange: in a grey picture this font's 3/8 and 2/6 blur together.
-    digits = row[by + margin:by + h - margin, bx + margin:bx + w - margin, 0]
-    if digits.size == 0:
-        return None
+def has_label(row, box, gh):
+    """Is there an "LV." left of the box? Checked by shape, not by reading it: at small window sizes the letters are
+    too few pixels to read, and touch each other."""
+    return label_span(row, box, gh) >= 2.0
 
-    def ready(image, target):
-        big = cv2.resize(image, None, fx=target / h, fy=target / h, interpolation=cv2.INTER_CUBIC)
-        return cv2.copyMakeBorder(255 - np.clip(big, 0, 255).astype(np.uint8), 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=255)
 
-    return [ready(digits, s) for s in SIZES] + [ready((digits > 100).astype(np.uint8) * 255, s) for s in MASK_SIZES]
+def narrow_squares(row, box, count):
+    """For each of the badge's `count` digit squares: True if the digit in it is narrow, as only a 1 is in this font.
+    Blur can make a 1 read like a 4 or a 7, but not make it as wide as one."""
+    bx, by, w, h = box
+    out = []
+    for i in range(count):
+        x0, x1 = bx + round(i * w / count), bx + round((i + 1) * w / count)
+        square = row[by:by + h, x0:x1, 0]
+        ih, iw = max(1, round(0.12 * h)), max(1, round(0.12 * (x1 - x0)))
+        square = square[ih:-ih or None, iw:-iw or None]
+        if square.size == 0:
+            out.append(False)
+            continue
+        square = cv2.resize(square, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)     # (small badges need it)
+        _, ink = cv2.threshold(square, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        columns = np.where((ink > 0).sum(axis=0) >= max(1, 0.15 * ink.shape[0]))[0]
+        out.append(bool(len(columns)) and (columns.max() - columns.min() + 1) / ink.shape[1] < NARROW)
+    return out
+
+
+def _picture(digits, h, target, kind):
+    """One black-on-white picture of the digits for Tesseract: kind says how the blue channel is turned into it."""
+    if kind == "grey":
+        image = digits
+    elif kind.startswith("usm"):                        # sharpened first: blow it up, then add the difference to a blur
+        big = cv2.resize(digits, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC).astype(np.float32)
+        image = np.clip(big + 1.6 * (big - cv2.GaussianBlur(big, (0, 0), 3)), 0, 255).astype(np.uint8)
+        if kind == "usm_otsu":
+            _, image = cv2.threshold(image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        h = image.shape[0]
+    elif kind == "otsu":
+        _, image = cv2.threshold(digits, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    else:                                               # "t100": white where the blue channel is over 100
+        image = (digits > int(kind[1:])).astype(np.uint8) * 255
+    big = cv2.resize(image, None, fx=target / h, fy=target / h, interpolation=cv2.INTER_CUBIC)
+    return cv2.copyMakeBorder(255 - np.clip(big, 0, 255).astype(np.uint8), 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=255)
+
+
+def _pictures(row, box, wide=False):
+    """The digit pictures for Tesseract (the first six, or the wide set), or None if the box has no inside.
+    Blue separates the white strokes from the orange: in a grey picture this font's 3/8 and 2/6 blur together."""
+    bx, by, w, h = box
+    margins = WIDE_MARGINS if wide else (0.1,)
+    out = []
+    for margin in margins:
+        m = max(1, round(h * margin))
+        digits = row[by + m:by + h - m, bx + m:bx + w - m, 0]
+        if digits.size == 0:
+            return None
+        if wide:
+            out += [_picture(digits, digits.shape[0], t, k) for k in WIDE_KINDS for t in WIDE_SIZES]
+        else:
+            out += [_picture(digits, digits.shape[0], t, "grey") for t in SIZES]
+            out += [_picture(digits, digits.shape[0], t, "t100") for t in MASK_SIZES]
+    return out
 
 
 def read_level(bgr, x0, cy, gh, tess, look=None):
@@ -97,20 +152,34 @@ def read_level(bgr, x0, cy, gh, tess, look=None):
         return fail("Tesseract isn't available")
     if not has_label(row, box, gh):
         return fail("the LV label wasn't there")
-    pictures = _pictures(row, box, gh)
+    pictures = _pictures(row, box)
     if pictures is None:
         return fail("the level badge is cut off")
-    votes = Counter()
-    for text in tess.read_lines(pictures, "0123456789"):
-        match = re.fullmatch(r"\s*([1-9][0-9]{0,2})\s*", text)
-        if match and 1 <= int(match[1]) <= 250:
-            votes[int(match[1])] += 1
-    if look is not None:
-        look["votes"] = dict(votes)
-    best = votes.most_common()
-    if not best or best[0][1] < VOTES or (len(best) > 1 and best[1][1] >= 2):
-        return fail("the sizes didn't agree on a level")
-    return best[0][0]
+    # One orange square per digit: that many digits are expected. A shorter answer lost a digit at that size
+    # (a real frame of Lv 62 read "2" at four of the six), so it counts for nothing.
+    wanted = max(1, round(box[2] / box[3] / SQUARE_RATIO))
+    narrow = narrow_squares(row, box, wanted)
+
+    def vote(pics):
+        votes = Counter()
+        for text in tess.read_lines(pics, "0123456789"):
+            match = re.fullmatch(r"\s*([1-9][0-9]{0,2})\s*", text)
+            # (and a 1 only where the digit is narrow, a wider digit only where it isn't)
+            if (match and len(match[1]) == wanted and 1 <= int(match[1]) <= 250
+                    and all((c == "1") == n for c, n in zip(match[1], narrow))):
+                votes[int(match[1])] += 1
+        if look is not None:
+            look["votes"] = dict(votes)
+        return votes.most_common()
+
+    best = vote(pictures)
+    if best and best[0][1] >= VOTES and not any(c >= 2 for _, c in best[1:]):
+        return best[0][0]
+    # Not settled by the first six: read it many more ways, and ask for a clear winner.
+    best = vote(_pictures(row, box, wide=True))
+    if best and best[0][1] >= WIDE_VOTES and best[0][1] >= 2 * max((c for _, c in best[1:]), default=0):
+        return best[0][0]
+    return fail("the readings didn't agree on a level")
 
 
 # ---- telling characters apart (never by reading the name: only a small picture of it, kept in memory)

@@ -64,7 +64,7 @@ PLATFORM = create_platform()
 PLATFORM.setup_process()
 cv2.setNumThreads(1)
 
-VERSION = "0.9.11-beta"
+VERSION = "0.9.12-beta"
 WINDOW_TITLE = "Maple Classic Exp Overlay"    # the version is shown in Settings
 OLD_TITLES = ("Maple EXP/hr",)               # what versions before 0.9.3 were called
 
@@ -110,7 +110,14 @@ SHAPE_BLURBS = {"square": "The narrow card: the big number, the level bar and St
                 "wide": "Longer sideways: the level bar on top and four numbers in a row.",
                 "bar": "One thin strip with the main numbers and a slim level bar."}
 # What's new, shown once after updating to a version (plain words, newest changes only). A version with no entry shows nothing.
-WHATS_NEW = {"0.9.11-beta": (
+WHATS_NEW = {"0.9.12-beta": (
+    (None, None, (
+        ("head", "Hotfix for high levels"),
+        "Past about Lv 57 (levels that need a million EXP or more), the game shows only a percentage on the EXP bar, with no EXP number. The overlay couldn't find the bar then. It does now.",
+        "Your level is read from the orange LV badge, and EXP is worked out from it and the percentage. So EXP/hr there is an estimate, and it shows a \u2248 in front.",
+        "If the badge can't be read, it uses your level from before, or you can type it: Settings, Level fallback.",
+        "Estimates stay on your PC. They are never shared with the best-maps website.")),),
+    "0.9.11-beta": (
     # (title, subtitle, items) pages; an item is a line, ("head", text), ("dot", text) or ("pic", file in assets/)
     (None, None, (
         ("head", "Net mesos/hr: what you really make"),
@@ -1629,7 +1636,8 @@ class ScreenReader:
             return Reading("Can't find the EXP bar at the bottom of the game. Is something covering it?")
         img, sx, sy = shot
         g = lay.gh
-        x0, x1 = max(0, int(lay.box[0] - g)), min(img.shape[1], int(lay.box[2] + 6 * g))
+        lead = g if lay.exp else 5.5 * g       # (a %-only bar is found by its label, so the label stays in the spot)
+        x0, x1 = max(0, int(lay.box[0] - lead)), min(img.shape[1], int(lay.box[2] + 6 * g))
         y0, y1 = max(0, int(lay.cy - 1.4 * g)), min(img.shape[0], int(lay.cy + 1.4 * g))
         reading, lay = self._read(shot, where, lay)
         if reading.confident:             # only remember a spot whose digits match the game font

@@ -1134,6 +1134,8 @@ tr.observe([(1, 71.68)], False)
 check("an untrusted reading doesn't set the level", tr.req is None)
 check("'1 [71.68%]' (digits cut off) fits no level, so it isn't trusted", not m.fits_exp_table(1, 71.68))
 
+check("this version has a What's new entry (it is shown once after updating)", m.VERSION in m.WHATS_NEW)
+
 # ---- pausing by itself (a fake clock, so these run instantly)
 clock = [10000.0]
 m.time.monotonic = lambda: clock[0]

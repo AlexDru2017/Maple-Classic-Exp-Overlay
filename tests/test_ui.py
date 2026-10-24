@@ -369,6 +369,26 @@ app.show_whats_new()
 check("Settings > What's new shows this version's notes again", shown == [m.WHATS_NEW[m.VERSION]])
 app._whats_new = real_whats_new
 
+# this version's note opens, and says what the hotfix is about
+before = set(app.root.winfo_children())
+app._whats_new(m.WHATS_NEW[m.VERSION], None)
+root.update()
+opened = [c for c in app.root.winfo_children() if c not in before and c.winfo_class() == "Toplevel"]
+texts = []
+for top in opened:
+    stack = [top]
+    while stack:
+        w0 = stack.pop()
+        stack.extend(w0.winfo_children())
+        try:
+            texts.append(str(w0.cget("text")))
+        except Exception:
+            pass
+check("this version's What's new window opens and speaks of the percentage-only bar",
+      len(opened) == 1 and any("percentage" in t for t in texts))
+for top in opened:
+    top.destroy()
+
 # the two pages: Next shows the potion page (with its pictures), and the window fits the screen
 before = set(app.root.winfo_children())
 app._whats_new(m.WHATS_NEW["0.9.11-beta"], None)
