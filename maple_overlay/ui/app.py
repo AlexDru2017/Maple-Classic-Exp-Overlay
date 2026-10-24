@@ -2187,15 +2187,15 @@ class App:
         tk.Label(parent, text="Solo = while you were alone in the party list. Party = while you were in a party. "
                               "Under Party, from the game's EXP messages (only for the EXP they add up to exactly): "
                               "Solo = EXP of your own kills (white message), Party bonus = what the party added "
-                              "(yellow, \"Bonus EXP for PARTY\"), Other = EXP of a party member's kill "
-                              "(yellow \"You received EXP\"). The rest is Not split. "
+                              "(yellow, \"Bonus EXP for PARTY\"), Party kills = EXP of a party member's kill "
+                              "(yellow \"You received EXP\"). The rest is Other. "
                               "% of level = how much of the level's EXP bar it is. % of total = its share of the Total EXP.",
                  wraplength=th.px(330), justify="left", **dim).pack(anchor="w", pady=(0, th.px(4)))
         heads = ["", "Time", "EXP", "% of level", "% of total", "Mesos"]
         for c, name in enumerate(heads):
             tk.Label(table, text=name, anchor="e", **dim).grid(row=0, column=c, sticky="e", padx=(th.px(10) if c else 0, 0))
         made = []
-        colors = {"Solo": FG, "Party bonus": "#F2C94C", "Other": "#B79F45"}      # (the sub-rows under Party; white / yellow like the game's lines)
+        colors = {"Solo": FG, "Party bonus": "#F2C94C", "Party kills": "#B79F45"}      # (the sub-rows under Party; white / yellow like the game's lines)
 
         def refresh():
             while made:
