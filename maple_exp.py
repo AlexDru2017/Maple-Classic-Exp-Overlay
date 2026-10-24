@@ -27,6 +27,7 @@ import queue
 import re
 import secrets
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -46,6 +47,7 @@ import mss
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
+import level_ocr
 import ocr
 import potions
 import report
@@ -97,6 +99,8 @@ WINDOW_NAMES = {"shop": "NPC shop", "storage": "Storage", "trade": "Trade"}
 POTION_SECONDS = 3          # how often the potion bar is read (a small picture, no need for more)
 POTION_FULL_LOOK = 15       # every this many reads the bar is looked for over its whole search range again
 OUTLINE_SECONDS = 8         # how often the (costly) search for a see-through mesos box may run
+LEVEL_RECHECK_SECONDS = 30  # a level read from the badge is looked at again this often (it only changes at a level-up)
+LEVEL_FAILS_FOR_FALLBACK = 3    # badge reads that failed in a row before typing the level in is offered
 DEFAULTS = {"gap_seconds": 15, "transparency": 0, "topmost": True,
             "check_updates": True, "skip_version": "", "ui_scale": 100, "compact": False, "hotkeys_on": True,
             "details": False, "compact_shape": "square", "seen_version": "",
@@ -383,6 +387,27 @@ def _cells(blobs, gh):
     return out
 
 
+def _exp_label_dot(wblobs, bracket, bh):
+    """The '.' of the label "EXP." just left of a '[' (a blob), or None. The dot sits low, under the
+    right side of the P, and two taller letters come before it. "HP" and "MP" have no such dot, and
+    this holds at any size because it only compares the blobs with the bracket's height."""
+    base = bracket.y + bracket.h
+    dots = [b for b in wblobs if b.x + b.w <= bracket.x and bracket.x - b.x <= 3.0 * bh
+            and b.h <= 0.45 * bh and b.w <= 0.45 * bh and abs(b.y + b.h - base) <= 0.35 * bh]
+    for dot in sorted(dots, key=lambda b: -b.x):
+        tall = lambda b: 1.15 * bh <= b.h <= 1.9 * bh and abs(b.y + b.h - base) <= 0.35 * bh
+        under = [p for p in wblobs if tall(p) and p.x + 0.4 * p.w <= dot.x and dot.x + dot.w <= p.x + p.w + 1
+                 and dot.y >= p.y + 0.6 * p.h]
+        if not under:
+            continue
+        p = under[0]
+        # Two or more letters come before the dot: separate blobs, or touching ones in one wide blob.
+        if p.w >= 1.8 * bh or any(tall(e) and p.x - (e.x + e.w) <= 0.6 * bh and e.x + e.w <= p.x + 1
+                                  for e in wblobs):
+            return dot
+    return None
+
+
 def find_exp(bgr):
     """Locate the EXP text in a screenshot. Returns a Layout or None."""
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
@@ -421,7 +446,17 @@ def find_exp(bgr):
             run.append(b)
             edge = b.x
         if not run:
-            continue                                          # HP/MP: label before '['
+            # No number: the game shows only "EXP. [58.47%]" once the EXP is big. Only the label
+            # "EXP." tells that from HP/MP, so no label means this isn't the EXP bar.
+            dot = _exp_label_dot(wblobs, o, bh)
+            if dot is None:
+                continue
+            heights = [b.h for b in inside if b.w <= 0.85 * b.h]
+            gh = float(np.median(heights)) if heights else float(bh)
+            # box[0] is where the number would start (the class is read left of it): a bit right of the dot
+            found.append(Layout(gh, cy, [], _cells(inside, gh),
+                                (int(dot.x + 0.84 * gh), int(cy - bh), c.x + c.w, int(cy + bh)), V))
+            continue
         run.reverse()
         heights = [b.h for b in run + inside if b.w <= 0.85 * b.h]
         gh = float(np.median(heights)) if heights else float(bh)
@@ -507,14 +542,15 @@ def _read_digits(tpl, lay, cells):
 
 
 def read_layout(tpl, lay):
-    """(exp, pct) read with the digit templates, or None if any digit is unclear."""
+    """(exp, pct) read with the digit templates, or None if any digit is unclear. exp is None
+    when the bar shows only a percentage (the layout has no number cells)."""
     exp_s = _read_digits(tpl, lay, lay.exp)
     pct_s = _read_digits(tpl, lay, _pct_cells(lay))
-    if not exp_s or not pct_s or not 3 <= len(pct_s) <= 5:
+    if (lay.exp and not exp_s) or not pct_s or not 3 <= len(pct_s) <= 5:
         return None
-    if (len(exp_s) > 1 and exp_s[0] == "0") or (len(pct_s) > 3 and pct_s[0] == "0"):
+    if (exp_s and len(exp_s) > 1 and exp_s[0] == "0") or (len(pct_s) > 3 and pct_s[0] == "0"):
         return None                                # a leading 0: some digits were cut off
-    return int(exp_s), int(pct_s) / 100          # the game always shows 2 decimals
+    return (int(exp_s) if exp_s else None), int(pct_s) / 100       # the game always shows 2 decimals
 
 
 def _ocr_cells(bgr, lay, cells):
@@ -1263,8 +1299,10 @@ def find_party_bars(bgr, gh, hsv=None):
 # --------------------------------------------------------------------------- finding it on screen
 
 Reading = namedtuple("Reading", "where candidates confident text image boxes map note "
-                                 "mesos mesos_image mesos_boxes party mesos_at window bar",
-                     defaults=((), False, "", None, (), None, None, None, None, (), None, None, None, None))
+                                 "mesos mesos_image mesos_boxes party mesos_at window bar percent_only level",
+                     defaults=((), False, "", None, (), None, None, None, None, (), None, None, None, None, False, None))
+# percent_only: the bar shows just "[58.47%]" (candidates are then [(None, pct)]); level: the level read
+# from the status bar's LV badge, with where it came from, as (level, source), or None
 
 
 def _view(img, lay):
@@ -1331,6 +1369,13 @@ class ScreenReader:
         self.map_seen_at = None     # when the minimap's name box was last seen (so a map change would have shown)
         self.last_rect = None       # where the game window was at the last look (x, y, w, h)
         self.next_job_read = 0.0
+        self.level = None           # the level read from the status bar's badge (two captures agreed)
+        self.level_look = None      # what the last try at reading it saw: {"image", "votes", "why"}
+        self.level_failures = 0     # badge reads in a row that gave nothing
+        self.next_level_read = 0.0
+        self._level_candidate = None    # a level seen once, waiting for a second capture to agree
+        self.name_print = None      # a small picture of the character's name row (see level_ocr.name_print); never read as text
+        self.next_name_read = 0.0
 
     def use_window(self):
         self.mode, self.hwnd, self.box = "window", None, None
@@ -1356,6 +1401,7 @@ class ScreenReader:
         self.two_boxes, self.next_outline = False, 0.0
         self.window, self.window_until, self.window_box = None, 0.0, False
         self.exp_anchor, self.next_job_read = None, 0.0
+        self.next_level_read, self._level_candidate = 0.0, None
         self.request_map()
 
     def read(self, sct):
@@ -1374,12 +1420,19 @@ class ScreenReader:
             return Reading("MapleStory is minimized. Bring the game back up.")
         else:
             reading = self._read_window(sct, rect)
+        if reading.percent_only and self.mode == "region":
+            # (a selected area has no game window around it: no badge to find, so typing the level in is open at once)
+            self.level_failures = max(self.level_failures, LEVEL_FAILS_FOR_FALLBACK)
+            self.level_look = {"image": None, "votes": {}, "why": "Selected area: the level badge isn't in it"}
         if rect and self.gh:
             name, note = self._read_info(sct, rect)
             reading = self._read_extras(sct, rect, reading._replace(map=name, note=note))
             if self.exp_anchor and self.mode == "window":
                 self._read_job(sct, rect)
-        return reading
+                self._look_at_name(sct, rect)
+                if reading.percent_only:        # no EXP number to tell the level from: the badge has to
+                    self._read_level(sct, rect)
+        return reading._replace(level=(self.level, "badge") if self.level and reading.percent_only else None)
 
     def map_blind_seconds(self):
         """How long the minimap's name box hasn't been visible (0 if it never was: no map to lose)."""
@@ -1430,6 +1483,68 @@ class ScreenReader:
         if job:
             self.job = job
         self.next_job_read = now + (60 if job else 10)
+
+    def _look_at_name(self, sct, rect):
+        """Now and then, a print of the name row: how another character is told from this one (the level
+        read for one isn't another's). It is only a picture, kept in memory: the name isn't read."""
+        now = time.monotonic()
+        if now < self.next_name_read:
+            return
+        self.next_name_read = now + 5
+        wx, wy, _, _ = rect
+        ax, ay = self.exp_anchor
+        g = self.gh
+        x0, y0, w, h = wx + int(ax - 50.5 * g) - 2, wy + int(ay + 0.9 * g) - 2, int(12.5 * g) + 5, int(1.7 * g) + 5
+        if self._covered(x0, y0, w, h):
+            self.name_print = None
+            return
+        shot = grab(sct, x0, y0, w, h)
+        self.name_print = level_ocr.name_print(shot[0], wx + ax - shot[1], wy + ay - shot[2], g) if shot else None
+
+    def recheck_level(self):
+        """Read the badge at the next look (the % wrapped: the level may have gone up). The level known so
+        far stays until a new one has been seen twice."""
+        self.next_level_read, self._level_candidate = 0.0, None
+
+    def _read_level(self, sct, rect):
+        """Reads the level from the badge: a level counts once two looks in a row agree. A failing read
+        backs off (so a covered or unreadable badge doesn't keep starting Tesseract); a known level is
+        looked at again only now and then."""
+        now = time.monotonic()
+        if now < self.next_level_read:
+            return
+        wx, wy, _, _ = rect
+        ax, ay = self.exp_anchor
+        g = self.gh
+        x0, y0, w, h = wx + int(ax - 72 * g), wy + int(ay - 1.6 * g), int(34 * g) + 1, int(5.2 * g) + 1
+        if not tesseract_ok or TESS is None:      # nothing to wait for: typing the level in is open at once
+            self.level_failures = max(self.level_failures, LEVEL_FAILS_FOR_FALLBACK)
+            self.level_look = {"image": None, "votes": {}, "why": "Tesseract isn't available"}
+            self.next_level_read = now + 60
+            return
+        if self._covered(x0, y0, w, h):
+            self.level_look = {"image": None, "votes": {}, "why": "this window is covering the level badge: move it"}
+            self.next_level_read = now + 5
+            return
+        shot = grab(sct, x0, y0, w, h)
+        look = {}
+        try:
+            seen = level_ocr.read_level(shot[0], wx + ax - shot[1], wy + ay - shot[2], g, TESS, look) if shot else None
+        except (ocr.TesseractError, subprocess.TimeoutExpired, OSError) as e:
+            look["why"] = f"Tesseract failed: {e}"
+            seen = None
+        self.level_look = look
+        if seen is None:
+            self.level_failures += 1
+            self._level_candidate = None
+            self.next_level_read = now + (2 if self.level_failures < LEVEL_FAILS_FOR_FALLBACK
+                                         else 5 if self.level_failures < 2 * LEVEL_FAILS_FOR_FALLBACK else 30)
+        elif seen == self._level_candidate:       # the second look agrees
+            self.level, self.level_failures, self._level_candidate = seen, 0, None
+            self.next_level_read = now + LEVEL_RECHECK_SECONDS
+        else:
+            self._level_candidate, self.level_failures = seen, 0
+            self.next_level_read = now + 1.5
 
     def _game_rect(self):
         if not (self.hwnd and PLATFORM.window_exists(self.hwnd)):
@@ -1533,6 +1648,12 @@ class ScreenReader:
             return Reading(_problem(where, "Can't find the EXP bar.")), None
         view, boxes = _view(img, lay)
         got = read_layout(self.templates, lay) if self.templates else None
+        if not lay.exp:                       # only "[58.47%]": the level has to come from elsewhere
+            if got:
+                return Reading(where, [got], True, f"[{got[1]:.2f}%] (percentage only)", view, boxes,
+                               percent_only=True), lay
+            return Reading(_problem(where, "Found the EXP bar, but can't read its percentage clearly."),
+                           image=view, boxes=boxes, percent_only=True), lay
         if got and fits_exp_table(*got):
             return Reading(where, [got], True, f"{got[0]:,} [{got[1]:.2f}%]", view, boxes), lay
         # Unclear digits, or a reading that fits no level: not trusted. Readings that do fit
@@ -1806,6 +1927,8 @@ class ExpTracker:
     so they are ignored instead of being counted as gains.
     """
 
+    WRAP_WAIT_READS = 40                      # %-only readings (about a minute) to wait for the level after a wrap
+
     def __init__(self):
         self.reset()
 
@@ -1813,6 +1936,7 @@ class ExpTracker:
         self.running = False
         self._accum = 0.0
         self._resumed = None
+        self._wrap_reads = 0                  # readings in a row spent waiting for a level after the % wrapped
         self.exp = None                       # last trusted EXP
         self.pct = None
         self.last_read = None                 # latest reading, trusted or not (for display)
@@ -1833,6 +1957,9 @@ class ExpTracker:
         self.gained = 0
         self.levels = 0
         self.samples = deque()                # (elapsed, gained)
+        self._format = None                   # what the bar showed last: "exact" (number and %) or "percent"
+        self.estimated = False                # some EXP here came from a % alone, so it is an estimate
+        self.level_source = None              # where a %-only level came from: "badge", "typed"
 
     def start(self):
         if not self.running:
@@ -1852,6 +1979,7 @@ class ExpTracker:
         self._accum, self._resumed = 0.0, None
         self.gained, self.levels, self.deaths = 0, 0, 0
         self.samples = deque()
+        self.estimated = False
 
     def elapsed(self):
         if self.running:
@@ -1927,6 +2055,86 @@ class ExpTracker:
     # ---- main entry
     def observe(self, candidates, confident=False):
         """Feed the (exp, pct) guesses for one screenshot. Returns (accepted, note)."""
+        self._switch_format("exact")
+        return self._observe(candidates, confident)
+
+    def _switch_format(self, kind):
+        """A bar that went from showing its number to only a %, or back: the estimate and the
+        real EXP differ by rounding, so the next reading starts a fresh baseline (not a gain)."""
+        if self._format not in (None, kind):
+            self.exp = self.pct = self._pending = self._before_death = None
+            self._pending_lvl = None
+        self._format = kind
+
+    def observe_percent(self, pct, level=None, source=None):
+        """Feed the % of a bar that shows no number ("EXP. [58.47%]"), with the level when it was read
+        (source: "badge" or "typed"). The EXP is an estimate: the level's EXP from the table times pct.
+        Returns (accepted, note), like observe."""
+        if pct is None or not 0 <= pct < 100:
+            return False, "unreadable"
+        if level is not None and not 1 <= level <= len(EXP_TABLE):
+            return False, f"level {level} isn't supported yet (no EXP table for it)"
+        cur = level_for_req(self.req) if self.req else None
+        if cur is None:
+            if level is None:
+                return False, "waiting to read your level"
+            self._use_level(level, source)
+            cur = level
+        if level is not None and level == cur and source:
+            self.level_source = source           # (a level read from the badge beats a carried or typed one)
+        # A % that wrapped around (the level went up, or a misread): only the next level, read, says which.
+        wrapped = self.exp is not None and self._format == "percent" and self.pct - pct > 30
+        if level is not None and level != cur:
+            if wrapped and level == cur + 1:
+                last = self._pending_lvl
+                n = last[2] + 1 if last and last[0] == level else 1
+                self._pending_lvl = (level, pct, n)
+                if n < 2:
+                    return False, "level up? waiting to confirm"
+                self.estimated = True
+                self._enter_level(round(EXP_TABLE[level - 1] * pct / 100), pct, EXP_TABLE[level - 1])
+                self.level_source = source
+                return True, "LEVEL UP!"
+            if self.gained:
+                return False, "level changed: Reset to start again on the new level"
+            self._use_level(level, source)      # nothing counted yet: the newer reading wins
+            cur = level
+        elif wrapped:
+            self._pending_lvl = None
+            self._wrap_reads += 1
+            if self._wrap_reads < self.WRAP_WAIT_READS:
+                return False, "percentage wrapped: waiting to read the new level"
+            self.exp = self.pct = None            # nothing explained it for a minute: the new % is the new start
+        self._wrap_reads = 0
+        self._pending_lvl = None
+        self._switch_format("percent")
+        self.estimated = True
+        return self._observe([(round(EXP_TABLE[cur - 1] * pct / 100), pct)], True)
+
+    def _use_level(self, level, source):
+        """Starts estimating from this level (a fresh baseline: nothing is counted for the change)."""
+        self.req, self._req_exact, self.level_source = EXP_TABLE[level - 1], True, source
+        self.exp = self.pct = self._pending = self._pending_lvl = None
+
+    @property
+    def percent_mode(self):
+        """The bar shows only a % right now (so the EXP coming in is an estimate)."""
+        return self._format == "percent"
+
+    def set_level(self, level, source):
+        """The level, given from outside the bar (typed in). False if there is no EXP table for it."""
+        if not 1 <= level <= len(EXP_TABLE):
+            return False
+        self._use_level(level, source)
+        return True
+
+    def forget_level(self):
+        """Another character, or a level that can't be trusted: nothing to estimate from until read again."""
+        self.req, self._req_exact, self._table_level, self.level_source = None, False, None, None
+        self.exp = self.pct = self._pending = self._pending_lvl = None
+        self._seen.clear()
+
+    def _observe(self, candidates, confident=False):
         candidates = [(e, p) for e, p in candidates if p is not None and 0 <= p < 100]
         if not candidates:
             return False, "unreadable"
@@ -2062,22 +2270,24 @@ class ExpTracker:
         self._pending_lvl = (e, p, n)
         if n < need:
             return False
+        self._enter_level(e, p, nxt if need == 2 else None)     # (2: the new level's EXP is known, no relearning)
+        return True
+
+    def _enter_level(self, e, p, new_req=None):
+        """A confirmed level-up: the rest of the old level and e count as gained. new_req is the new
+        level's EXP when the table gives it (otherwise it is learned again)."""
         self._pending_lvl = self._pending = None
         if self.running:
             self.levels += 1
         self._add_gain(self.req - self.exp + e)
         self.exp, self.pct = e, p
         self._prev_req = self.req
-        if need == 2:                          # the new level's EXP is known: no relearning
-            self.req, self._req_exact = nxt, True
-        else:
-            self.req, self._req_exact = None, False
+        self.req, self._req_exact = new_req, new_req is not None
         self._table_level = None
         self._seen.clear()
         self._recent.clear()                   # the old level's numbers mean nothing now
         self._recent.append((self._reads, e))
         self._level_start = (e, p)
-        return True
 
     def rate(self):
         t = self.elapsed()
@@ -2385,9 +2595,16 @@ class Session:
 
     def observe(self, candidates, confident, now):
         """Feeds an EXP reading to the tracker. Returns the tracker's (accepted, note)."""
+        return self._feed(lambda t: t.observe(candidates, confident), now)
+
+    def observe_percent(self, pct, level, source, now):
+        """Feeds the % of a bar that shows no EXP number (see ExpTracker.observe_percent)."""
+        return self._feed(lambda t: t.observe_percent(pct, level, source), now)
+
+    def _feed(self, observe, now):
         t = self.exp
         exp_before, gained_before = t.exp, t.gained
-        result = t.observe(candidates, confident)
+        result = observe(t)
         rose = exp_before is not None and t.exp is not None and (
             t.exp > exp_before or result[1] == "LEVEL UP!")
         if t.running and t.gained > gained_before:
@@ -2465,6 +2682,9 @@ def fmt_logged(seconds, short=False):
     return f"{hours} h {minutes:02d} min" if hours else f"{minutes} min"
 
 
+APPROX = "≈"           # shown before a number worked out from a % alone: "≈15,429"
+
+
 def net_text(e):
     """Net mesos/hr of a log line ('' if no potion cost was counted, '?' if the mesos weren't read):
     mesos/hr minus what the potions cost per hour."""
@@ -2486,7 +2706,7 @@ def format_entry(e):
     tracked = "party" in e                    # entries from before party/mesos tracking lack these
     if tracked:
         parts.append(party_label(e["party"]))
-    parts.append(f"{e['exp'] / e['seconds'] * 3600 if e['seconds'] else 0:,.0f}exp/hr")
+    parts.append(f"{APPROX if e.get('estimated') else ''}{e['exp'] / e['seconds'] * 3600 if e['seconds'] else 0:,.0f}exp/hr")
     if tracked:
         ms = e.get("mesos_seconds", 0)
         parts.append(f"{e['mesos'] / ms * 3600:,.0f}mesos/hr" if ms else "?mesos/hr")
@@ -2525,7 +2745,7 @@ def log_row(e, part=False):
     level = e["level"] if e["level"] is not None else "?"
     tracked = "party" in e                    # entries from before party/mesos tracking lack these
     party = ("Solo" if not e["party"] or e["party"] <= 1 else f"{e['party']}ppl") if tracked else ""
-    exp = f"{e['exp'] / e['seconds'] * 3600:,.0f}" if e["seconds"] else "—"
+    exp = f"{APPROX if e.get('estimated') else ''}{e['exp'] / e['seconds'] * 3600:,.0f}" if e["seconds"] else "—"
     ms = e.get("mesos_seconds", 0)
     mesos = f"{e['mesos'] / ms * 3600:,.0f}" if ms else ("?" if tracked else "")
     note = NOTE_MARK if note_of(e) else ""
@@ -2550,6 +2770,8 @@ def party_groups(entries):
 def merged(entries):
     """Log lines added together, so EXP/hr and mesos/hr are over all of their time."""
     m = dict(entries[0])
+    if any(e.get("estimated") for e in entries):
+        m["estimated"] = True                    # (one estimated part makes the whole line an estimate)
     for k in ("exp", "seconds", "mesos", "mesos_seconds"):
         m[k] = sum(e.get(k) or 0 for e in entries)
     if any("potion_cost" in e for e in entries):
@@ -2726,6 +2948,7 @@ class AutoLog:
                     and optional("potion_cost", lambda v: number(v) and v >= 0)
                     and optional("potion_seconds", lambda v: number(v) and v >= 0)
                     and optional("potions", lambda v: isinstance(v, dict))
+                    and optional("estimated", lambda v: type(v) is bool)
                     and (not e.get("mesos_seconds") or number(e.get("mesos"))))
         except Exception:
             return False
@@ -2743,6 +2966,7 @@ class AutoLog:
         self.block_exp = 0
         self.run = None                                  # the 15-minute run going on, if any
         self.chain = None                                # when the runs going on straight after each other began
+        self.block_estimated = False                     # some of the stretch's EXP was estimated from a % alone
 
     def gain(self, now, amount):
         if amount > 0:
@@ -2763,15 +2987,18 @@ class AutoLog:
                 self.run["exp"] += amount
 
     def tick(self, now, map_name, level, party=1, mesos=None, job=None, map_read=None, hidden=False, potions=None,
-             window_at=None, misreads=(), meso_epoch=0):
+             window_at=None, misreads=(), meso_epoch=0, estimated=False):
         """Call regularly while tracking. mesos is the MesoTracker's last look (mesos gained so
         far, when read), however old, or None: a stretch's mesos are those gained between its
         first and last look (a run's: see _site_mesos). job is the class; map_read the map name exactly as read;
         potions ({name: used so far}, their cost so far) or None when potions aren't counted.
-        window_at, misreads and meso_epoch: see MesoTracker.for_log.
+        window_at, misreads and meso_epoch: see MesoTracker.for_log. estimated: the EXP now coming in is
+        estimated from a % alone (the line and run say so, and such a run is never shared).
         Returns the entry when one was logged."""
         self._note_look(mesos, meso_epoch)
         self._misreads = misreads
+        if estimated and self.start is not None:
+            self.block_estimated = True
         if self.start is None:
             return None
         if now - self.last_gain > self.gap:
@@ -2792,7 +3019,7 @@ class AutoLog:
             self.meso0 = mesos                               # mesos as the stretch began
         if self.pot0 is None and potions is not None:
             self.pot0 = (dict(potions[0]), potions[1])       # potions used as the stretch began
-        self._run_tick(now, map_name, level, party, job, map_read, hidden, window_at)
+        self._run_tick(now, map_name, level, party, job, map_read, hidden, window_at, estimated)
         if hidden or now - self.start < LOG_BLOCK:       # (hidden: the map may have changed, so nothing is saved yet)
             return None
         if self.block_exp <= 0:                              # nothing gained after all
@@ -2806,13 +3033,14 @@ class AutoLog:
             cost = max(0, potions[1] - self.pot0[1])
             used = {n: c - self.pot0[0].get(n, 0) for n, c in potions[0].items() if c > self.pot0[0].get(n, 0)}
         entry = self._add(self.block_map or "Unknown map", level, party, self.block_exp,
-                          now - self.start, meso_gain, meso_seconds, job, map_read or self.block_map, cost, used)
-        self.start, self.block_exp = now, 0                  # the next 5 minutes start now
+                          now - self.start, meso_gain, meso_seconds, job, map_read or self.block_map, cost, used,
+                          self.block_estimated)
+        self.start, self.block_exp, self.block_estimated = now, 0, False       # the next 5 minutes start now
         self.meso0 = mesos if mesos and now - mesos[1] < 10 else None
         self.pot0 = (dict(potions[0]), potions[1]) if potions is not None else None
         return entry
 
-    def _run_tick(self, now, map_name, level, party, job, map_read, hidden=False, window_at=None):
+    def _run_tick(self, now, map_name, level, party, job, map_read, hidden=False, window_at=None, estimated=False):
         r = self.run
         if r is None:
             return
@@ -2830,6 +3058,8 @@ class AutoLog:
             return
         r["job"] = r["job"] or job
         r["level"] = level
+        if estimated:
+            r["estimated"] = True                            # (a % alone: kept on this PC, never shared)
         if window_at is not None and window_at >= r["start"]:
             r["window"] = True                               # a shop, storage or trade: not a clean run
         if hidden or now - r["start"] < RUN_SECONDS:
@@ -2838,7 +3068,7 @@ class AutoLog:
             self._end_run(r, now)
         self.run = {"start": now, "exp": 0, "map": None}     # straight on into the next run
         self._prune()
-        self._run_tick(now, map_name, level, party, job, map_read, hidden, window_at)
+        self._run_tick(now, map_name, level, party, job, map_read, hidden, window_at, estimated)
 
     # ---- what a run takes to the website (fail closed: any doubt and it goes with EXP only)
     def _note_look(self, mesos, epoch):
@@ -2865,7 +3095,7 @@ class AutoLog:
         level, is never shared: it keeps the mesos between its first and last look. A clean one
         is saved with EXP only and, given a look at its start, waits for one after its end (settle)."""
         seconds = now - r["start"]
-        if r.get("window") or r["level_start"] is None or r["level"] is None:
+        if r.get("window") or r.get("estimated") or r["level_start"] is None or r["level"] is None:
             inside = [k for k in self.looks if r["start"] - 2 <= k[0] <= now]
             gain = gain_s = 0
             if len(inside) >= 2:
@@ -2977,9 +3207,10 @@ class AutoLog:
 
     def unshared_runs(self):
         """Finished runs (exactly as the overlay saved them) not shared yet: only clean ones
-        (no shop, storage or trade window seen), with a known level, not waiting for a look."""
+        (no shop, storage or trade window seen, no EXP estimated from a % alone), with a known level, not
+        waiting for a look."""
         return [r for r in self.runs if not r.get("shared") and not r.get("window") and not r.get("pending")
-                and r.get("level_start") is not None and r.get("level_end") is not None
+                and not r.get("estimated") and r.get("level_start") is not None and r.get("level_end") is not None
                 and self.sealed(r, _SEALED_RUN)][:50]
 
     def mark_shared(self, started):
@@ -2993,7 +3224,7 @@ class AutoLog:
         return None if self.start is None else max(0.0, LOG_BLOCK - (now - self.start))
 
     def _add(self, map_name, level, party, exp, seconds, mesos, meso_seconds, job=None, map_read=None,
-             potion_cost=None, potions=None):
+             potion_cost=None, potions=None, estimated=False):
         def add():
             key = (date.today().isoformat(), map_name, level, party, job)
             for e in self.entries:
@@ -3012,6 +3243,8 @@ class AutoLog:
                         for n, c in (potions or {}).items():
                             used[n] = used.get(n, 0) + c
                         e["potions"] = used
+                    if estimated:
+                        e["estimated"] = True                # (not sealed: it only says how the EXP was got)
                     if "seal" in e:
                         self._reseal(e, ok)
                     break
@@ -3021,6 +3254,8 @@ class AutoLog:
                      "mesos_seconds": meso_seconds}
                 if potion_cost is not None:
                     e["potion_cost"], e["potions"], e["potion_seconds"] = potion_cost, dict(potions or {}), seconds
+                if estimated:
+                    e["estimated"] = True
                 self._reseal(e, True)
                 self.entries.append(e)
             e["updated"] = time.time()
@@ -3035,7 +3270,11 @@ class AutoLog:
                "exp": r["exp"], "seconds": round(seconds, 1), "mesos": mesos,
                "mesos_seconds": round(meso_seconds, 1), "version": VERSION}
         run["seal"] = self._seal(run, _SEALED_RUN)
-        run.update(local or {})                              # (kept on this PC only: not sealed, never sent)
+        local = dict(local or {})
+        if r.get("estimated"):
+            # An older overlay doesn't know the flag and would share a sealed run: a seal that never verifies stops it.
+            run["seal"], local["estimated"] = "estimated", True
+        run.update(local)                                    # (kept on this PC only: not sealed, never sent)
         self._change(lambda: self.runs.append(run))
         return run
 
@@ -3302,6 +3541,14 @@ class App:
         self.map_read = None                # the map name exactly as read
         self.map_hidden, self.map_back_at = False, None     # the minimap's name out of sight for a few seconds
         self.found_at = None                # when the EXP bar was first read for this level
+        self.level_wait = False             # a %-only bar is waiting for its level
+        self.pct_note = ""                  # what the tracker last said about a %-only reading
+        self._char_print = None             # the name row's print when the level was last known (memory only)
+        self._char_seen = None              # the newest print looked at, so each is counted once
+        self._char_diff = 0                 # prints in a row that differ from _char_print
+        self._same_char = False             # the newest print matches the one from when the level was known
+        self.other_char_at = None           # when another character was last noticed (the status says so for a while)
+        self.level_btn = None               # Settings > Level fallback (enabled only when it can help)
         self.level_up_at = None
         self.died_at = None
         self.log_open = False
@@ -3951,6 +4198,18 @@ class App:
                command=self.open_potion_prices, bg=BG).pack(side="right")
         self._potions_on = potions_on
 
+        self._section(body, "EXP bar without a number")
+        level_line = tk.Frame(body, bg=BG)
+        level_line.pack(fill="x")
+        tk.Label(level_line, text="Type your level if it can't be read", **text).pack(side="left")
+        self.level_btn = Button(level_line, th, text="Level fallback", kind="secondary", width=124, height=34, radius=10,
+                                size=12, command=lambda: self.type_level(w), bg=BG)
+        self.level_btn.pack(side="right")
+        self.level_btn.set(enabled=self._can_type_level())
+        tk.Label(body, text="Past a certain level the game shows only a percentage. The overlay reads your level "
+                            "from the status bar and estimates EXP from it. Typing it in is only a last resort.",
+                 wraplength=wrap, justify="left", **dim).pack(anchor="w", pady=(px(4), 0))
+
         self._section(body, "Updates and sharing")
         updates = tk.BooleanVar(value=bool(self.cfg["check_updates"]))
         self._switch(body, "Check for updates when it starts", updates).pack(anchor="w")
@@ -4536,8 +4795,13 @@ class App:
             if self.found_at is None or t.req is not None:
                 self.found_at = now
             before = t.gained
-            ok, note = self.session.observe(r.candidates, r.confident, now)
-            self.rejected = 0 if ok else self.rejected + 1
+            if r.percent_only:
+                ok, note = self._observe_percent(r, now)
+            else:
+                ok, note = self.session.observe(r.candidates, r.confident, now)
+                self.level_wait = False
+                self._char_print = self.reader.name_print if self.reader.name_print is not None else self._char_print
+            self.rejected = 0 if ok or self.level_wait else self.rejected + 1
             if self.rejected >= 10:                 # keeps not adding up: find the EXP bar again
                 self.reader.box, self.rejected = None, 0
             if t.running and t.gained != before and not self.skip_log:
@@ -4572,6 +4836,69 @@ class App:
         self.level = level_for_req(t.req) or self.level
         self._log_tick(now)
 
+    def _observe_percent(self, r, now):
+        """A bar with only a %: the level comes from the badge (or the level known before, or typed in)."""
+        level, source = r.level or (None, None)
+        if self._check_character():
+            self.level_wait = True
+            return False, "another character"           # (this reading's level may be the other one's)
+        if level is None and self.tracker.req is not None and self.tracker.level_source is None and not self._same_char:
+            self.tracker.forget_level()                 # a level carried over from the number, but the character can't be told
+        ok, note = self.session.observe_percent(r.candidates[0][1], level, source, now)
+        self.level_wait = note == "waiting to read your level"
+        self.pct_note = note
+        if note.startswith(("percentage wrapped", "level up?")):
+            self.reader.recheck_level()                 # it may have gone up: look at the badge now
+        return ok, note
+
+    def _check_character(self):
+        """Another character (its name row looks different) has its own level: start over for it. Only a
+        print that differs on two looks in a row counts, so something drawn over the name can't.
+        Returns True when it started over."""
+        cur = self.reader.name_print
+        if cur is None:
+            self._same_char = False
+            return False
+        if cur is self._char_seen:
+            return False
+        self._char_seen = cur
+        if self._char_print is None or level_ocr.same_name(self._char_print, cur):
+            self._same_char = self._char_print is not None
+            self._char_print, self._char_diff = (cur if self._char_print is None else self._char_print), 0
+            return False
+        self._same_char = False
+        self._char_diff += 1
+        if self._char_diff < 2:
+            return False
+        self.reader.level = None
+        self.reader.recheck_level()
+        self.reset()
+        self._char_print = self._char_seen = cur          # (the new character is the one to compare with from now on)
+        self.other_char_at = time.monotonic()
+        return True
+
+    def _can_type_level(self):
+        """Typing the level in is offered only when it can help: a %-only bar, no level known, and
+        reading it from the badge keeps failing."""
+        t = self.tracker
+        return bool(t.req is None and self.level_wait and self.reader.level is None
+                    and self.reader.level_failures >= LEVEL_FAILS_FOR_FALLBACK)
+
+    def type_level(self, parent=None):
+        """Settings > Level fallback: the player types the level shown in the game. Session only."""
+        if not self._can_type_level():
+            messagebox.showinfo("Level fallback", "Not needed right now: the level is read from the game by itself.",
+                                parent=parent or self.root)
+            return
+        level = simpledialog.askinteger("Level fallback", "Your character's level, as the game shows it:",
+                                        parent=parent or self.root, minvalue=1, maxvalue=len(EXP_TABLE))
+        if level is None or not self._can_type_level():      # (cancelled, or the badge was read while it was open)
+            return
+        self.reset()
+        self.tracker.set_level(level, "typed")
+        self._char_print = self.reader.name_print
+        self.status.set(f"Using Lv {level} as you typed it. EXP is estimated from the % until the badge can be read.")
+
     def _status_for(self, note):
         """What the status line says while the EXP bar is being read (details: View capture)."""
         t = self.tracker
@@ -4583,9 +4910,21 @@ class App:
             return f"You died and lost {t.last_loss:.1f}% EXP. That isn't taken off your EXP/hr."
         if self.rejected >= 5:
             return "Having trouble reading the EXP bar clearly. View capture shows what it sees."
+        if self.other_char_at and time.monotonic() - self.other_char_at < 8:
+            return "This looks like another character: starting over for it."
+        if self.level_wait and t.req is None:
+            if self.reader.mode == "region":
+                return ("Selected area: the level badge can't be read from here. "
+                        "Settings, Level fallback lets you type your level in.")
+            if self._can_type_level():
+                return ("The EXP bar shows only a percentage, and your level can't be read from the badge. "
+                        "Settings, Level fallback lets you type it in.")
+            return "The EXP bar shows only a percentage. Reading your level from the badge..."
+        if self.pct_note.startswith("level changed"):
+            return "Your level changed. Press Reset to start again on the new level."
         if t.req is None:
             # Normally the level is known within seconds; if not, it needs an EXP gain.
-            if time.monotonic() - self.found_at < 8:
+            if self.found_at is None or time.monotonic() - self.found_at < 8:
                 return "Found your EXP bar. Working out your level..."
             return "Found your EXP bar. Your level shows after your next EXP gain."
         s = self.session
@@ -4599,7 +4938,9 @@ class App:
             return ("Paused: the minimap's name can't be seen, so it can't tell which map you're on. "
                     "It carries on when the minimap is back.")
         if t.running:
-            return "Tracking your EXP. Not logging this run." if self.skip_log else "Tracking your EXP."
+            where = {"badge": "read from the badge", "typed": "typed by you"}.get(t.level_source, "known from before")
+            how = f" Estimated from the % (the bar shows no number; your level was {where})." if t.percent_mode else ""
+            return ("Tracking your EXP. Not logging this run." if self.skip_log else "Tracking your EXP.") + how
         if t.elapsed() > 0:
             return "Paused. Press Resume to carry on."
         return "Ready. Press Start when you begin farming."
@@ -4618,7 +4959,8 @@ class App:
             used = self.session.potions.used
             potions_now = (dict(used), self.session.potions.cost(self._prices().mapping()))
         entry = self.autolog.tick(now, self.map_name, self.level, self.party, job=self.job, map_read=self.map_read,
-                                  hidden=self.map_hidden, potions=potions_now, **self.meso.for_log())
+                                  hidden=self.map_hidden, potions=potions_now,
+                                  estimated=self.tracker.estimated and self.tracker.percent_mode, **self.meso.for_log())
         if len(self.autolog.runs) > runs:
             self.share_runs()                          # a run just finished
         if entry:
@@ -4700,19 +5042,20 @@ class App:
             mesos = fmt_num(m.value) + (f"  (+{fmt_short(m.gained)})" if m.gained > 0 else "")
         state, state_text = self._state()
         net = self._net(el)[0]
+        est = lambda text: APPROX + text if t.estimated and text and text != "\u2014" else text     # (worked out from a % alone)
         self.view.show(
-            rate=fmt_num(rate) if rate is not None else None,
+            rate=est(fmt_num(rate)) if rate is not None else None,
             delta=(rolling / rate - 1) if rate and rolling else None,
             spark=list(self._trend), pct=shown[1] if shown else None,
             eta=f"Lv {level + 1} in {eta}" if level and eta else f"Lv {level}" if level else "",
             level=level or None, eta_time=eta or "",
             mesos=fmt_num(m.per_hour(el)),
             net=net if self.cfg["potions_on"] and net != "\u2014" else "",
-            tiles={"Last 5 min": fmt_num(rolling), "Mesos / hr": fmt_num(m.per_hour(el)),
+            tiles={"Last 5 min": est(fmt_num(rolling)), "Mesos / hr": fmt_num(m.per_hour(el)),
                    "Net / hr": net, "Elapsed": fmt_dur(el)},
             details={"% / hr": f"{rate / t.req * 100:.2f}%" if rate and t.req else "\u2014",
-                     "Gained": f"{fmt_short(t.gained)}{f'  (+{t.levels} lvl)' if t.levels else ''}",
-                     "Current": f"{fmt_num(shown[0])} [{shown[1]:.2f}%]" if shown else "\u2014",
+                     "Gained": est(f"{fmt_short(t.gained)}{f'  (+{t.levels} lvl)' if t.levels else ''}"),
+                     "Current": est(f"{fmt_num(shown[0])} [{shown[1]:.2f}%]") if shown else "\u2014",
                      "Mesos": mesos, "Mesos / 5 min": fmt_num(m.per_5min(el)),
                      "Potion cost": (fmt_num(self.session.potions.cost(self._prices().mapping()))
                                      if self.cfg["potions_on"] else "—"),
@@ -4720,6 +5063,8 @@ class App:
                      "Left out": (f"+{fmt_short(m.left_out[0])} / -{fmt_short(m.left_out[1])}"
                                   if any(m.left_out) else "—")},
             state=state, state_text=state_text)
+        if self.level_btn is not None and self.level_btn.winfo_exists():
+            self.level_btn.set(enabled=self._can_type_level())
         waiting = self.session.waiting
         self.session.tick(now)
         if self.session.waiting != waiting:             # just paused by itself: say why now
@@ -4770,6 +5115,8 @@ class App:
     def reset(self):
         self.session.reset()
         self.autolog.reset_clock()
+        self._char_print = self._char_seen = self.other_char_at = None      # (what was known about the character is over too)
+        self._char_diff, self._same_char = 0, False
         self.skip_log = False
         self._show_skip_log()
         self._set_start("Start")

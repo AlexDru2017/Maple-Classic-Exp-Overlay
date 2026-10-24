@@ -715,6 +715,91 @@ app._handle(blank._replace(where="Reading"))
 check("paused while a run waits for a look: the status asks for the inventory", m.RUN_ALERT in app.status.get())
 app.autolog.pending = None
 
+# ---- a bar that shows only a percentage ("EXP. [50.00%]")
+import level_ocr  # noqa: E402
+from pics import badge_scene  # noqa: E402
+
+
+def print_of(name):
+    pic, x0, cy = badge_scene(32, 11, name=name)
+    return level_ocr.name_print(pic, x0, cy, 11)
+
+
+pct = blank._replace(where="Reading", candidates=[(None, 50.0)], confident=True, percent_only=True,
+                     text="[50.00%] (percentage only)")
+app.reset()
+app.reader.level_failures, app.reader.name_print = 0, None
+for _ in range(2):
+    app._handle(pct)
+check("a %-only bar with no level yet says it is reading the level",
+      app.level_wait and "Reading your level" in app.status.get() and not app._can_type_level())
+app.reader.level_failures = m.LEVEL_FAILS_FOR_FALLBACK
+app._handle(pct)
+check("...typing the level in is offered once reading keeps failing, and the status says where",
+      app._can_type_level() and "Level fallback" in app.status.get())
+real_ask = m.simpledialog.askinteger
+m.simpledialog.askinteger = lambda *a, **k: 31
+app.type_level()
+m.simpledialog.askinteger = real_ask
+check("a typed level is used for the estimate", app.tracker.req == 108480 and app.tracker.level_source == "typed")
+app.session.start(m.time.monotonic())
+app._handle(pct)
+check("while tracking, the status and the numbers say they are estimates",
+      "Estimated from the %" in app.status.get() and app.tracker.estimated and app.level == 31)
+
+with_level = pct._replace(level=(30, "badge"))
+app.reset()
+for _ in range(2):
+    app._handle(with_level)
+check("a level read from the badge needs nothing typed", app.tracker.req == 95700 and not app.level_wait
+      and not app._can_type_level() and app.level == 30)
+app.reader.name_print = print_of("Fox")
+app._handle(with_level)
+app.reader.name_print = print_of("Pip2")
+app._handle(with_level)
+check("one different name print isn't another character", app.tracker.req == 95700)
+app.reader.name_print = print_of("Pip2")
+app._handle(with_level)
+check("two in a row are: it starts over and says so, and the old level isn't kept",
+      app.tracker.req is None and "another character" in app.status.get() and app.reader.level is None)
+# carrying the level over when the number goes: only for the same character (a print that matches)
+exact = blank._replace(where="Reading", candidates=[(47850, 50.0)], confident=True)
+
+
+def carry(before, after):
+    app.reset()
+    app.reader.name_print, app.reader.level, app.reader.level_failures = before, None, 0
+    for _ in range(3):
+        app._handle(exact)
+    app.reader.name_print = after
+    app._handle(pct)
+    return app.tracker.req
+
+
+check("the level carries over when the name print is the same", carry(print_of("Fox"), print_of("Fox")) == 95700)
+check("...but not when no print could be taken (the character can't be told)", carry(None, None) is None)
+check("...nor when only one was taken", carry(print_of("Fox"), None) is None and carry(None, print_of("Fox")) is None)
+check("...and the status says it is waiting for the badge", app.level_wait and "Reading your level" in app.status.get())
+carry(print_of("Fox"), print_of("Fox"))
+app.session.start(m.time.monotonic())
+app._handle(pct)
+check("a carried-over level is said to be known from before", "known from before" in app.status.get())
+app.reset()
+app.reader.mode, app.reader.level_failures = "region", m.LEVEL_FAILS_FOR_FALLBACK
+app._handle(pct)
+check("in a selected area the status says the badge can't be read there",
+      "Selected area" in app.status.get() and app._can_type_level())
+app.reader.mode = "window"
+app.reader.name_print = None
+app.found_at, app.pct_note = None, ""
+app.tracker.reset()
+try:
+    app._status_for("")
+    check("the status doesn't crash before the first EXP reading (found_at unset)", True)
+except TypeError:
+    check("the status doesn't crash before the first EXP reading (found_at unset)", False)
+app.reset()
+
 check("the typeface is the bundled one, or it fell back cleanly", app._own_fonts in (True, False) and bool(app.theme.fam["extra"]))
 app.close()
 

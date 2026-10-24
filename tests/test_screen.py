@@ -482,5 +482,165 @@ if m.tesseract_ok:
 else:
     print("     (Tesseract isn't installed: class reading not tested)")
 
+# ---- an EXP bar that shows only a percentage ("EXP. [58.47%]" past about a million EXP)
+from pics import percent_only  # noqa: E402
+for f in sorted(FRAMES.glob("exp_*.png")):
+    bar = cv2.imread(str(f))
+    size = f.stem[4:]
+    reader = m.ScreenReader(m.DigitTemplates.load())
+    got, lay = reader._read((percent_only(bar), 0, 0), "game")
+    check(f"a percentage-only bar is read as one, {size}",
+          got.percent_only and got.confident and got.candidates == [(None, 71.68)] and "71.68" in got.text)
+    check(f"...and still shows the bar and its digits in View capture, {size}", got.image is not None and len(got.boxes) == 4)
+    got, lay = reader._read((bar, 0, 0), "game")
+    check(f"a bar with its number is not percentage-only, {size}", not got.percent_only and got.candidates == [(68601, 71.68)])
+
+# ---- the level badge ("LV." and the level in an orange box), read only when the bar shows no EXP number
+import level_ocr  # noqa: E402
+from pics import badge_scene  # noqa: E402
+
+
+class Says:
+    """Stands in for Tesseract: answers `texts` for the pictures (as many as it was given), and counts runs."""
+    def __init__(self, *texts):
+        self.texts, self.runs = texts, 0
+
+    def read_lines(self, images, chars=None):
+        self.runs += 1
+        return [self.texts[i % len(self.texts)] for i in range(len(images))]
+
+
+for gh in (7, 11, 14, 22, 28):
+    wrong = []
+    for level in (7, 32, 58, 99, 100):
+        pic, x0, cy = badge_scene(level, gh)
+        look, tess = {}, Says(str(level))
+        got = level_ocr.read_level(pic, x0, cy, gh, tess, look)
+        if got != level or tess.runs != 1 or look["image"] is None:
+            wrong.append(f"Lv {level}: {got}")
+    check(f"a complete badge is found and read in one Tesseract run, digits {gh} px ({', '.join(wrong) or 'all'})", not wrong)
+pic, x0, cy = badge_scene(32, 11)
+for name, scene in (("no orange box", badge_scene(32, 11, box=False)), ("no LV label", badge_scene(32, 11, label=False))):
+    look, tess = {}, Says("32")
+    check(f"{name}: no level, and Tesseract isn't even started",
+          level_ocr.read_level(scene[0], scene[1], scene[2], 11, tess, look) is None and tess.runs == 0 and look["why"])
+vote = lambda *t: level_ocr.read_level(pic, x0, cy, 11, Says(*t) if len(t) == 1 else type("S", (), {
+    "read_lines": lambda self, images, chars=None: list(t)})(), {})
+check("6 of 6 sizes agreeing is a level", vote("32", "32", "32", "32", "32", "32") == 32)
+check("4 of 6 agreeing, nothing against, is a level", vote("32", "32", "32", "32", "", "") == 32)
+check("3 of 6 agreeing is not enough", vote("32", "32", "32", "", "", "") is None)
+check("a rival level with 2 votes means no level", vote("32", "32", "32", "32", "52", "52") is None)
+check("a stray digit string isn't a level (0, 3-digit zero, letters)", vote("0", "07", "x", "", "32", "32") is None)
+check("a lone rival vote doesn't spoil 5 of 6", vote("32", "32", "32", "32", "32", "52") == 32)
+check("no Tesseract (None) gives no level", level_ocr.read_level(pic, x0, cy, 11, None, {}) is None)
+# ---- telling characters apart: a small picture of the name (never read as text), compared, kept in memory
+def print_of(name, gh=11, **kw):
+    pic, x0, cy = badge_scene(32, gh, name=name, **kw)
+    return level_ocr.name_print(pic, x0, cy, gh)
+
+
+for gh in (7, 11, 14, 22):
+    names = ("Fox", "Pip", "Pip2", "Pip3", "moss", "Moss", "Moss2", "Ziggy", "XxSlayerxX")
+    wrong = [f"{a}/{b}" for a in names for b in names
+             if level_ocr.same_name(print_of(a, gh), print_of(b, gh)) != (a == b)]
+    check(f"the same name is the same and any other (even one letter off) isn't, digits {gh} px ({', '.join(wrong[:4]) or 'all right'})",
+          not wrong)
+    shifted = [n for n in names if not level_ocr.same_name(print_of(n, gh), print_of(n, gh, shift=1))]
+    check(f"...also when the text sits a pixel over, digits {gh} px ({', '.join(shifted) or 'all right'})", not shifted)
+check("a name row with no text (covered, empty) gives no print, and no print is never 'the same'",
+      print_of(None) is None and not level_ocr.same_name(None, print_of("Fox")) and not level_ocr.same_name(None, None))
+check("a print is a small grid of numbers, not the picture or the text",
+      print_of("Fox").shape == level_ocr.PRINT_SIZE[::-1] and print_of("Fox").dtype.kind == "f")
+
+# ... and the reader asks for it now and then, never reads it under its own window, and backs off when it fails
+def level_reader(level, gh, says):
+    pic, x0, cy = badge_scene(level, gh)
+    r = m.ScreenReader(m.DigitTemplates.load())
+    r.gh, r.exp_anchor, r.own_rect = gh, (x0, cy), None
+    m.TESS, m.tesseract_ok = says, True
+    return r, FakeScreen(pic), (0, 0, pic.shape[1], pic.shape[0])
+
+
+real_monotonic, real_tess, real_ok = m.time.monotonic, m.TESS, m.tesseract_ok
+clock = [100.0]
+m.time.monotonic = lambda: clock[0]
+try:
+    says = Says("32")
+    r, screen, rect = level_reader(32, 11, says)
+    r._read_level(screen, rect)
+    check("the first badge reading is only a candidate", r.level is None and r.level_failures == 0)
+    clock[0] += 1.6
+    r._read_level(screen, rect)
+    check("a second capture that agrees makes it the level", r.level == 32 and r.level_failures == 0 and says.runs == 2)
+    clock[0] += 10
+    r._read_level(screen, rect)
+    check("once known it isn't read again for a while (Tesseract isn't started)", says.runs == 2)
+    r.recheck_level()
+    r._read_level(screen, rect)
+    check("...unless asked to look again now (the % wrapped: a level-up may have happened)", says.runs == 3)
+    check("a new level has to be seen twice again, and the old one stays meanwhile", r.level == 32)
+
+    says = Says("")
+    r, screen, rect = level_reader(32, 11, says)
+    waits = []
+    for _ in range(8):
+        r._read_level(screen, rect)
+        waits.append(round(r.next_level_read - clock[0]))
+        clock[0] = r.next_level_read + 0.01
+    check(f"a failing badge read backs off: 2 s, then 5 s, then 30 s (waits {waits})",
+          waits[:2] == [2, 2] and waits[2:5] == [5, 5, 5] and waits[5:] == [30, 30, 30] and r.level_failures == 8
+          and r.level is None and r.level_look["why"])
+
+    says = Says("32")
+    r, screen, rect = level_reader(32, 11, says)
+    r.own_rect = (r.exp_anchor[0] - 60 * 11, 0, 10 * 11, screen.image.shape[0])      # this window sits on the badge
+    r._read_level(screen, rect)
+    check("this window covering the badge: nothing is read, and it says so",
+          says.runs == 0 and r.level is None and "covering" in r.level_look["why"])
+
+    # the character's name: a print is taken every few seconds, even without Tesseract, and kept only in memory
+    def named(name):
+        pic, x0, cy = badge_scene(32, 11, name=name)
+        r = m.ScreenReader(m.DigitTemplates.load())
+        r.gh, r.exp_anchor, r.own_rect = 11, (x0, cy), None
+        return r, FakeScreen(pic), (0, 0, pic.shape[1], pic.shape[0])
+    r, screen, rect = named("Fox")
+    r._look_at_name(screen, rect)
+    check("the reader takes a print of the name row", level_ocr.same_name(r.name_print, print_of("Fox")))
+    other = FakeScreen(badge_scene(32, 11, name="Fin")[0])
+    r._look_at_name(other, rect)
+    check("...but not again within a few seconds", level_ocr.same_name(r.name_print, print_of("Fox")))
+    clock[0] += 6
+    r._look_at_name(other, rect)
+    check("...and a different name later gives a different print", not level_ocr.same_name(r.name_print, print_of("Fox")))
+    r.own_rect = (r.exp_anchor[0] - 52 * 11, 0, 20 * 11, screen.image.shape[0])
+    clock[0] += 6
+    r._look_at_name(screen, rect)
+    check("this window sitting on the name: no print (it never reads itself)", r.name_print is None)
+
+    says = Says("32")
+    r, screen, rect = level_reader(32, 11, says)
+    m.tesseract_ok = False
+    r._read_level(screen, rect)
+    check("without Tesseract there is nothing to wait for: the typed-level fallback is open at once",
+          says.runs == 0 and r.level is None and r.level_failures >= m.LEVEL_FAILS_FOR_FALLBACK)
+finally:
+    m.time.monotonic, m.TESS, m.tesseract_ok = real_monotonic, real_tess, real_ok
+
+# Select area has no game window, so no badge to find: typing the level in is open at once, and it says why
+from pics import percent_only  # noqa: E402,F811
+bar = percent_only(cv2.imread(str(FRAMES / "exp_win-1280x720.png")))
+r = m.ScreenReader(m.DigitTemplates.load())
+r.use_region({"left": 0, "top": 0, "width": bar.shape[1], "height": bar.shape[0]})
+got = r.read(FakeScreen(bar))
+check("a %-only bar in a selected area is read, with no level, and typing one in is open at once",
+      got.percent_only and got.level is None and r.level_failures >= m.LEVEL_FAILS_FOR_FALLBACK
+      and "Selected area" in r.level_look["why"])
+
+if m.tesseract_ok:
+    game = cv2.imread(str(Path(__file__).resolve().parent.parent / "docs" / "screenshot-game.jpg"))
+    check("the real badge (Lv 32, a JPEG of the game at 1080p) reads as 32 with real Tesseract",
+          level_ocr.read_level(game, 1052, 1044, 11.0, m.TESS, {}) == 32)
+
 print("\nALL PASSED" if not failures else f"\n{failures} FAILED")
 sys.exit(1 if failures else 0)

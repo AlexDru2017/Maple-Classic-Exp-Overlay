@@ -30,7 +30,7 @@ def new_log():
 
 
 def farm(log, t0, seconds, party=1, map_name="Rocky Road II", level=27, every=3, gap_at=None, gap=0, job=None, hidden=False,
-         mesos_at=None, window_at=None, misreads=()):
+         mesos_at=None, window_at=None, misreads=(), estimated=False):
     """100 EXP every `every` seconds (optionally with a pause); returns (end time, logs written).
     mesos_at(t) gives the last inventory look at time t, as the MesoTracker hands it on;
     window_at(t) when a shop, storage or trade window was last seen (or None)."""
@@ -43,7 +43,8 @@ def farm(log, t0, seconds, party=1, map_name="Rocky Road II", level=27, every=3,
             nxt = t + every
         look = mesos_at(t) if mesos_at else None
         seen = window_at(t) if window_at else None
-        entry = log.tick(t, map_name, level, party, look, job, hidden=hidden, window_at=seen, misreads=misreads)
+        entry = log.tick(t, map_name, level, party, look, job, hidden=hidden, window_at=seen, misreads=misreads,
+                         estimated=estimated)
         log.settle(t, True, look, misreads=misreads)
         if entry:
             logged.append(round(t - t0))
@@ -957,6 +958,101 @@ check(f"no log line or run is ever made of EXP lost (lines: {[e['exp'] for e in 
       [e["exp"] for e in log.entries] == [200] and log.runs == [])   # the 5-minute blocks after the loss
 
 
+# ---- a bar that shows only a percentage: EXP is estimated from the level's EXP and the % (Lv 30 needs 95,700)
+def pct_tracker(level=30, p=50.0, source="badge"):
+    tr = m.ExpTracker(); tr.start()
+    for _ in range(3):
+        tr.observe_percent(p, level, source)
+    return tr
+
+
+tr = m.ExpTracker(); tr.start()
+res = tr.observe_percent(50.0, None, None)
+check(f"with no level there is nothing to estimate from, and it says so ({res})",
+      res[0] is False and "level" in res[1] and tr.exp is None and tr.req is None)
+check("a level out of the EXP table isn't guessed",
+      m.ExpTracker().observe_percent(50.0, 150, "badge")[0] is False)
+tr = pct_tracker()
+check(f"a read level and a % give a baseline and an estimated EXP (EXP {tr.exp}, Lv {m.level_for_req(tr.req)})",
+      tr.exp == 47850 and m.level_for_req(tr.req) == 30 and tr.estimated)
+tr.observe_percent(51.0, 30, "badge")
+tr.observe_percent(51.0, 30, "badge")
+check(f"a % that moves up counts as the EXP it is worth (gained {tr.gained})", tr.gained == 957)
+check("an estimate is marked as one, and an exact tracker isn't", exp_tracker().estimated is False)
+
+tr = exp_tracker()                                       # the number was on the bar, then it goes (Lv 30, 50%)
+for p in (51.0, 51.0, 52.0):
+    note = tr.observe_percent(p, None, None)
+check(f"when the number goes, the level it showed carries on, with no jump (gained {tr.gained}, EXP {tr.exp})",
+      tr.gained == 957 and tr.exp == 49764 and tr.estimated)
+tr.observe([(49800, 52.04)], True)
+tr.observe([(49900, 52.14)], True)
+check(f"...and when the number comes back, its rounding isn't EXP either (gained {tr.gained})",
+      tr.gained == 957 + 100 and tr.estimated)
+
+tr = pct_tracker()
+for p in (38.0, 38.0):                                   # dies: -12% of the level
+    note = tr.observe_percent(p, 30, "badge")[1]
+check(f"dying on a %-only bar isn't taken off the EXP gained (note {note!r}, gained {tr.gained}, deaths {tr.deaths})",
+      note == "died" and tr.gained == 0 and tr.deaths == 1)
+
+# a level-up: the % wraps AND the next level is read; a wrap alone never makes one
+tr = pct_tracker(30, 99.79)                              # 95,499 of 95,700
+note = tr.observe_percent(0.3, 30, "badge")[1]
+check(f"a % that wraps with the same level still showing waits for the new level (note {note!r})",
+      "wrapped" in note and tr.levels == 0 and tr.exp == 95499)
+check("...and with no level read at all it waits too", "wrapped" in tr.observe_percent(0.3, None, None)[1])
+tr.observe_percent(0.3, 31, "badge")
+res = tr.observe_percent(0.3, 31, "badge")
+check(f"the next level read twice makes a level-up (gained {tr.gained}, levels {tr.levels}, EXP {tr.exp}, {res})",
+      res == (True, "LEVEL UP!") and tr.levels == 1 and tr.gained == 201 + 325 and tr.exp == 325
+      and tr.req == 108480)
+tr.observe_percent(0.8, 31, "badge")
+check(f"...and counting carries on in the new level (gained {tr.gained})", tr.gained == 201 + 325 + 868 - 325)
+tr = pct_tracker(30, 99.79)
+tr.observe_percent(0.3, 31, "badge")
+tr.observe_percent(0.3, 30, "badge")
+check("a new level seen only once isn't a level-up", tr.levels == 0)
+tr = pct_tracker(30, 50.0)
+tr.observe_percent(50.0, 32, "badge")
+tr.observe_percent(50.0, 32, "badge")
+check("a level that jumps by two without the % wrapping is no level-up", tr.levels == 0)
+
+# a level that disagrees with the one in use, and forgetting it
+tr = pct_tracker(30, 50.0, "typed")
+tr.observe_percent(50.0, 31, "badge")
+check(f"a read level replaces a typed one when nothing was counted yet (Lv {m.level_for_req(tr.req)}, {tr.level_source})",
+      m.level_for_req(tr.req) == 31 and tr.level_source == "badge" and tr.exp == 54240)
+tr = pct_tracker(30, 50.0)
+tr.observe_percent(51.0, 30, "badge")
+tr.observe_percent(51.0, 30, "badge")
+res = tr.observe_percent(51.0, 31, "badge")
+check(f"...but not once EXP was counted: it says the level changed (Lv {m.level_for_req(tr.req)}, {res})",
+      res[0] is False and "level changed" in res[1] and m.level_for_req(tr.req) == 30 and tr.gained == 957)
+tr.forget_level()
+check("forgetting the level (another character) leaves nothing to estimate from",
+      tr.req is None and tr.exp is None and tr.observe_percent(50.0, None, None)[0] is False)
+tr = pct_tracker(30, 99.79)                              # the % wrapped, and the badge never shows the new level
+for _ in range(45):
+    note = tr.observe_percent(0.3, 30, "badge")[1]
+check(f"a wrap the badge never explains doesn't stop tracking for good: it becomes the new start (note {note!r}, EXP {tr.exp})",
+      tr.exp == 287 and tr.gained == 0 and tr.levels == 0)
+tr.observe_percent(0.4, 30, "badge")
+check("...and counting carries on from there", tr.gained == 96)
+tr = exp_tracker()
+tr.observe_percent(50.0, 30, "badge")
+check("a read level that agrees with the carried-over one becomes its source", tr.level_source == "badge")
+tr = m.ExpTracker()
+tr.set_level(30, "typed")
+tr.observe_percent(50.0, 30, "badge")
+check("...and one that agrees with a typed one too", tr.level_source == "badge")
+tr = m.ExpTracker()
+check("a typed level that has no EXP table is refused", tr.set_level(100, "typed") is False and tr.req is None)
+check("a typed level is used like a read one (Lv 30, 'typed')",
+      tr.set_level(30, "typed") and tr.observe_percent(50.0, None, None)[0] is True and tr.exp == 47850
+      and tr.level_source == "typed" and tr.percent_mode)
+
+
 class FakeResponse:
     def __init__(self, data):
         self.data = json.dumps(data).encode()
@@ -1006,11 +1102,26 @@ check(f"misread EXP never inflates the gain (worst over-count {worst:.1%})", wor
 
 # ---- reading the real EXP bar, captured at different game resolutions
 import cv2  # noqa: E402
+import numpy as np  # noqa: E402
 tpl = m.DigitTemplates.load()
 for f in sorted((Path(__file__).parent / "frames").glob("exp_*.png")):
     lay = m.find_exp(cv2.imread(str(f)))
     got = m.read_layout(tpl, lay) if lay else None
     check(f"reads the EXP bar at {f.stem[4:]} ({got})", got == (68601, 71.68))
+
+from pics import percent_only, relabelled  # noqa: E402
+
+for f in sorted((Path(__file__).parent / "frames").glob("exp_*.png")):
+    pic = percent_only(cv2.imread(str(f)))
+    lay = m.find_exp(pic)
+    got = m.read_layout(tpl, lay) if lay else None
+    check(f"finds the bar with only a percentage at {f.stem[4:]} ({got})", got == (None, 71.68))
+
+
+for f in sorted((Path(__file__).parent / "frames").glob("exp_win*.png")):
+    for text in ("", "HP", "MP", "LV"):        # (the game's real label always ends in a dot: "EXP.")
+        check(f"a bare percentage labelled '{text}' is not the EXP bar at {f.stem[4:]}",
+              m.find_exp(relabelled(cv2.imread(str(f)), text)) is None)
 check("a reading that fits a level is trusted", m.fits_exp_table(68601, 71.68))
 tr = m.ExpTracker()
 tr.observe([(68601, 71.68)], True)
@@ -1088,6 +1199,27 @@ check("...and what was earned before leaving is only banked by a window, not the
 s.map_seen("Rocky Road II")
 gains(s, 6.5)
 check("coming out carries on without resetting the mesos", s.exp.running and s.meso.value == 150000)
+
+# the same pausing and carrying on when the bar shows only a % (Lv 30 at 50%, +0.1% every 3 s)
+sp = m.Session(15)
+sp.map_seen("Rocky Road II")
+for _ in range(2):
+    sp.observe_percent(50.0, 30, "badge", clock[0])
+sp.start(clock[0])
+pct = 50.0
+for step in range(60):                                   # 30 s
+    clock[0] += 0.5
+    if step % 6 == 5:
+        pct = round(pct + 0.1, 2)
+        sp.observe_percent(pct, 30, "badge", clock[0])
+    sp.tick(clock[0])
+check(f"a %-only bar is tracked like any other (gained {sp.exp.gained}, running {sp.exp.running})",
+      sp.exp.running and sp.exp.gained == 957)
+idle(sp, 20)
+check("...pauses by itself when the % stops moving", sp.waiting == "idle" and not sp.exp.running)
+pct = round(pct + 0.1, 2)
+sp.observe_percent(pct, 30, "badge", clock[0])
+check("...and carries on when it moves again", sp.waiting is None and sp.exp.running)
 
 s2 = session()
 s2.start(clock[0])
@@ -1520,6 +1652,40 @@ data["runs"] = [old]
 (folder / "log.json").write_text(json.dumps(data))
 loaded = m.AutoLog(15, folder / "log.json", folder / "log.txt")
 check("an old run (no flags) loads, keeps its seal and can still be shared", loaded.unshared_runs() == [old])
+
+# ---- EXP estimated from a % alone stays on this PC: marked in the log, never shared
+log, path = new_log()
+t, _ = farm(log, 0, 1000, estimated=True)
+check(f"runs of estimated EXP are saved, marked, and never shared ({len(log.runs)} runs)",
+      log.runs and all(r.get("estimated") for r in log.runs) and log.unshared_runs() == [])
+check("...an older overlay can't share them either (their seal doesn't verify)",
+      all(not log.sealed(r, m._SEALED_RUN) for r in log.runs))
+check("...and the 5-minute log lines say they are estimates", log.entries and all(e.get("estimated") for e in log.entries))
+log.save()
+again = m.AutoLog(15, path, path.with_suffix(".txt"))
+check("...all of it survives saving and loading", again.runs and all(r.get("estimated") for r in again.runs)
+      and again.entries and all(e.get("estimated") for e in again.entries) and again.unshared_runs() == [])
+log, _ = new_log()
+t, _ = farm(log, 0, 200)
+t, _ = farm(log, t, 800, estimated=True)                     # exact for a while, then only a %
+check("a run that is estimated for even part of its time isn't shared", log.runs and log.unshared_runs() == [])
+log, _ = new_log()
+t, _ = farm(log, 0, 1000)
+check("exact runs are still shared as before", log.runs and len(log.unshared_runs()) == len(log.runs)
+      and not any(e.get("estimated") for e in log.entries))
+log, _ = new_log()
+t, _ = farm(log, 0, 1100, estimated=True, mesos_at=lambda t: (round(t * 10), t))
+check("an estimated run never waits for a mesos look, and keeps the seal an older overlay can't use",
+      log.runs and all(not r.get("pending") and r["seal"] == "estimated" for r in log.runs) and log.unshared_runs() == [])
+line = {"date": "2026-10-08", "map": "Rocky Road II", "level": 60, "party": 1, "class": "Bandit", "exp": 4000,
+        "seconds": 1800, "mesos": 0, "mesos_seconds": 0}
+check("an estimated line says so in its row and in the copied text",
+      m.log_row(dict(line, estimated=True))[6] == "≈" + m.log_row(line)[6]
+      and "≈8,000exp/hr" in m.format_entry(dict(line, estimated=True)))
+check("an exact line shows no approx sign", "≈" not in m.log_row(line)[6] and "≈" not in m.format_entry(line))
+check("party sizes merged into one line stay marked if any of them was estimated",
+      m.log_row(m.merged([dict(line, party=3), dict(line, party=4, estimated=True)]))[6].startswith("≈")
+      and not m.log_row(m.merged([dict(line, party=3), dict(line, party=4)]))[6].startswith("≈"))
 
 # mesos for the site only from a look at the start and one within 30 s after the end
 log, _ = new_log()
