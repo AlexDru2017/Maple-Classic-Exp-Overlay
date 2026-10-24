@@ -293,7 +293,8 @@ for old in sorted((Path(__file__).parent / "upgrade").iterdir()):
     m.CONFIG_PATH = real_config
     check(f"updating from {old.name}: every log line, run, rename and setting is kept",
           len(log.entries) == len(before["entries"]) and all(same) and not any(log.edited(e) for e in log.entries)
-          and len(log.runs) == len(before.get("runs", [])) and all(log.sealed(r, m._SEALED_RUN) for r in log.runs)
+          and len(log.runs) == len(before.get("runs", []))
+          and all(log.sealed(r, m._SEALED_RUN) or r.get("estimated") for r in log.runs)      # (an estimated run's seal is meant not to verify)
           and log.aliases == before["aliases"] and not list(folder.glob("exp_log.damaged-*"))
           and (cfg["pos"], cfg["transparency"], cfg["gap_seconds"], cfg["topmost"]) == ([5300, 800], 30, 20, False))
     # ...and carrying on farming afterwards, with the old lines (and any notes on them) left as they were
@@ -305,8 +306,15 @@ for old in sorted((Path(__file__).parent / "upgrade").iterdir()):
           all(k in now_notes and now_notes[k] == v for k, v in old_notes.items())
           and len(after) == len(before["entries"]) + 1)
 check("the newest upgrade fixture has notes in it (so keeping them is really tested)",
-      sum("note" in e for e in json.loads((Path(__file__).parent / "upgrade" / "0.9.11-beta" / "exp_log.json")
+      sum("note" in e for e in json.loads((Path(__file__).parent / "upgrade" / "0.9.12-beta" / "exp_log.json")
                                           .read_text(encoding="utf-8"))["entries"]) >= 3)
+# 0.9.12-beta's fixture holds an estimated line and run (a bar with only a %): they survive an update and stay on this PC
+folder = Path(tempfile.mkdtemp())
+shutil.copy2(Path(__file__).parent / "upgrade" / "0.9.12-beta" / "exp_log.json", folder / "log.json")
+log = m.AutoLog(15, folder / "log.json", folder / "log.txt")
+check("an estimated line and run from 0.9.12-beta are still marked after loading, and the run is never offered for sharing",
+      any(e.get("estimated") for e in log.entries) and any(r.get("estimated") for r in log.runs)
+      and all(not r.get("estimated") for r in log.unshared_runs()) and len(log.unshared_runs()) >= 1)
 
 
 # ---- personal notes on log lines: only on this PC, and never lost
