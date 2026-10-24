@@ -704,50 +704,93 @@ class App:
         win.attributes("-topmost", bool(self.cfg["topmost"]))
         for delay in (0, 150, 800):
             win.after(delay, lambda: PLATFORM.style_window(win, INK, TEXT_DIM) if win.winfo_exists() else None)
-        body = tk.Frame(win, bg=BG)
-        body.pack(padx=th.px(20), pady=th.px(16))
-        dim = dict(bg=BG, fg=DIM, font=th.font("regular", 11))
-        val = dict(bg=BG, fg=FG, font=th.font("semibold", 11))
-        r = 0
-        for title, rows in sections:
-            tk.Label(body, text=title, bg=BG, fg=ACCENT, font=th.font("bold", 12), anchor="w").grid(
-                row=r, column=0, columnspan=2, sticky="w", pady=(th.px(10) if r else 0, th.px(3)))
-            r += 1
-            for label, value in rows:
-                tk.Label(body, text=label, anchor="w", **dim).grid(row=r, column=0, sticky="w")
-                tk.Label(body, text=str(value), anchor="e", justify="right", **val).grid(
-                    row=r, column=1, sticky="e", padx=(th.px(28), 0))
-                r += 1
-        bars = log_details.pace(entries)[-60:]
-        if len(bars) >= 2:                                   # the pace chart: EXP per hour of each 5-minute stretch
-            tk.Label(body, text="Pace (EXP per hour, each 5 minutes)", bg=BG, fg=ACCENT, font=th.font("bold", 12),
-                     anchor="w").grid(row=r, column=0, columnspan=2, sticky="w", pady=(th.px(10), th.px(3)))
-            cw, ch = th.px(420), th.px(90)
-            cv = tk.Canvas(body, width=cw, height=ch, bg=LIST_BG, highlightthickness=0)
-            cv.grid(row=r + 1, column=0, columnspan=2, sticky="w")
-            top = max(bars) or 1
-            step = cw / len(bars)
-            for i, v in enumerate(bars):
-                h = max(1, (ch - th.px(6)) * v / top)
-                cv.create_rectangle(i * step + 1, ch - h, (i + 1) * step - 1, ch, fill=ACCENT, width=0)
-            cv.create_text(cw - 4, 8, text=f"{top:,.0f}", fill=DIM, anchor="e", font=th.font("regular", 9))
-            r += 2
         note = notes_of(entries)
-        if note:
-            tk.Label(body, text="Note", bg=BG, fg=ACCENT, font=th.font("bold", 12), anchor="w").grid(
-                row=r, column=0, columnspan=2, sticky="w", pady=(th.px(10), th.px(3)))
-            tk.Label(body, text=note, wraplength=th.px(420), justify="left", anchor="w", **val).grid(
-                row=r + 1, column=0, columnspan=2, sticky="w")
-        bar = tk.Frame(win, bg=BG)
-        bar.pack(fill="x", padx=th.px(20), pady=(0, th.px(16)))
+        bars = log_details.pace(entries)[-60:]
+        state = {"z": 1.0, "ref": None, "job": None}
 
         def copy():
             self.root.clipboard_clear()
             self.root.clipboard_append(log_details.as_text(sections))
-        Button(bar, th, text="Copy", kind="secondary", width=90, height=34, radius=10, size=12, command=copy,
-               bg=BG).pack(side="left")
-        Button(bar, th, text="Close", kind="ghost", width=90, height=34, radius=10, size=12, command=win.destroy,
-               bg=BG).pack(side="right")
+
+        def build(z):
+            """Draws everything in the window at zoom z (text, spacing, chart and buttons all scale together)."""
+            for child in win.winfo_children():
+                child.destroy()
+            P = lambda n: th.px(n * z)                       # noqa: E731
+            F = lambda weight, size: th.font(weight, size * z)   # noqa: E731
+            body = tk.Frame(win, bg=BG)
+            body.pack(padx=P(20), pady=P(16), fill="both", expand=True)
+            dim = dict(bg=BG, fg=DIM, font=F("regular", 11))
+            val = dict(bg=BG, fg=FG, font=F("semibold", 11))
+            r = 0
+            for title, rows in sections:
+                tk.Label(body, text=title, bg=BG, fg=ACCENT, font=F("bold", 12), anchor="w").grid(
+                    row=r, column=0, columnspan=2, sticky="w", pady=(P(10) if r else 0, P(3)))
+                r += 1
+                for label, value in rows:
+                    tk.Label(body, text=label, anchor="w", **dim).grid(row=r, column=0, sticky="w")
+                    tk.Label(body, text=str(value), anchor="e", justify="right", **val).grid(
+                        row=r, column=1, sticky="e", padx=(P(28), 0))
+                    r += 1
+            if len(bars) >= 2:                               # the pace chart: EXP per hour of each 5-minute stretch
+                tk.Label(body, text="Pace (EXP per hour, each 5 minutes)", bg=BG, fg=ACCENT, font=F("bold", 12),
+                         anchor="w").grid(row=r, column=0, columnspan=2, sticky="w", pady=(P(10), P(3)))
+                cw, ch = P(420), P(90)
+                cv = tk.Canvas(body, width=cw, height=ch, bg=LIST_BG, highlightthickness=0)
+                cv.grid(row=r + 1, column=0, columnspan=2, sticky="w")
+                top = max(bars) or 1
+                step = cw / len(bars)
+                for i, v in enumerate(bars):
+                    h = max(1, (ch - P(6)) * v / top)
+                    cv.create_rectangle(i * step + 1, ch - h, (i + 1) * step - 1, ch, fill=ACCENT, width=0)
+                cv.create_text(cw - 4, 8, text=f"{top:,.0f}", fill=DIM, anchor="e", font=F("regular", 9))
+                r += 2
+            if note:
+                tk.Label(body, text="Note", bg=BG, fg=ACCENT, font=F("bold", 12), anchor="w").grid(
+                    row=r, column=0, columnspan=2, sticky="w", pady=(P(10), P(3)))
+                tk.Label(body, text=note, wraplength=P(420), justify="left", anchor="w", **val).grid(
+                    row=r + 1, column=0, columnspan=2, sticky="w")
+            bar = tk.Frame(win, bg=BG)
+            bar.pack(side="bottom", fill="x", padx=P(20), pady=(0, P(16)))
+            Button(bar, th, text="Copy", kind="secondary", width=90 * z, height=34 * z, radius=10 * z, size=12 * z,
+                   command=copy, bg=BG).pack(side="left")
+            Button(bar, th, text="Close", kind="ghost", width=90 * z, height=34 * z, radius=10 * z, size=12 * z,
+                   command=win.destroy, bg=BG).pack(side="right")
+            body.pack_configure(side="top")
+            state["z"] = z
+
+        def zoom_now():
+            state["job"] = None
+            if not win.winfo_exists() or not state["ref"]:
+                return
+            rw, rh = state["ref"]
+            z = min(win.winfo_width() / rw, win.winfo_height() / rh)
+            z = round(max(ZOOM_MIN, min(ZOOM_MAX, z)) / ZOOM_STEP) * ZOOM_STEP
+            if abs(z - state["z"]) > 1e-6:
+                build(z)
+                win.update_idletasks()
+                while (z > ZOOM_MIN + 1e-6 and (win.winfo_reqwidth() > win.winfo_width()       # (text doesn't grow in
+                                                or win.winfo_reqheight() > win.winfo_height())):   # a straight line: step down until it fits)
+                    z = round(z - ZOOM_STEP, 2)
+                    build(z)
+                    win.update_idletasks()
+
+        def resized(event):
+            if event.widget is not win or not state["ref"]:
+                return
+            if state["job"]:
+                win.after_cancel(state["job"])
+            state["job"] = win.after(250, zoom_now)
+
+        build(1.0)
+        win.update_idletasks()
+        state["ref"] = (win.winfo_reqwidth(), win.winfo_reqheight())      # the size that is zoom 1
+        win.geometry(f"{state['ref'][0]}x{state['ref'][1]}")              # (fixed from here: only the player changes it)
+        win.minsize(int(state["ref"][0] * ZOOM_MIN), int(state["ref"][1] * ZOOM_MIN))
+        win.resizable(True, True)
+        win.bind("<Configure>", resized)
+        win.zoom_state = state
+        return win
         win.bind("<Escape>", lambda e: win.destroy())
 
     def _copy(self, entries):
